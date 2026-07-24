@@ -1201,6 +1201,16 @@ static const char agent_glm_syntax_reminder[] =
     "<tool_call>$TOOL_NAME<arg_key>$PARAMETER_NAME</arg_key>"
     "<arg_value>$PARAMETER_VALUE</arg_value></tool_call>\n";
 
+static const char agent_laguna_syntax_reminder[] =
+    "Laguna tool-call syntax reminder:\n"
+    "<tool_call>$TOOL_NAME<arg_key>$PARAMETER_NAME</arg_key>"
+    "<arg_value>$PARAMETER_VALUE</arg_value></tool_call>\n";
+
+static const char *agent_tagged_syntax_reminder(agent_tool_syntax syntax) {
+    return syntax == AGENT_TOOL_SYNTAX_LAGUNA ?
+        agent_laguna_syntax_reminder : agent_glm_syntax_reminder;
+}
+
 #define AGENT_SYSTEM_PROMPT_REMINDER_TOKENS 50000
 
 static char *agent_build_system_prompt_reminder(ds4_engine *engine,
@@ -1730,7 +1740,7 @@ static void agent_glm_tool_parse(agent_dsml_parser *p) {
             const char *value_end = strstr(raw + p->param_value_start, arg_value_close);
             if (!value_end) {
                 const char *call_end = strstr(raw + p->param_value_start, close);
-                if (call_end) agent_dsml_set_error(p, "unterminated <arg_value> in GLM tool call");
+                if (call_end) agent_dsml_set_error(p, "unterminated <arg_value> in tagged tool call");
                 return;
             }
             agent_tool_call_add_arg(&p->current, p->param_name ? p->param_name : "",
@@ -1774,13 +1784,13 @@ static void agent_glm_tool_parse(agent_dsml_parser *p) {
                 if (agent_bytes_partial_prefix_at(lt, end, arg_key) ||
                     agent_bytes_partial_prefix_at(lt, end, close))
                     return;
-                agent_dsml_set_error(p, "expected <arg_key> or </tool_call> in GLM tool call");
+                agent_dsml_set_error(p, "expected <arg_key> or </tool_call> in tagged tool call");
                 return;
             }
             const char *name_end = lt;
             agent_trim_span(&name_start, &name_end);
             if (name_start >= name_end) {
-                agent_dsml_set_error(p, "GLM tool call without function name");
+                agent_dsml_set_error(p, "tagged tool call without function name");
                 return;
             }
             agent_tool_call_free(&p->current);
@@ -1799,21 +1809,21 @@ static void agent_glm_tool_parse(agent_dsml_parser *p) {
 
         if (!agent_bytes_starts_with(cur, end, arg_key)) {
             if (agent_bytes_partial_prefix_at(cur, end, arg_key)) return;
-            agent_dsml_set_error(p, "expected <arg_key> in GLM tool call");
+            agent_dsml_set_error(p, "expected <arg_key> in tagged tool call");
             return;
         }
         cur += sizeof(arg_key) - 1;
         const char *key_end_mut = strstr(cur, arg_key_close);
         if (!key_end_mut) {
             const char *call_end = strstr(cur, close);
-            if (call_end) agent_dsml_set_error(p, "unterminated <arg_key> in GLM tool call");
+            if (call_end) agent_dsml_set_error(p, "unterminated <arg_key> in tagged tool call");
             return;
         }
         const char *key_start = cur;
         const char *key_end = key_end_mut;
         agent_trim_span(&key_start, &key_end);
         if (key_start >= key_end) {
-            agent_dsml_set_error(p, "empty <arg_key> in GLM tool call");
+            agent_dsml_set_error(p, "empty <arg_key> in tagged tool call");
             return;
         }
         char *key = xstrndup(key_start, (size_t)(key_end - key_start));
@@ -1825,7 +1835,7 @@ static void agent_glm_tool_parse(agent_dsml_parser *p) {
                 return;
             }
             free(key);
-            agent_dsml_set_error(p, "expected <arg_value> in GLM tool call");
+            agent_dsml_set_error(p, "expected <arg_value> in tagged tool call");
             return;
         }
         cur += sizeof(arg_value) - 1;
@@ -1977,6 +1987,40 @@ static void agent_dsml_feed(agent_dsml_parser *p, const char *s, size_t n) {
         else
             p->param_close_prefix = false;
     }
+}
+
+/* Check a candidate token before it becomes part of a tagged tool call.  Replay
+ * is intentionally used only on ambiguous structural bytes, so the normal
+ * generation path and parameter payloads pay no extra work. */
+static bool agent_tagged_structural_candidate_valid(
+        const agent_dsml_parser *p, const char *text, size_t text_len) {
+    if (!p || !text || !agent_tool_syntax_is_tagged(p->syntax) ||
+        p->state != AGENT_DSML_STRUCTURAL || !p->raw)
+        return true;
+
+    const bool candidate_has_tag = memchr(text, '<', text_len) != NULL;
+    const bool pending_tag =
+        p->parse_pos < p->raw_len &&
+        memchr(p->raw + p->parse_pos, '<', p->raw_len - p->parse_pos) != NULL;
+    if (!candidate_has_tag && !pending_tag) return true;
+
+    agent_dsml_parser probe = {
+        .syntax = p->syntax,
+        .state = AGENT_DSML_SEARCH,
+    };
+    agent_dsml_feed(&probe, p->raw, p->raw_len);
+    if (probe.state != AGENT_DSML_ERROR)
+        agent_dsml_feed(&probe, text, text_len);
+    const bool valid = probe.state != AGENT_DSML_ERROR;
+    agent_dsml_parser_free(&probe);
+    return valid;
+}
+
+static bool agent_tagged_structural_candidate_allowed(
+        const agent_dsml_parser *p, const char *text, size_t text_len,
+        bool stop_token) {
+    return agent_tagged_structural_candidate_valid(p, text, text_len) &&
+           (!stop_token || (p && p->glm_after_call));
 }
 
 /* ============================================================================
@@ -7059,6 +7103,51 @@ static void test_agent_edit_upto_prompt_is_opt_in(void) {
     free(glm_upto);
 }
 
+static void test_agent_tagged_structural_candidate_guard(void) {
+    agent_dsml_parser p = {
+        .syntax = AGENT_TOOL_SYNTAX_LAGUNA,
+        .state = AGENT_DSML_SEARCH,
+    };
+    const char *start = "<tool_call>bash";
+    agent_dsml_feed(&p, start, strlen(start));
+    AGENT_TEST_ASSERT(p.state == AGENT_DSML_STRUCTURAL);
+    AGENT_TEST_ASSERT(agent_tagged_structural_candidate_valid(
+        &p, "<arg_key>", strlen("<arg_key>")));
+    AGENT_TEST_ASSERT(!agent_tagged_structural_candidate_valid(
+        &p, "<e", strlen("<e")));
+    AGENT_TEST_ASSERT(!agent_tagged_structural_candidate_allowed(
+        &p, "", 0, true));
+
+    const char *key = "<arg_key>command</arg_key>";
+    agent_dsml_feed(&p, key, strlen(key));
+    AGENT_TEST_ASSERT(p.state == AGENT_DSML_STRUCTURAL);
+    AGENT_TEST_ASSERT(agent_tagged_structural_candidate_valid(
+        &p, "<arg_value>", strlen("<arg_value>")));
+    AGENT_TEST_ASSERT(!agent_tagged_structural_candidate_valid(
+        &p, "<v", strlen("<v")));
+
+    agent_dsml_feed(&p, "<v", strlen("<v"));
+    AGENT_TEST_ASSERT(p.state == AGENT_DSML_ERROR);
+    AGENT_TEST_ASSERT(strstr(p.error, "tagged tool call") != NULL);
+    AGENT_TEST_ASSERT(strstr(agent_tagged_syntax_reminder(
+        AGENT_TOOL_SYNTAX_LAGUNA), "Laguna") != NULL);
+    agent_dsml_parser_free(&p);
+
+    agent_dsml_parser complete = {
+        .syntax = AGENT_TOOL_SYNTAX_LAGUNA,
+        .state = AGENT_DSML_SEARCH,
+    };
+    const char *call =
+        "<tool_call>list<arg_key>path</arg_key><arg_value>.</arg_value>"
+        "</tool_call>";
+    agent_dsml_feed(&complete, call, strlen(call));
+    AGENT_TEST_ASSERT(complete.state == AGENT_DSML_STRUCTURAL);
+    AGENT_TEST_ASSERT(complete.glm_after_call);
+    AGENT_TEST_ASSERT(agent_tagged_structural_candidate_allowed(
+        &complete, "</assistant>", strlen("</assistant>"), true));
+    agent_dsml_parser_free(&complete);
+}
+
 static void test_agent_glm_tools_prompt_is_native(void) {
     char *prompt = agent_build_glm_tools_prompt(false);
 
@@ -7165,6 +7254,7 @@ static void ds4_agent_unit_tests_run(void) {
     test_agent_glm_stream_greedy_sampling_boundaries();
     test_agent_dsml_stream_tool_call_chunked();
     test_agent_glm_tool_parser_rejects_missing_value();
+    test_agent_tagged_structural_candidate_guard();
 }
 #endif
 
@@ -8596,6 +8686,71 @@ static int worker_sample_with_mode(agent_worker *w, const agent_config *cfg,
                               rng);
 }
 
+/* Greedy structural decoding is normally enough, but a quantized model can
+ * occasionally rank a malformed tag fragment first.  Select the highest-ranked
+ * token that keeps the tagged grammar viable before committing it to the KV
+ * cache.  The top-k scan runs only after the original argmax is proven invalid. */
+static int worker_repair_tagged_structural_token(
+        agent_worker *w, agent_stream_renderer *stream,
+        ds4_think_mode think_mode, int token) {
+    if (!stream || !stream->dsml_active || !stream->parser ||
+        !agent_tool_syntax_is_tagged(stream->syntax) ||
+        stream->parser->state != AGENT_DSML_STRUCTURAL)
+        return token;
+
+    size_t text_len = 0;
+    char *text = ds4_token_text(w->engine, token, &text_len);
+    const bool stop =
+        ds4_token_is_stop_for_think_mode(w->engine, token, think_mode);
+    if (agent_tagged_structural_candidate_allowed(
+            stream->parser, text, text_len, stop)) {
+        free(text);
+        return token;
+    }
+
+    enum { REPAIR_CANDIDATES = 64 };
+    ds4_token_score scores[REPAIR_CANDIDATES];
+    const int count =
+        ds4_session_top_logprobs(w->session, scores, REPAIR_CANDIDATES);
+    for (int i = 0; i < count; i++) {
+        const int candidate = scores[i].id;
+        if (candidate < 0)
+            continue;
+        const bool candidate_stop =
+            ds4_token_is_stop_for_think_mode(w->engine, candidate, think_mode);
+
+        size_t candidate_len = 0;
+        char *candidate_text =
+            ds4_token_text(w->engine, candidate, &candidate_len);
+        const bool candidate_valid = agent_tagged_structural_candidate_allowed(
+            stream->parser, candidate_text, candidate_len, candidate_stop);
+        if (candidate_valid) {
+            agent_trace(w,
+                        "%s structural token repair rejected=%d accepted=%d rank=%d "
+                        "rejected_text=%.*s accepted_text=%.*s",
+                        stream->syntax == AGENT_TOOL_SYNTAX_LAGUNA ?
+                            "laguna" : "glm",
+                        token,
+                        candidate,
+                        i + 1,
+                        (int)(text_len > 48 ? 48 : text_len),
+                        text ? text : "",
+                        (int)(candidate_len > 48 ? 48 : candidate_len),
+                        candidate_text ? candidate_text : "");
+            free(candidate_text);
+            free(text);
+            return candidate;
+        }
+        free(candidate_text);
+    }
+
+    agent_trace(w, "%s structural token repair found no valid top-%d alternative",
+                stream->syntax == AGENT_TOOL_SYNTAX_LAGUNA ? "laguna" : "glm",
+                REPAIR_CANDIDATES);
+    free(text);
+    return token;
+}
+
 static void worker_set_greedy_sampling(agent_worker *w, bool greedy) {
     pthread_mutex_lock(&w->mu);
     if (w->status.greedy_sampling != greedy) {
@@ -8773,6 +8928,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 status_greedy_sampling = greedy_sampling;
             }
             int token = worker_sample_with_mode(w, cfg, greedy_sampling, &rng);
+            if (greedy_sampling) {
+                token = worker_repair_tagged_structural_token(
+                    w, &stream, think_mode, token);
+            }
             if (ds4_token_is_stop_for_think_mode(w->engine, token, think_mode)) {
                 if (agent_tool_syntax_is_tagged(tool_syntax) &&
                     token != ds4_token_eos(w->engine)) {
@@ -8890,7 +9049,7 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
             agent_buf_puts(&b, dsml.error[0] ? dsml.error : "parse error");
             agent_buf_puts(&b, "\n");
             agent_buf_puts(&b, agent_tool_syntax_is_tagged(tool_syntax) ?
-                           agent_glm_syntax_reminder :
+                           agent_tagged_syntax_reminder(tool_syntax) :
                            agent_dsml_syntax_reminder);
             tool_result = agent_buf_take(&b);
         } else {
