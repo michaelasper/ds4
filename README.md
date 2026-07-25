@@ -119,6 +119,7 @@ Download one main model. **Prefer the imatrix versions.**
 ./download_model.sh ds4f-mxfp4   # native MXFP4 experts, about 156 GB
 ./download_model.sh pro-q2-imatrix  # 512 GB RAM machines, PRO q2 imatrix quant
 ./download_model.sh laguna-q4  # >= 96 GB Apple Silicon, official Poolside Q4_K_M
+./download_model.sh laguna-q2-q3  # 64 GB class, mixed routed Q2_K/Q3_K
 ```
 
 The MXFP4 GGUF preserves DeepSeek's released MXFP4 routed-expert weights rather
@@ -184,12 +185,19 @@ file are not supported for GLM yet.
 
 Laguna S 2.1 support targets Poolside's official imatrix-quantized Q4_K_M GGUF.
 The current 63.56 GiB recipe uses Q4_K routed experts and Q8_0 signal-path
-weights. DwarfStar also accepts Poolside's earlier 70.01 GiB recipe with F16
-attention and mixed Q4_K/Q6_K experts. Laguna currently requires Metal and full
-model residency; SSD streaming, distributed inference, CUDA, ROCm, and the
-DFlash draft model are rejected explicitly. Both files fit comfortably on a
-96 or 128 GiB Mac. CLI, agent, and server use Laguna's native chat, interleaved
-reasoning, and tagged tool-call formats:
+weights. It runs with full residency on Metal or ROCm. DwarfStar also accepts
+Poolside's earlier 70.01 GiB recipe with F16 attention and mixed Q4_K/Q6_K
+experts on Metal. These files fit comfortably on a 96 or 128 GiB machine.
+
+For lower-memory systems, `laguna-q2-q3` downloads a 44.95 GiB mixed quant. It
+retains the official file's dense weights, uses Q2_K routed experts in layers
+1 through 20, and Q3_K routed experts in layers 21 through 47. This is the
+smaller Laguna layout and is intended for full residency on 64 GB class
+systems. On Linux, both it and the official Q4_K_M GGUF are validated on the
+Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`) in Strix Halo.
+
+CLI, agent, and server use Laguna's native chat, interleaved reasoning, and
+tagged tool-call formats:
 
 ```sh
 ./download_model.sh laguna-q4
@@ -197,6 +205,24 @@ reasoning, and tagged tool-call formats:
 ./ds4-agent -m gguf/laguna-s-2.1-Q4_K_M.gguf -c 32768
 ./ds4-server -m gguf/laguna-s-2.1-Q4_K_M.gguf -c 32768
 ```
+
+For Strix Halo:
+
+```sh
+./download_model.sh laguna-q2-q3
+make strix-halo
+./ds4 --rocm -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
+./ds4-agent --rocm -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
+./ds4-server --rocm -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
+```
+
+On the development Strix Halo, a 4,440-token prompt ran at about 153 tokens/s
+and short-context generation at about 25.5 tokens/s. Generation after an
+8,838-token prompt remained about 21.7 tokens/s. With the official Q4_K_M
+GGUF, the same machine measured about 134 tokens/s for a 4,440-token prefill
+and 22.3 tokens/s for short-context generation. Laguna currently requires full
+model residency; SSD streaming, distributed inference, tensor parallelism,
+and the DFlash draft model are not implemented.
 
 The shipped GGUF is configured for a 262144-token context. Laguna defaults to
 temperature 1.0, top-k 20, top-p 1.0, and min-p 0; explicit sampling options

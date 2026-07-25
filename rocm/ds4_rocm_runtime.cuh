@@ -26,7 +26,8 @@ static int g_glm_model;
 enum {
     DS4_ROCM_N_EXPERT = 256u,
     DS4_ROCM_MAX_N_EXPERT = 384u,
-    DS4_ROCM_N_EXPERT_USED = 8u,
+    DS4_ROCM_DEFAULT_N_EXPERT_USED = 8u,
+    DS4_ROCM_N_EXPERT_USED = 10u,
     DS4_ROCM_STREAM_READ_WORKERS = DS4_ROCM_N_EXPERT_USED * 3u,
     DS4_ROCM_STREAM_READ_DEFAULT_WORKERS = 16u,
     DS4_ROCM_STREAM_READ_MAX_JOBS = DS4_ROCM_MAX_N_EXPERT * 3u,
@@ -279,6 +280,10 @@ static int g_model_load_progress_started;
 static int g_model_load_progress_tty;
 static void *g_cuda_tmp;
 static uint64_t g_cuda_tmp_bytes;
+/* Routed MoE can be called from wrappers whose output temporaries already
+ * occupy g_cuda_tmp. Keep its internal sort/tile workspace disjoint. */
+static void *g_cuda_moe_tmp;
+static uint64_t g_cuda_moe_tmp_bytes;
 static void *g_model_stage_raw[4];
 static void *g_model_stage[4];
 static cudaEvent_t g_model_stage_event[4];
@@ -584,6 +589,27 @@ static void *cuda_tmp_alloc(uint64_t bytes, const char *what) {
     g_cuda_tmp = ptr;
     g_cuda_tmp_bytes = bytes;
     return g_cuda_tmp;
+}
+
+static void *cuda_moe_tmp_alloc(uint64_t bytes, const char *what) {
+    if (bytes == 0) return NULL;
+    if (g_cuda_moe_tmp_bytes >= bytes) return g_cuda_moe_tmp;
+    if (g_cuda_moe_tmp) {
+        (void)cudaFree(g_cuda_moe_tmp);
+        g_cuda_moe_tmp = NULL;
+        g_cuda_moe_tmp_bytes = 0;
+    }
+    void *ptr = NULL;
+    cudaError_t err = cudaMalloc(&ptr, (size_t)bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "MoE temp alloc failed for %s (%.2f MiB): %s\n",
+                what ? what : "scratch", (double)bytes / 1048576.0, cudaGetErrorString(err));
+        (void)cudaGetLastError();
+        return NULL;
+    }
+    g_cuda_moe_tmp = ptr;
+    g_cuda_moe_tmp_bytes = bytes;
+    return g_cuda_moe_tmp;
 }
 
 static int cuda_attention_score_buffer_fits(uint32_t n_comp) {
@@ -5879,6 +5905,11 @@ extern "C" void ds4_gpu_cleanup(void) {
         g_cuda_tmp = NULL;
         g_cuda_tmp_bytes = 0;
     }
+    if (g_cuda_moe_tmp) {
+        (void)cudaFree(g_cuda_moe_tmp);
+        g_cuda_moe_tmp = NULL;
+        g_cuda_moe_tmp_bytes = 0;
+    }
     for (size_t i = 0; i < 4; i++) {
         if (g_model_stage_event[i]) {
             (void)cudaEventDestroy(g_model_stage_event[i]);
@@ -6361,7 +6392,7 @@ extern "C" void ds4_gpu_print_memory_report(const char *label) {
     fprintf(stderr,
             DS4_GPU_LOG_PREFIX "memory %s: used=%.2f GiB free=%.2f GiB total=%.2f GiB "
             "placement=%s model_image=%.2f GiB range_cache=%.2f GiB "
-            "q8_f16_cache=%.2f GiB scratch=%.2f GiB",
+            "q8_f16_cache=%.2f GiB scratch=%.2f GiB moe_scratch=%.2f GiB",
             label ? label : "",
             (double)used_b / 1073741824.0,
             (double)free_b / 1073741824.0,
@@ -6370,7 +6401,8 @@ extern "C" void ds4_gpu_print_memory_report(const char *label) {
             (double)cuda_model_image_bytes() / 1073741824.0,
             (double)g_model_range_bytes / 1073741824.0,
             (double)g_q8_f16_bytes / 1073741824.0,
-            (double)g_cuda_tmp_bytes / 1073741824.0);
+            (double)g_cuda_tmp_bytes / 1073741824.0,
+            (double)g_cuda_moe_tmp_bytes / 1073741824.0);
     fprintf(stderr, "\n");
 }
 
