@@ -3875,7 +3875,9 @@ static int glm_router_select_launch(
         float expert_weight_scale,
         uint32_t n_tokens) {
     const uint32_t active_n_expert = n_expert != 0u ? n_expert : DS4_ROCM_N_EXPERT;
-    const uint32_t active_n_expert_used = n_expert_used != 0u ? n_expert_used : DS4_ROCM_N_EXPERT_USED;
+    const uint32_t active_n_expert_used =
+        n_expert_used != 0u ?
+            n_expert_used : DS4_ROCM_DEFAULT_N_EXPERT_USED;
     const float active_scale = expert_weight_scale != 0.0f ? expert_weight_scale : DS4_ROCM_EXPERT_WEIGHT_SCALE;
     if (!selected || !weights || !probs || !logits || !model_map || n_tokens == 0 ||
         (active_n_expert != DS4_ROCM_N_EXPERT && active_n_expert != DS4_ROCM_MAX_N_EXPERT) ||

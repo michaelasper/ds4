@@ -114,13 +114,14 @@ Targets:
 
   laguna-q4
        Official imatrix-quantized Laguna S 2.1 Q4_K_M GGUF from Poolside.
-       About 68 GB on disk; currently supported by the Metal backend with
-       full model residency.
+       About 68 GB on disk; supported by Metal and ROCm with full model
+       residency.
 
   laguna-q2-q3
        Mixed Laguna S 2.1 routed-expert quant for 64 GB systems. Routed
        layers 1..20 use Q2_K and layers 21..47 use Q3_K; all other tensors
-       retain the official Q4_K_M layout. 44.95 GiB on disk.
+       retain the official Q4_K_M layout. 44.95 GiB on disk; supported by
+       Metal and ROCm with full model residency.
 
 Options:
   --token TOKEN  Hugging Face token. Otherwise HF_TOKEN or the local HF token

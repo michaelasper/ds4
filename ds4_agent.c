@@ -529,9 +529,18 @@ static float parse_float_range(const char *s, const char *opt, float min, float 
 
 static ds4_backend parse_backend(const char *s) {
     if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
+#ifdef DS4_ROCM_BUILD
+    if (!strcmp(s, "rocm")) return DS4_BACKEND_CUDA;
+#else
     if (!strcmp(s, "cuda")) return DS4_BACKEND_CUDA;
+#endif
     if (!strcmp(s, "cpu")) return DS4_BACKEND_CPU;
     fprintf(stderr, "ds4-agent: invalid backend: %s\n", s);
+#ifdef DS4_ROCM_BUILD
+    fprintf(stderr, "ds4-agent: valid backends are: metal, rocm, cpu\n");
+#else
+    fprintf(stderr, "ds4-agent: valid backends are: metal, cuda, cpu\n");
+#endif
     exit(2);
 }
 
@@ -671,8 +680,13 @@ static agent_config parse_options(int argc, char **argv) {
             c.engine.backend = parse_backend(need_arg(&i, argc, argv, arg));
         } else if (!strcmp(arg, "--metal")) {
             c.engine.backend = DS4_BACKEND_METAL;
+#ifdef DS4_ROCM_BUILD
+        } else if (!strcmp(arg, "--rocm")) {
+            c.engine.backend = DS4_BACKEND_CUDA;
+#else
         } else if (!strcmp(arg, "--cuda")) {
             c.engine.backend = DS4_BACKEND_CUDA;
+#endif
         } else if (!strcmp(arg, "--gpu-vram")) {
             c.gpu_vram_arg = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--gpu-devices")) {
@@ -7123,11 +7137,22 @@ static void test_agent_cache_rejects_impossible_lengths(void) {
     fclose(fp);
 }
 
+static void test_agent_backend_name_matches_build(void) {
+    AGENT_TEST_ASSERT(parse_backend("metal") == DS4_BACKEND_METAL);
+    AGENT_TEST_ASSERT(parse_backend("cpu") == DS4_BACKEND_CPU);
+#ifdef DS4_ROCM_BUILD
+    AGENT_TEST_ASSERT(parse_backend("rocm") == DS4_BACKEND_CUDA);
+#else
+    AGENT_TEST_ASSERT(parse_backend("cuda") == DS4_BACKEND_CUDA);
+#endif
+}
+
 static void ds4_agent_unit_tests_run(void) {
     test_agent_edit_upto_tail_newline_is_not_part_of_anchor();
     test_agent_edit_upto_requires_tail_after_newline_strip();
     test_agent_cache_rejects_impossible_lengths();
     test_agent_read_default_lines_follow_context();
+    test_agent_backend_name_matches_build();
     test_agent_glm_template_policy();
     test_agent_edit_upto_prompt_is_opt_in();
     test_agent_glm_tools_prompt_is_native();

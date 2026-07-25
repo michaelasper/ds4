@@ -3597,6 +3597,41 @@ static float ds4_vec_dot_q2_K_f32(int n, const block_q2_K *x, const float *y) {
     return sum;
 }
 
+static inline int q3_k_scale(const block_q3_K *block, uint32_t group) {
+    const uint32_t low =
+        (block->scales[group & 7u] >> (4u * (group >> 3u))) & 0x0fu;
+    const uint32_t high =
+        (block->scales[8u + (group & 3u)] >>
+         (2u * (group >> 2u))) & 0x03u;
+    return (int)(low | (high << 4u)) - 32;
+}
+
+static inline float q3_k_value_f32(const block_q3_K *blocks, uint32_t k) {
+    const uint32_t block_index = k / QK_K;
+    const uint32_t index = k - block_index * QK_K;
+    const block_q3_K *block = blocks + block_index;
+    const uint32_t group = index >> 4u;
+    const uint32_t lane = index & 15u;
+    const uint32_t q_index =
+        (group >> 3u) * 32u + (group & 1u) * 16u + lane;
+    const uint32_t q_shift = ((group >> 1u) & 3u) * 2u;
+    const uint32_t high_bit = 1u << (group >> 1u);
+    const int q = (int)((block->qs[q_index] >> q_shift) & 3u) -
+                  ((block->hmask[(group & 1u) * 16u + lane] & high_bit)
+                       ? 0
+                       : 4);
+    return f16_to_f32(block->d) * (float)q3_k_scale(block, group) *
+           (float)q;
+}
+
+static float ds4_vec_dot_q3_K_f32(int n, const block_q3_K *x, const float *y) {
+    float sum = 0.0f;
+    for (int k = 0; k < n; k++) {
+        sum += q3_k_value_f32(x, (uint32_t)k) * y[k];
+    }
+    return sum;
+}
+
 static inline void q4_k_get_scale_min(int j, const uint8_t *q, uint8_t *sc, uint8_t *m) {
     if (j < 4) {
         *sc = q[j] & 63;
@@ -14880,6 +14915,7 @@ static bool glm_graph_gate_pair_type_supported(uint32_t gate_type, uint32_t up_t
     return gate_type == up_type &&
            (gate_type == DS4_TENSOR_IQ2_XXS ||
             gate_type == DS4_TENSOR_Q2_K ||
+            gate_type == DS4_TENSOR_Q3_K ||
             gate_type == DS4_TENSOR_Q4_K ||
             gate_type == DS4_TENSOR_Q5_K ||
             gate_type == DS4_TENSOR_MXFP4);
@@ -14888,6 +14924,7 @@ static bool glm_graph_gate_pair_type_supported(uint32_t gate_type, uint32_t up_t
 static bool glm_graph_down_type_supported(uint32_t down_type) {
     return down_type == DS4_TENSOR_IQ2_XXS ||
            down_type == DS4_TENSOR_Q2_K ||
+           down_type == DS4_TENSOR_Q3_K ||
            down_type == DS4_TENSOR_Q4_K ||
            down_type == DS4_TENSOR_Q5_K ||
            down_type == DS4_TENSOR_Q6_K ||
@@ -14900,6 +14937,9 @@ static float glm_routed_moe_dot_f32(uint32_t type, int n, const uint8_t *row, co
     }
     if (type == DS4_TENSOR_Q2_K) {
         return ds4_vec_dot_q2_K_f32(n, (const block_q2_K *)row, x);
+    }
+    if (type == DS4_TENSOR_Q3_K) {
+        return ds4_vec_dot_q3_K_f32(n, (const block_q3_K *)row, x);
     }
     if (type == DS4_TENSOR_Q4_K) {
         return ds4_vec_dot_q4_K_f32(n, (const block_q4_K *)row, x);
@@ -48216,7 +48256,7 @@ static bool laguna_graph_alloc(ds4_laguna_gpu_graph *g, uint32_t ctx_size) {
     }
 
     fprintf(stderr,
-            "ds4: Laguna Metal graph: ctx=%u, prefill=%u, KV %.2f GiB, scratch %.2f MiB\n",
+            "ds4: Laguna GPU graph: ctx=%u, prefill=%u, KV %.2f GiB, scratch %.2f MiB\n",
             ctx_size,
             g->prefill_cap,
             (double)g->kv_bytes / 1073741824.0,
@@ -48224,10 +48264,33 @@ static bool laguna_graph_alloc(ds4_laguna_gpu_graph *g, uint32_t ctx_size) {
     return true;
 
 fail:
-    fprintf(stderr, "ds4: failed to allocate Laguna Metal graph\n");
+    fprintf(stderr, "ds4: failed to allocate Laguna GPU graph\n");
     laguna_graph_free(g);
     return false;
 }
+
+#ifdef DS4_ROCM_BUILD
+extern int ds4_gpu_matmul_q8_0_decode_preq_tensor(
+        ds4_gpu_tensor *out,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight_offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t n_tok);
+extern int ds4_gpu_matmul_q8_0_pair_decode_preq8_tensor(
+        ds4_gpu_tensor *out0,
+        ds4_gpu_tensor *out1,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight0_offset,
+        uint64_t weight1_offset,
+        uint64_t in_dim,
+        uint64_t out0_dim,
+        uint64_t out1_dim,
+        const ds4_gpu_tensor *x);
+#endif
 
 static bool laguna_graph_matmul(
         ds4_gpu_tensor       *out,
@@ -48236,6 +48299,19 @@ static bool laguna_graph_matmul(
         const ds4_gpu_tensor *x,
         uint64_t              n_tokens) {
     if (!out || !model || !weight || !x || weight->ndim < 2) return false;
+#ifdef DS4_ROCM_BUILD
+    if (weight->type == DS4_TENSOR_Q8_0 && n_tokens == 1u) {
+        return ds4_gpu_matmul_q8_0_decode_preq_tensor(
+                   out,
+                   model->map,
+                   model->size,
+                   weight->abs_offset,
+                   weight->dim[0],
+                   weight->dim[1],
+                   x,
+                   n_tokens) != 0;
+    }
+#endif
     if (weight->type == DS4_TENSOR_F16) {
         return ds4_gpu_matmul_f16_tensor(out,
                                          model->map,
@@ -48337,6 +48413,30 @@ static bool laguna_graph_forward_token(
                         n_head,
                         g->attn_norm) != 0;
             } else {
+#ifdef DS4_ROCM_BUILD
+                ok = ds4_gpu_matmul_q8_0_pair_decode_preq8_tensor(
+                        g->q,
+                        g->k,
+                        model->map,
+                        model->size,
+                        l->attn_q->abs_offset,
+                        l->attn_k->abs_offset,
+                        DS4_N_EMBD,
+                        q_dim,
+                        DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
+                        g->attn_norm) != 0 &&
+                     ds4_gpu_matmul_q8_0_pair_decode_preq8_tensor(
+                        g->v,
+                        g->gate,
+                        model->map,
+                        model->size,
+                        l->attn_v->abs_offset,
+                        l->attn_gate->abs_offset,
+                        DS4_N_EMBD,
+                        DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
+                        n_head,
+                        g->attn_norm) != 0;
+#else
                 ok = ds4_gpu_matmul_q8_0_pair_tensor(
                         g->q,
                         g->k,
@@ -48361,6 +48461,7 @@ static bool laguna_graph_forward_token(
                         n_head,
                         g->attn_norm,
                         1) != 0;
+#endif
             }
         }
         if (ok) {
@@ -58482,9 +58583,17 @@ static int ds4_engine_open_internal(ds4_engine **out,
             *out = e;
             return 0;
         }
-        if (e->backend != DS4_BACKEND_METAL) {
+        if (e->backend != DS4_BACKEND_METAL
+#ifdef DS4_ROCM_BUILD
+            && e->backend != DS4_BACKEND_CUDA
+#endif
+        ) {
             fprintf(stderr,
-                    "ds4: Laguna S 2.1 inference currently requires --metal\n");
+                    "ds4: Laguna S 2.1 inference currently requires --metal"
+#ifdef DS4_ROCM_BUILD
+                    " or --rocm"
+#endif
+                    "\n");
             ds4_engine_close(e);
             *out = NULL;
             return 1;
@@ -58514,8 +58623,8 @@ static int ds4_engine_open_internal(ds4_engine **out,
             (opt->mtp_path && opt->mtp_path[0]) ||
             opt->dspark || opt->glm_mtp || opt->first_token_test) {
             fprintf(stderr,
-                    "ds4: Laguna S 2.1 currently supports the standard Metal "
-                    "generation path only (no steering, power cap, custom "
+                    "ds4: Laguna S 2.1 currently supports the standard local "
+                    "graph path only (no steering, power cap, custom "
                     "prefill chunk, MTP/DSpark, or first-token diagnostic)\n");
             ds4_engine_close(e);
             *out = NULL;
