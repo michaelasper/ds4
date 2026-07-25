@@ -647,6 +647,18 @@ int ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
         const ds4_gpu_tensor *x,
         uint32_t              n_rows);
 
+#if defined(__APPLE__)
+int ds4_gpu_matmul_f32_decode_rows_exact_tensor(
+        ds4_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint64_t              in_dim,
+        uint64_t              out_dim,
+        const ds4_gpu_tensor *x,
+        uint32_t              n_rows);
+#endif
+
 int ds4_gpu_matmul_q8_0_f16_out_tensor(
         ds4_gpu_tensor       *out_h,
         const void             *model_map,
@@ -1098,7 +1110,39 @@ int ds4_gpu_laguna_attention_prefill_tensor(
         uint32_t              n_head,
         uint32_t              n_head_kv,
         uint32_t              head_dim,
-        float                 scale);
+        float                 scale,
+        int                   split_decode_rows);
+
+int ds4_gpu_dflash_capture_rows_tensor(
+        ds4_gpu_tensor       *features,
+        const ds4_gpu_tensor *src,
+        uint32_t              src_row0,
+        uint32_t              dst_row0,
+        uint32_t              n_rows,
+        uint32_t              n_embd,
+        uint32_t              n_aux,
+        uint32_t              aux_index);
+
+int ds4_gpu_dflash_aux_norm_tensor(
+        ds4_gpu_tensor *features,
+        const void     *model_map,
+        uint64_t        model_size,
+        uint64_t        weight_offset,
+        uint32_t        n_rows,
+        uint32_t        n_embd,
+        uint32_t        n_aux,
+        float           eps);
+
+int ds4_gpu_dflash_commit_kv_tensor(
+        ds4_gpu_tensor       *key_cache,
+        ds4_gpu_tensor       *value_cache,
+        const ds4_gpu_tensor *k,
+        const ds4_gpu_tensor *v,
+        uint32_t              pos0,
+        uint32_t              n_rows,
+        uint32_t              cache_cap,
+        uint32_t              n_head_kv,
+        uint32_t              head_dim);
 
 int ds4_gpu_glm_kv_lora_rms_norm_tensor(
         ds4_gpu_tensor       *out,
@@ -2376,6 +2420,38 @@ int ds4_gpu_glm_routed_moe_batch_direct_scalar_q4_tensor(
         const ds4_gpu_tensor *x,
         uint32_t                n_tokens,
         uint32_t                mid_token_stride);
+
+#if defined(__APPLE__)
+/* Metal verifier path: batch rows while preserving decode's Q4 kernels. */
+int ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
+        ds4_gpu_tensor       *out,
+        ds4_gpu_tensor       *mid,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              gate_offset,
+        uint64_t              up_offset,
+        uint64_t              down_offset,
+        uint32_t              gate_type,
+        uint32_t              up_type,
+        uint32_t              down_type,
+        uint64_t              gate_expert_bytes,
+        uint64_t              gate_row_bytes,
+        uint64_t              up_expert_bytes,
+        uint64_t              up_row_bytes,
+        uint64_t              down_expert_bytes,
+        uint64_t              down_row_bytes,
+        uint32_t              expert_in_dim,
+        uint32_t              expert_mid_dim,
+        uint32_t              out_dim,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *weights,
+        uint32_t              n_total_expert,
+        uint32_t              n_expert,
+        uint32_t              layer_index,
+        const ds4_gpu_tensor *x,
+        uint32_t              n_tokens,
+        uint32_t              mid_token_stride);
+#endif
 
 int ds4_gpu_routed_moe_set_selected_override(const int32_t *selected, uint32_t n_selected);
 void ds4_gpu_set_glm_mtp_verify_mode(bool enabled);

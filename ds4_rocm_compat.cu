@@ -446,3 +446,33 @@ extern "C" int ds4_gpu_laguna_attn_output_residual_f16_tensor(
     (void)in_dim; (void)out_dim; (void)x; (void)residual;
     return 0;
 }
+
+/* DFlash is currently exposed on Metal and CUDA. Keep the shared Laguna
+ * graph linkable in ROCm builds while option validation rejects --dflash. */
+extern "C" int ds4_gpu_dflash_capture_rows_tensor(
+        ds4_gpu_tensor *features, const ds4_gpu_tensor *src,
+        uint32_t src_row0, uint32_t dst_row0, uint32_t n_rows,
+        uint32_t n_embd, uint32_t n_aux, uint32_t aux_index) {
+    (void)features; (void)src; (void)src_row0; (void)dst_row0;
+    (void)n_rows; (void)n_embd; (void)n_aux; (void)aux_index;
+    return 0;
+}
+
+extern "C" int ds4_gpu_dflash_aux_norm_tensor(
+        ds4_gpu_tensor *features, const void *model_map,
+        uint64_t model_size, uint64_t weight_offset, uint32_t n_rows,
+        uint32_t n_embd, uint32_t n_aux, float eps) {
+    (void)features; (void)model_map; (void)model_size; (void)weight_offset;
+    (void)n_rows; (void)n_embd; (void)n_aux; (void)eps;
+    return 0;
+}
+
+extern "C" int ds4_gpu_dflash_commit_kv_tensor(
+        ds4_gpu_tensor *key_cache, ds4_gpu_tensor *value_cache,
+        const ds4_gpu_tensor *k, const ds4_gpu_tensor *v,
+        uint32_t pos0, uint32_t n_rows, uint32_t cache_cap,
+        uint32_t n_head_kv, uint32_t head_dim) {
+    (void)key_cache; (void)value_cache; (void)k; (void)v; (void)pos0;
+    (void)n_rows; (void)cache_cap; (void)n_head_kv; (void)head_dim;
+    return 0;
+}

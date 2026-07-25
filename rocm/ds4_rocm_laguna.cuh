@@ -536,7 +536,8 @@ extern "C" int ds4_gpu_laguna_attention_prefill_tensor(
         const ds4_gpu_tensor *k, const ds4_gpu_tensor *v,
         const ds4_gpu_tensor *gate, uint32_t pos0, uint32_t n_tokens,
         uint32_t cache_cap, uint32_t n_head, uint32_t n_head_kv,
-        uint32_t head_dim, float scale) {
+        uint32_t head_dim, float scale, int split_decode_rows) {
+    (void)split_decode_rows;
     if (!heads || !key_cache || !value_cache || !staged_key ||
         !staged_value || !q || !k || !v || !gate || n_tokens == 0u ||
         pos0 > UINT32_MAX - n_tokens || cache_cap == 0u || n_head == 0u ||

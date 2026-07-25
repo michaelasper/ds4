@@ -538,6 +538,10 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
     /* Pay the one-time first-submission GPU cost before the prefill timer
      * starts (matches the TP worker's startup warmup). */
     ds4_session_gpu_warmup(session);
+    ds4_session_set_speculative_enabled(
+        session,
+        cfg->gen.temperature <= 0.0f &&
+        getenv("DS4_MTP_SPEC_DISABLE") == NULL);
 
     char err[160];
     ds4_think_mode think_mode = cli_effective_think_mode(&cfg->gen);
@@ -1428,6 +1432,10 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
         return 1;
     }
 
+    ds4_session_set_speculative_enabled(
+        chat->session,
+        cfg->gen.temperature <= 0.0f &&
+        getenv("DS4_MTP_SPEC_DISABLE") == NULL);
     ds4_think_mode think_mode = ds4_think_mode_for_context(cfg->gen.think_mode,
                                                            chat->ctx_size);
     repl_chat_apply_think_prefix(engine, chat, think_mode);
@@ -1763,6 +1771,7 @@ static cli_config parse_options(int argc, char **argv) {
             .model_path = "ds4flash.gguf",
             .backend = default_backend(),
             .mtp_draft_tokens = 1,
+            .dflash_draft_tokens = 3,
             .mtp_margin = 3.0f,
         },
         .gen = {
@@ -1843,6 +1852,11 @@ static cli_config parse_options(int argc, char **argv) {
             c.engine.model_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp")) {
             c.engine.mtp_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash")) {
+            c.engine.dflash_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash-draft")) {
+            c.engine.dflash_draft_tokens =
+                parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-draft")) {
             c.engine.mtp_draft_tokens = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-margin")) {

@@ -30902,11 +30902,12 @@ extern "C" int ds4_gpu_laguna_attention_prefill_tensor(
         const ds4_gpu_tensor *k, const ds4_gpu_tensor *v,
         const ds4_gpu_tensor *gate, uint32_t pos0, uint32_t n_tokens,
         uint32_t cache_cap, uint32_t n_head, uint32_t n_head_kv,
-        uint32_t head_dim, float scale) {
+        uint32_t head_dim, float scale, int split_decode_rows) {
     (void)heads; (void)key_cache; (void)value_cache; (void)staged_key;
     (void)staged_value; (void)q; (void)k; (void)v; (void)gate;
     (void)pos0; (void)n_tokens; (void)cache_cap; (void)n_head;
     (void)n_head_kv; (void)head_dim; (void)scale;
+    (void)split_decode_rows;
     return 0;
 }
 #pragma GCC diagnostic pop

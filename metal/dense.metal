@@ -268,6 +268,122 @@ kernel void kernel_mul_mv_q8_0_f32_nr4(
         args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
+template<short NROWS>
+void kernel_mul_mv_q8_0_f32_rows_exact_impl(
+        constant ds4_metal_args_mul_mv &args,
+        device const char *src0,
+        device const char *src1,
+        device char *dst,
+        threadgroup char *shmem,
+        uint3 tgpig,
+        ushort tiisg,
+        ushort sgitg) {
+    const short NSG = FC_mul_mv_nsg;
+    constexpr short NW = N_SIMDWIDTH;
+    constexpr short NQ = 8;
+    constexpr short NR0 = N_R0_Q8_0;
+
+    const int nb = args.ne00 / QK8_0;
+    const int r0 = tgpig.x * NR0;
+    const int token0 = tgpig.y * NROWS;
+
+    device const block_q8_0 *ax[NR0];
+    FOR_UNROLL (short row = 0; row < NR0; ++row) {
+        const int out_row = r0 + row;
+        ax[row] = out_row < args.ne01
+            ? (device const block_q8_0 *)
+                (src0 + (uint64_t)out_row * args.nb01)
+            : (device const block_q8_0 *)src0;
+    }
+
+    float sumf[NROWS][NR0];
+    FOR_UNROLL (short token = 0; token < NROWS; ++token) {
+        FOR_UNROLL (short row = 0; row < NR0; ++row) {
+            sumf[token][row] = 0.0f;
+        }
+    }
+
+    const short ix = tiisg / (NW / NQ);
+    const short il = tiisg % (NW / NQ);
+    const int ib0 = sgitg * NQ + ix;
+    device const float *yb[NROWS];
+    FOR_UNROLL (short token = 0; token < NROWS; ++token) {
+        const int input_row = token0 + token;
+        yb[token] = (device const float *)
+            (src1 + (uint64_t)input_row * args.nb11) +
+            ib0 * QK8_0 + il * NQ;
+    }
+
+    for (int ib = ib0; ib < nb; ib += NSG * NQ) {
+        float yl[NROWS][NQ];
+        FOR_UNROLL (short token = 0; token < NROWS; ++token) {
+            const bool active = token0 + token < args.ne11;
+            FOR_UNROLL (short i = 0; i < NQ; ++i) {
+                yl[token][i] = active ? yb[token][i] : 0.0f;
+            }
+        }
+
+        FOR_UNROLL (short row = 0; row < NR0; ++row) {
+            device const int8_t *qs = ax[row][ib].qs + il * NQ;
+            FOR_UNROLL (short token = 0; token < NROWS; ++token) {
+                float sumq = 0.0f;
+                FOR_UNROLL (short i = 0; i < NQ; ++i) {
+                    sumq += qs[i] * yl[token][i];
+                }
+                sumf[token][row] += sumq * ax[row][ib].d;
+            }
+        }
+
+        FOR_UNROLL (short token = 0; token < NROWS; ++token) {
+            yb[token] += NSG * NQ * QK8_0;
+        }
+    }
+
+    FOR_UNROLL (short token = 0; token < NROWS; ++token) {
+        const int output_row = token0 + token;
+        if (output_row < args.ne11) {
+            device float *out =
+                (device float *)dst + (uint64_t)output_row * args.ne0;
+            helper_mv_reduce_and_write<NR0>(
+                out,
+                sumf[token],
+                r0,
+                args.ne01,
+                tiisg,
+                sgitg,
+                shmem + (uint64_t)token * NR0 * NW * sizeof(float));
+        }
+    }
+}
+
+[[host_name("kernel_mul_mv_q8_0_f32_rows2_exact")]]
+kernel void kernel_mul_mv_q8_0_f32_rows2_exact(
+        constant ds4_metal_args_mul_mv &args,
+        device const char *src0,
+        device const char *src1,
+        device char *dst,
+        threadgroup char *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    kernel_mul_mv_q8_0_f32_rows_exact_impl<2>(
+        args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+}
+
+[[host_name("kernel_mul_mv_q8_0_f32_rows4_exact")]]
+kernel void kernel_mul_mv_q8_0_f32_rows4_exact(
+        constant ds4_metal_args_mul_mv &args,
+        device const char *src0,
+        device const char *src1,
+        device char *dst,
+        threadgroup char *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    kernel_mul_mv_q8_0_f32_rows_exact_impl<4>(
+        args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+}
+
 // Decode Q-A/KV pair. Both projections consume the same activation row but
 // have independent weight ranges and output extents. Keep the standalone Q8_0
 // lane/block traversal and two-stage reduction verbatim for each bank; only
@@ -292,10 +408,12 @@ kernel void kernel_mul_mv_q8_0_f32_pair(
 
     const int nb = args0.ne00 / QK8_0;
     const int r0 = tgpig.x * NR0;
+    const int r1 = tgpig.y;
     const bool active_a = r0 < args0.ne01;
     const bool active_b = r0 < args1.ne01;
 
-    device const float *y = (device const float *)src1;
+    device const float *y =
+        (device const float *)(src1 + (uint64_t)r1 * args0.nb11);
     device const block_q8_0 *ax_a[NR0];
     device const block_q8_0 *ax_b[NR0];
     FOR_UNROLL (short row = 0; row < NR0; ++row) {
@@ -370,8 +488,10 @@ kernel void kernel_mul_mv_q8_0_f32_pair(
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    device float *out_a = (device float *)dst_a;
-    device float *out_b = (device float *)dst_b;
+    device float *out_a =
+        (device float *)dst_a + (uint64_t)r1 * args0.ne0;
+    device float *out_b =
+        (device float *)dst_b + (uint64_t)r1 * args1.ne0;
     FOR_UNROLL (short row = 0; row < NR0; ++row) {
         const float total_a = simd_sum(sha[row][tiisg]);
         if (tiisg == 0 && sgitg == 0) {

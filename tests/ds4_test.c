@@ -5187,7 +5187,72 @@ static void test_metal_router_weights_batch_exact(void) {
 }
 #endif
 
+static void test_dflash_capture_nonfinite_sanitize(void) {
+    enum {
+        n_embd = 4,
+        n_aux = 3,
+        src_rows = 3,
+        dst_rows = 4,
+    };
+    const float marker = 123.0f;
+    float src_host[src_rows * n_embd] = {
+        10.0f, 11.0f, 12.0f, 13.0f,
+        0.0f, 0.0f, 0.0f, 1.25f,
+        -0.0f, -2.5f, 65536.0f, -7.0f,
+    };
+    const uint32_t special_bits[3] = {
+        0x7fc12345u, 0x7f800000u, 0xff800000u,
+    };
+    memcpy(&src_host[n_embd], special_bits, sizeof(special_bits));
+    float dst_host[dst_rows * n_aux * n_embd];
+    for (size_t i = 0; i < sizeof(dst_host) / sizeof(dst_host[0]); i++) {
+        dst_host[i] = marker;
+    }
+
+    ds4_gpu_tensor *src = ds4_gpu_tensor_alloc(sizeof(src_host));
+    ds4_gpu_tensor *dst = ds4_gpu_tensor_alloc(sizeof(dst_host));
+    TEST_ASSERT(src != NULL);
+    TEST_ASSERT(dst != NULL);
+    if (!src || !dst) {
+        ds4_gpu_tensor_free(src);
+        ds4_gpu_tensor_free(dst);
+        return;
+    }
+
+    TEST_ASSERT(ds4_gpu_tensor_write(src, 0, src_host, sizeof(src_host)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(dst, 0, dst_host, sizeof(dst_host)) != 0);
+    TEST_ASSERT(ds4_gpu_dflash_capture_rows_tensor(
+        dst, src, 1, 1, 2, n_embd, n_aux, 1) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(dst, 0, dst_host, sizeof(dst_host)) != 0);
+
+    const float expected[2][n_embd] = {
+        {0.0f, 65504.0f, -65504.0f, 1.25f},
+        {-0.0f, -2.5f, 65536.0f, -7.0f},
+    };
+    for (uint32_t row = 0; row < 2; row++) {
+        for (uint32_t col = 0; col < n_embd; col++) {
+            const size_t index =
+                ((size_t)(row + 1) * n_aux + 1) * n_embd + col;
+            TEST_ASSERT(dst_host[index] == expected[row][col]);
+            uint32_t bits = 0;
+            memcpy(&bits, &dst_host[index], sizeof(bits));
+            TEST_ASSERT((bits & 0x7f800000u) != 0x7f800000u);
+        }
+    }
+    uint32_t negative_zero_bits = 0;
+    memcpy(&negative_zero_bits,
+           &dst_host[((size_t)2 * n_aux + 1) * n_embd],
+           sizeof(negative_zero_bits));
+    TEST_ASSERT(negative_zero_bits == 0x80000000u);
+    TEST_ASSERT(dst_host[0] == marker);
+    TEST_ASSERT(dst_host[((size_t)3 * n_aux + 2) * n_embd + 3] == marker);
+
+    ds4_gpu_tensor_free(src);
+    ds4_gpu_tensor_free(dst);
+}
+
 static void test_metal_kernel_group(void) {
+    test_dflash_capture_nonfinite_sanitize();
     test_metal_f16_matvec_fast_nr0_4();
     test_metal_f16_prefill_matmul();
     test_metal_q8_0_prefill_matmul();
