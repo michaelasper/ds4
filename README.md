@@ -206,6 +206,25 @@ tagged tool-call formats:
 ./ds4-server -m gguf/laguna-s-2.1-Q4_K_M.gguf -c 32768
 ```
 
+Poolside's standalone DFlash model can accelerate greedy Laguna decoding on
+Metal without changing the generated tokens. Download it separately and pass
+it alongside any supported Laguna GGUF:
+
+```sh
+./download_model.sh laguna-dflash
+./ds4 -m gguf/laguna-s-2.1-Q4_K_M.gguf \
+  --dflash gguf/laguna-s-2.1-DFlash-BF16.gguf --temp 0
+./ds4-agent -m gguf/laguna-s-2.1-Q4_K_M.gguf \
+  --dflash gguf/laguna-s-2.1-DFlash-BF16.gguf
+./ds4-server -m gguf/laguna-s-2.1-Q4_K_M.gguf \
+  --dflash gguf/laguna-s-2.1-DFlash-BF16.gguf
+```
+
+The default verifies three draft positions at a time. Use
+`--dflash-draft N` to tune the 1 through 15 range. DwarfStar automatically
+falls back to ordinary Laguna decoding when sampling is stochastic or when
+speculation is slower for the current turn.
+
 For Strix Halo:
 
 ```sh
@@ -221,8 +240,8 @@ and short-context generation at about 25.5 tokens/s. Generation after an
 8,838-token prompt remained about 21.7 tokens/s. With the official Q4_K_M
 GGUF, the same machine measured about 134 tokens/s for a 4,440-token prefill
 and 22.3 tokens/s for short-context generation. Laguna currently requires full
-model residency; SSD streaming, distributed inference, tensor parallelism,
-and the DFlash draft model are not implemented.
+model residency; SSD streaming, distributed inference, and tensor parallelism
+are not implemented.
 
 The shipped GGUF is configured for a 262144-token context. Laguna defaults to
 temperature 1.0, top-k 20, top-p 1.0, and min-p 0; explicit sampling options

@@ -11417,6 +11417,11 @@ static uint64_t server_next_sequence(server *s) {
 static void generate_job_inner(server *s, server_slot *slot, job *j) {
     char err[160];
     err[0] = '\0';
+    ds4_session_set_speculative_enabled(
+        slot->session,
+        !s->batched_mode &&
+        j->req.temperature <= 0.0f &&
+        getenv("DS4_MTP_SPEC_DISABLE") == NULL);
     const int old_pos = ds4_session_pos(slot->session);
     const int common = ds4_session_common_prefix(slot->session, &j->req.prompt);
     trace_cache_diag cache_diag = {0};
@@ -11929,6 +11934,7 @@ decode_again:
         }
 
         bool stop_decode = false;
+        int committed_visible = 0;
         for (int ti = 0; ti < ntok && completion < max_tokens; ti++) {
             if (job_cancelled(j)) {
                 stop_decode = true;
@@ -11942,6 +11948,7 @@ decode_again:
                 stop_decode = true;
                 break;
             }
+            committed_visible = ti + 1;
 
             size_t piece_len = 0;
             char *piece = ds4_token_text(s->engine, token, &piece_len);
@@ -12115,6 +12122,14 @@ decode_again:
                 stop_decode = true;
                 break;
             }
+        }
+        if (stop_decode && committed_visible < ntok) {
+            /* A speculative verifier may have committed a suffix beyond the
+             * visible stop/tool boundary. The next request must rebuild from
+             * the protocol-visible transcript, not reuse those hidden rows. */
+            pthread_mutex_lock(&s->inference_mu);
+            ds4_session_invalidate(slot->session);
+            pthread_mutex_unlock(&s->inference_mu);
         }
         if (stop_decode) break;
     }
@@ -13322,6 +13337,7 @@ static server_config parse_options(int argc, char **argv) {
             .model_path = "ds4flash.gguf",
             .backend = default_server_backend(),
             .mtp_draft_tokens = 1,
+            .dflash_draft_tokens = 3,
             .mtp_margin = 3.0f,
         },
         .host = "127.0.0.1",
@@ -13363,6 +13379,11 @@ static server_config parse_options(int argc, char **argv) {
             c.engine.model_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp")) {
             c.engine.mtp_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash")) {
+            c.engine.dflash_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash-draft")) {
+            c.engine.dflash_draft_tokens =
+                parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-draft")) {
             c.engine.mtp_draft_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-margin")) {

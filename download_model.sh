@@ -23,6 +23,7 @@ GLM_ANTIREZ_Q2_FILE="GLM-5.2-UD-Q2_K_RoutedQ2K.gguf"
 GLM_ANTIREZ_Q4_FILE="GLM-5.2-UD-Q4_K_RoutedQ4K.gguf"
 LAGUNA_Q4_FILE="laguna-s-2.1-Q4_K_M.gguf"
 LAGUNA_Q2_Q3_FILE="laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf"
+LAGUNA_DFLASH_FILE="laguna-s-2.1-DFlash-BF16.gguf"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUT_DIR=${DS4_GGUF_DIR:-"$ROOT/gguf"}
@@ -53,6 +54,7 @@ Usage:
   ./download_model.sh glm-antirez-q4 [--token TOKEN]
   ./download_model.sh laguna-q4 [--token TOKEN]
   ./download_model.sh laguna-q2-q3 [--token TOKEN]
+  ./download_model.sh laguna-dflash [--token TOKEN]
 
 Targets:
 
@@ -122,6 +124,11 @@ Targets:
        layers 1..20 use Q2_K and layers 21..47 use Q3_K; all other tensors
        retain the official Q4_K_M layout. 44.95 GiB on disk; supported by
        Metal and ROCm with full model residency.
+
+  laguna-dflash
+       Official Laguna S 2.1 DFlash speculative support GGUF from Poolside.
+       About 2.08 GiB on disk. This is an optional support model and does not
+       replace or relink the main Laguna model.
 
 Options:
   --token TOKEN  Hugging Face token. Otherwise HF_TOKEN or the local HF token
@@ -207,6 +214,13 @@ case "$MODEL" in
         REPO=$LAGUNA_ANTIREZ_REPO
         MODEL_FILE=$LAGUNA_Q2_Q3_FILE
         FORCE_HF_DOWNLOAD=1
+        ;;
+    laguna-dflash)
+        REPO=$LAGUNA_REPO
+        MODEL_FILE=$LAGUNA_DFLASH_FILE
+        FORCE_HF_DOWNLOAD=1
+        HF_REVISION=$LAGUNA_REVISION
+        LINK_MODEL=0
         ;;
     -h|--help|help)
         usage
@@ -387,6 +401,10 @@ if [ "$MODEL" = "ds4f-dspark" ]; then
     echo
     echo "DSpark support downloaded. Enable it explicitly in greedy mode:"
     echo "  ./ds4 --dspark -m ./ds4flash.gguf --mtp $OUT_DIR/$DS4F_DSPARK_FILE --temp 0"
+elif [ "$MODEL" = "laguna-dflash" ]; then
+    echo
+    echo "Laguna DFlash support downloaded. Enable it explicitly in greedy mode:"
+    echo "  ./ds4 -m <laguna-model.gguf> --dflash $OUT_DIR/$LAGUNA_DFLASH_FILE --temp 0"
 elif [ "$MODEL" = "pro-q4-layers00-30" ] || [ "$MODEL" = "pro-q4-layers31-output" ] || [ "$MODEL" = "pro-q4-split" ]; then
     echo
     echo "Downloaded PRO Q4 distributed split file(s). Use them with --layers,"

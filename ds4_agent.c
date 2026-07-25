@@ -578,6 +578,7 @@ static agent_config parse_options(int argc, char **argv) {
             .model_path = "ds4flash.gguf",
             .backend = default_backend(),
             .mtp_draft_tokens = 1,
+            .dflash_draft_tokens = 3,
             .mtp_margin = 3.0f,
         },
         .gen = {
@@ -633,6 +634,11 @@ static agent_config parse_options(int argc, char **argv) {
             c.engine.model_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp")) {
             c.engine.mtp_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash")) {
+            c.engine.dflash_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash-draft")) {
+            c.engine.dflash_draft_tokens =
+                parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-draft")) {
             c.engine.mtp_draft_tokens = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-margin")) {
@@ -8584,13 +8590,14 @@ static bool agent_worker_compact_if_needed(agent_worker *w, const char *reason,
     return agent_worker_compact(w, reason, err, err_len);
 }
 
-static int worker_accept_generated_token(agent_worker *w,
-                                         int token,
-                                         int *generated,
-                                         double t0,
-                                         agent_stream_renderer *stream,
-                                         char *err,
-                                         size_t err_len) {
+/* Publish a token whose target-model evaluation has already been committed.
+ * Speculative verification advances several KV rows at once, so those tokens
+ * must update the transcript and renderer without evaluating them again. */
+static void worker_publish_generated_token(agent_worker *w,
+                                           int token,
+                                           int *generated,
+                                           double t0,
+                                           agent_stream_renderer *stream) {
     ds4_tokens_push(&w->transcript, token);
 
     size_t text_len = 0;
@@ -8600,17 +8607,26 @@ static int worker_accept_generated_token(agent_worker *w,
     free(text);
     (*generated)++;
 
-    if (ds4_session_eval(w->session, token, err, err_len) != 0) {
-        ds4_session_invalidate(w->session);
-        return 1;
-    }
-
     double dt = now_sec() - t0;
     pthread_mutex_lock(&w->mu);
     w->status.generated = *generated;
     w->status.gen_tps = dt > 0.0 ? (double)*generated / dt : 0.0;
     agent_wake_locked(w);
     pthread_mutex_unlock(&w->mu);
+}
+
+static int worker_accept_generated_token(agent_worker *w,
+                                         int token,
+                                         int *generated,
+                                         double t0,
+                                         agent_stream_renderer *stream,
+                                         char *err,
+                                         size_t err_len) {
+    worker_publish_generated_token(w, token, generated, t0, stream);
+    if (ds4_session_eval(w->session, token, err, err_len) != 0) {
+        ds4_session_invalidate(w->session);
+        return 1;
+    }
     return 0;
 }
 
@@ -8919,9 +8935,14 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         agent_wake_locked(w);
         pthread_mutex_unlock(&w->mu);
 
+        const bool speculative_argmax =
+            cfg->gen.temperature <= 0.0f &&
+            ds4_engine_mtp_draft_tokens(w->engine) > 1 &&
+            getenv("DS4_MTP_SPEC_DISABLE") == NULL;
         bool status_greedy_sampling = false;
         while (generated < max_tokens && !worker_should_interrupt(w)) {
             worker_apply_pending_power(w);
+            bool stop_from_speculation = false;
             bool greedy_sampling = agent_stream_wants_greedy_sampling(&stream);
             if (greedy_sampling != status_greedy_sampling) {
                 worker_set_greedy_sampling(w, greedy_sampling);
@@ -8958,8 +8979,66 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 }
             } else {
                 free(text);
-                if (worker_accept_generated_token(w, token, &generated, t0,
-                                                  &stream, err, sizeof(err)) != 0) {
+                /* Once a tool stanza is in progress, retain token-at-a-time
+                 * decoding so structural repair and edit-old auto-[upto] can
+                 * inspect each token before it enters the KV cache. A batch
+                 * may discover the opening marker; the remaining verified
+                 * tokens are safe to render, then subsequent cycles switch to
+                 * the sequential path. */
+                const bool can_speculate =
+                    speculative_argmax &&
+                    !stream.dsml_active &&
+                    stream.dsml_start_len == 0;
+                if (can_speculate) {
+                    int toks[17];
+                    const int ntok = ds4_session_eval_speculative_argmax(
+                        w->session,
+                        token,
+                        max_tokens - generated,
+                        ds4_token_eos(w->engine),
+                        toks,
+                        (int)(sizeof(toks) / sizeof(toks[0])),
+                        err,
+                        sizeof(err));
+                    if (ntok < 0) {
+                        agent_dsml_parser_free(&dsml);
+                        agent_set_error(w, err[0] ? err : "DFlash decode failed");
+                        return 1;
+                    }
+
+                    bool consumed_all = true;
+                    for (int i = 0; i < ntok; i++) {
+                        if (ds4_token_is_stop_for_think_mode(
+                                w->engine, toks[i], think_mode)) {
+                            consumed_all = false;
+                            stop_from_speculation = true;
+                            break;
+                        }
+                        worker_publish_generated_token(
+                            w, toks[i], &generated, t0, &stream);
+
+                        const bool terminal =
+                            dsml.state == AGENT_DSML_DONE ||
+                            dsml.state == AGENT_DSML_ERROR ||
+                            stream.tool_preflight_error ||
+                            stream.dsml_in_think ||
+                            generated >= max_tokens ||
+                            worker_should_interrupt(w);
+                        if (terminal) {
+                            consumed_all = i + 1 == ntok;
+                            break;
+                        }
+                    }
+                    if (!consumed_all) {
+                        /* Verification may have committed tokens after a stop
+                         * marker or completed tool stanza. They were never
+                         * published into the transcript, so force the next
+                         * prompt sync to rebuild from the visible prefix. */
+                        ds4_session_invalidate(w->session);
+                    }
+                } else if (worker_accept_generated_token(
+                               w, token, &generated, t0,
+                               &stream, err, sizeof(err)) != 0) {
                     agent_dsml_parser_free(&dsml);
                     agent_set_error(w, err);
                     return 1;
@@ -8972,6 +9051,9 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
                 status_greedy_sampling = greedy_sampling;
             }
 
+            if (stop_from_speculation) {
+                break;
+            }
             if (dsml.state == AGENT_DSML_DONE) {
                 got_tool = true;
                 break;
@@ -9169,6 +9251,10 @@ static int worker_run_raw_prompt(agent_worker *w, const char *user_text) {
     agent_wake_locked(w);
     pthread_mutex_unlock(&w->mu);
 
+    const bool speculative_argmax =
+        cfg->gen.temperature <= 0.0f &&
+        ds4_engine_mtp_draft_tokens(w->engine) > 1 &&
+        getenv("DS4_MTP_SPEC_DISABLE") == NULL;
     while (generated < max_tokens && !worker_should_interrupt(w)) {
         int token = ds4_session_sample(w->session,
                                        cfg->gen.temperature,
@@ -9178,28 +9264,53 @@ static int worker_run_raw_prompt(agent_worker *w, const char *user_text) {
                                        &rng);
         if (ds4_token_is_stop(w->engine, token)) break;
 
-        size_t text_len = 0;
-        char *text = ds4_token_text(w->engine, token, &text_len);
-        agent_trace_token(w, token, text, text_len, generated + 1);
-
-        if (ds4_session_eval(w->session, token, err, sizeof(err)) != 0) {
-            free(text);
+        int toks[17];
+        int ntok = 1;
+        toks[0] = token;
+        if (speculative_argmax) {
+            ntok = ds4_session_eval_speculative_argmax(
+                w->session,
+                token,
+                max_tokens - generated,
+                ds4_token_eos(w->engine),
+                toks,
+                (int)(sizeof(toks) / sizeof(toks[0])),
+                err,
+                sizeof(err));
+        } else if (ds4_session_eval(
+                       w->session, token, err, sizeof(err)) != 0) {
+            ntok = -1;
+        }
+        if (ntok < 0) {
             agent_set_error(w, err[0] ? err : "raw decode failed");
             ds4_tokens_free(&prompt);
             return 1;
         }
 
-        ds4_tokens_push(&w->transcript, token);
-        agent_publish(w, text, text_len);
-        free(text);
-        generated++;
+        bool stop = false;
+        for (int i = 0; i < ntok; i++) {
+            token = toks[i];
+            if (ds4_token_is_stop(w->engine, token)) {
+                ds4_session_invalidate(w->session);
+                stop = true;
+                break;
+            }
+            size_t text_len = 0;
+            char *text = ds4_token_text(w->engine, token, &text_len);
+            agent_trace_token(w, token, text, text_len, generated + 1);
+            ds4_tokens_push(&w->transcript, token);
+            agent_publish(w, text, text_len);
+            free(text);
+            generated++;
 
-        double dt = now_sec() - t0;
-        pthread_mutex_lock(&w->mu);
-        w->status.generated = generated;
-        w->status.gen_tps = dt > 0.0 ? (double)generated / dt : 0.0;
-        agent_wake_locked(w);
-        pthread_mutex_unlock(&w->mu);
+            double dt = now_sec() - t0;
+            pthread_mutex_lock(&w->mu);
+            w->status.generated = generated;
+            w->status.gen_tps = dt > 0.0 ? (double)generated / dt : 0.0;
+            agent_wake_locked(w);
+            pthread_mutex_unlock(&w->mu);
+        }
+        if (stop) break;
     }
 
     if (worker_should_interrupt(w)) {
@@ -10704,6 +10815,10 @@ static int agent_worker_init(agent_worker *w, ds4_engine *engine, agent_config *
         fprintf(stderr, "ds4-agent: session backend is required\n");
         return -1;
     }
+    ds4_session_set_speculative_enabled(
+        w->session,
+        cfg->gen.temperature <= 0.0f &&
+        getenv("DS4_MTP_SPEC_DISABLE") == NULL);
     w->cache_dir = agent_default_cache_dir();
     if (!agent_mkdir_p(w->cache_dir)) {
         fprintf(stderr, "ds4-agent: failed to create %s: %s\n",

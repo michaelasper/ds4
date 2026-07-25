@@ -127,11 +127,13 @@ typedef struct {
 typedef struct {
     const char *model_path;
     const char *mtp_path;
+    const char *dflash_path;
     ds4_backend backend;
     int n_threads;
     int context_size;
     uint32_t prefill_chunk;
     int mtp_draft_tokens;
+    int dflash_draft_tokens;
     float mtp_margin;
     float dspark_confidence_threshold;
     const char *directional_steering_file;
@@ -344,6 +346,10 @@ void ds4_session_set_display_progress(ds4_session *s, ds4_session_progress_fn fn
  * safe boundaries where the live checkpoint is either unchanged or represents a
  * valid token prefix, and returns DS4_SESSION_SYNC_INTERRUPTED when it stops. */
 void ds4_session_set_cancel(ds4_session *s, ds4_session_cancel_fn fn, void *ud);
+/* Enable optional speculative support-model state for the next sync/decode
+ * sequence. Frontends disable it for sampling modes that cannot use a greedy
+ * verifier, avoiding support-model work on every ordinary decode token. */
+void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled);
 void ds4_session_report_progress(ds4_session *s, const char *event, int current, int total);
 /* Distributed coordinator sessions return 1 when the full layer route is
  * available, 0 when it is still incomplete, and -1 for a local API error. */
