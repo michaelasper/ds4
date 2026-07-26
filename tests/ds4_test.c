@@ -3582,7 +3582,10 @@ static void test_metal_zero_prefix_prefill_mask_cache_exact(void) {
         TEST_METAL_PREFILL_MASK_CACHE_RATIO128, 47);
 }
 
-static void test_metal_laguna_gqa3_decode_numeric(void) {
+#endif
+
+#if defined(__APPLE__) || defined(DS4_ROCM_BUILD)
+static void test_laguna_gqa3_decode_numeric(void) {
     const uint32_t head_dim = 128;
     const uint32_t n_head = 6;
     const uint32_t n_head_kv = 2;
@@ -3749,6 +3752,9 @@ static void test_metal_laguna_gqa3_decode_numeric(void) {
     ds4_gpu_tensor_free(key_cache);
     ds4_gpu_tensor_free(heads);
 }
+#endif
+
+#if defined(__APPLE__)
 
 static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
     typedef struct {
@@ -5273,7 +5279,7 @@ static void test_metal_kernel_group(void) {
     test_metal_contiguous_compressed_f16_attention_exact();
     test_metal_persistent_zero_attention_mask_exact();
     test_metal_zero_prefix_prefill_mask_cache_exact();
-    test_metal_laguna_gqa3_decode_numeric();
+    test_laguna_gqa3_decode_numeric();
     test_metal_laguna_qk_norm_rope_pair_exact();
     test_metal_hc_split_weighted_sum_norm_batch_exact();
     test_metal_output_hc_weights4_exact();
@@ -6967,6 +6973,11 @@ typedef struct {
 
 static const ds4_test_entry test_entries[] = {
 #ifndef DS4_NO_GPU
+#ifdef DS4_ROCM_BUILD
+    {"--laguna-attention-numeric", "laguna-attention-numeric",
+     "Laguna decode attention against a double-precision reference",
+     test_laguna_gqa3_decode_numeric},
+#endif
     {"--long-context", "long-context", "long-context story fact-recall regression", test_long_story_fact_recall},
     {"--tool-call-quality", "tool-call-quality", "model emits valid DSML tool calls", test_tool_call_quality},
     {"--think-tool-recovery", "think-tool-recovery", "recover a complete tool call emitted inside unclosed reasoning", test_think_tool_recovery},

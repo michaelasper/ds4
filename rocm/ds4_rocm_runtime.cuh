@@ -4777,7 +4777,6 @@ struct ds4_rocm_runtime_config {
     int initialized;
     int q8_prequant_decode;
     int disable_splitk_attn_out_low;
-    int disable_shared_gate_up_fused_w32;
     int attention_output_cublas_all;
     int shared_down_cublas;
     int glm_grouped_value_project;
@@ -4810,7 +4809,6 @@ static const ds4_rocm_runtime_config *cuda_runtime_config(void) {
             (dsv4_prequant_env == NULL ||
              cuda_env_present(dsv4_prequant_env));
         g_rocm_cfg.disable_splitk_attn_out_low = !g_quality_mode;
-        g_rocm_cfg.disable_shared_gate_up_fused_w32 = !g_quality_mode;
         g_rocm_cfg.attention_output_cublas_all = !g_quality_mode;
         g_rocm_cfg.shared_down_cublas = !g_quality_mode;
         const char *glm_grouped_value_project_env =

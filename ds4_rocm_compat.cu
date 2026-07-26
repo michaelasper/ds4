@@ -214,24 +214,6 @@ extern "C" int ds4_gpu_set_decode_score_vec4(int enabled) {
     return 0;
 }
 
-extern "C" int ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(
-        ds4_gpu_tensor *out, const void *model_map, uint64_t model_size,
-        uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim,
-        const ds4_gpu_tensor *x, uint32_t n_rows) {
-    return ds4_gpu_matmul_q8_0_tensor(out, model_map, model_size,
-                                      weight_offset, in_dim, out_dim, x,
-                                      n_rows);
-}
-
-extern "C" int ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
-        ds4_gpu_tensor *out0, ds4_gpu_tensor *out1, const void *model_map,
-        uint64_t model_size, uint64_t weight0_offset,
-        uint64_t weight1_offset, uint64_t in_dim, uint64_t out0_dim,
-        uint64_t out1_dim, const ds4_gpu_tensor *x, uint32_t n_rows) {
-    return ds4_gpu_matmul_q8_0_pair_tensor(
-            out0, out1, model_map, model_size, weight0_offset, weight1_offset,
-            in_dim, out0_dim, out1_dim, x, n_rows);
-}
 
 extern "C" int ds4_gpu_matmul_f16_router_rows_exact_tensor(
         ds4_gpu_tensor *out, const void *model_map, uint64_t model_size,
@@ -444,35 +426,5 @@ extern "C" int ds4_gpu_laguna_attn_output_residual_f16_tensor(
         const ds4_gpu_tensor *x, const ds4_gpu_tensor *residual) {
     (void)out; (void)model_map; (void)model_size; (void)weight_offset;
     (void)in_dim; (void)out_dim; (void)x; (void)residual;
-    return 0;
-}
-
-/* DFlash is currently exposed on Metal and CUDA. Keep the shared Laguna
- * graph linkable in ROCm builds while option validation rejects --dflash. */
-extern "C" int ds4_gpu_dflash_capture_rows_tensor(
-        ds4_gpu_tensor *features, const ds4_gpu_tensor *src,
-        uint32_t src_row0, uint32_t dst_row0, uint32_t n_rows,
-        uint32_t n_embd, uint32_t n_aux, uint32_t aux_index) {
-    (void)features; (void)src; (void)src_row0; (void)dst_row0;
-    (void)n_rows; (void)n_embd; (void)n_aux; (void)aux_index;
-    return 0;
-}
-
-extern "C" int ds4_gpu_dflash_aux_norm_tensor(
-        ds4_gpu_tensor *features, const void *model_map,
-        uint64_t model_size, uint64_t weight_offset, uint32_t n_rows,
-        uint32_t n_embd, uint32_t n_aux, float eps) {
-    (void)features; (void)model_map; (void)model_size; (void)weight_offset;
-    (void)n_rows; (void)n_embd; (void)n_aux; (void)eps;
-    return 0;
-}
-
-extern "C" int ds4_gpu_dflash_commit_kv_tensor(
-        ds4_gpu_tensor *key_cache, ds4_gpu_tensor *value_cache,
-        const ds4_gpu_tensor *k, const ds4_gpu_tensor *v,
-        uint32_t pos0, uint32_t n_rows, uint32_t cache_cap,
-        uint32_t n_head_kv, uint32_t head_dim) {
-    (void)key_cache; (void)value_cache; (void)k; (void)v; (void)pos0;
-    (void)n_rows; (void)cache_cap; (void)n_head_kv; (void)head_dim;
     return 0;
 }

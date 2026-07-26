@@ -3986,7 +3986,8 @@ static int glm_rocm_routed_moe_wrap(
         const ds4_gpu_tensor *x,
         uint32_t n_tokens,
         uint32_t mid_token_stride,
-        bool force_resident) {
+        bool force_resident,
+        bool exact_decode_rows) {
     (void)mid_token_stride;
     if (gate_type != up_type ||
         gate_expert_bytes != up_expert_bytes ||
@@ -4026,6 +4027,19 @@ static int glm_rocm_routed_moe_wrap(
                                              weights, n_total_expert, n_expert,
                                              0.0f, x, NULL, layer_index,
                                              force_resident);
+    }
+    if (exact_decode_rows) {
+        return ds4_gpu_routed_moe_batch_decode_exact_q2_q3_tensor(
+                                           out, &gate_tmp, &up_tmp, mid, &down_tmp,
+                                           model_map, model_size, gate_offset,
+                                           up_offset, down_offset, gate_type,
+                                           down_type, gate_expert_bytes,
+                                           gate_row_bytes, down_expert_bytes,
+                                           down_row_bytes, expert_in_dim,
+                                           expert_mid_dim, out_dim, selected,
+                                           weights, n_total_expert, n_expert,
+                                           0.0f, x, layer_index, n_tokens,
+                                           force_resident);
     }
     return ds4_gpu_routed_moe_batch_tensor(out, &gate_tmp, &up_tmp, mid, &down_tmp,
                                            model_map, model_size, gate_offset,
@@ -4073,7 +4087,7 @@ extern "C" int ds4_gpu_glm_routed_moe_one_tensor(
                                     down_row_bytes, expert_in_dim, expert_mid_dim,
                                     out_dim, selected, weights, n_total_expert,
                                     n_expert, layer_index, x, 1, n_expert * expert_mid_dim,
-                                    force_resident);
+                                    force_resident, false);
 }
 
 extern "C" int ds4_gpu_glm_routed_moe_batch_tensor(
@@ -4112,7 +4126,47 @@ extern "C" int ds4_gpu_glm_routed_moe_batch_tensor(
                                     down_row_bytes, expert_in_dim, expert_mid_dim,
                                     out_dim, selected, weights, n_total_expert,
                                     n_expert, layer_index, x, n_tokens,
-                                    mid_token_stride, force_resident);
+                                    mid_token_stride, force_resident, false);
+}
+
+extern "C" int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
+        ds4_gpu_tensor *out,
+        ds4_gpu_tensor *mid,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t gate_offset,
+        uint64_t up_offset,
+        uint64_t down_offset,
+        uint32_t gate_type,
+        uint32_t up_type,
+        uint32_t down_type,
+        uint64_t gate_expert_bytes,
+        uint64_t gate_row_bytes,
+        uint64_t up_expert_bytes,
+        uint64_t up_row_bytes,
+        uint64_t down_expert_bytes,
+        uint64_t down_row_bytes,
+        uint32_t expert_in_dim,
+        uint32_t expert_mid_dim,
+        uint32_t out_dim,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *weights,
+        uint32_t n_total_expert,
+        uint32_t n_expert,
+        uint32_t layer_index,
+        const ds4_gpu_tensor *x,
+        uint32_t n_tokens,
+        uint32_t mid_token_stride) {
+    return glm_rocm_routed_moe_wrap(out, mid, model_map, model_size,
+                                    gate_offset, up_offset, down_offset,
+                                    gate_type, up_type, down_type,
+                                    gate_expert_bytes, gate_row_bytes,
+                                    up_expert_bytes, up_row_bytes,
+                                    down_expert_bytes, down_row_bytes,
+                                    expert_in_dim, expert_mid_dim, out_dim,
+                                    selected, weights, n_total_expert,
+                                    n_expert, layer_index, x, n_tokens,
+                                    mid_token_stride, true, true);
 }
 
 extern "C" int ds4_gpu_glm_routed_moe_batch_direct_scalar_q4_tensor(
@@ -4150,5 +4204,5 @@ extern "C" int ds4_gpu_glm_routed_moe_batch_direct_scalar_q4_tensor(
                                     down_row_bytes, expert_in_dim, expert_mid_dim,
                                     out_dim, selected, weights, n_total_expert,
                                     n_expert, layer_index, x, n_tokens,
-                                    mid_token_stride, false);
+                                    mid_token_stride, false, false);
 }

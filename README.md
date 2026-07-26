@@ -207,8 +207,8 @@ tagged tool-call formats:
 ```
 
 Poolside's standalone DFlash model can accelerate greedy Laguna decoding on
-Metal without changing the generated tokens. Download it separately and pass
-it alongside any supported Laguna GGUF:
+Metal and ROCm without changing the generated tokens. Download it separately
+and pass it alongside any supported Laguna GGUF:
 
 ```sh
 ./download_model.sh laguna-dflash
@@ -223,7 +223,8 @@ it alongside any supported Laguna GGUF:
 The default verifies three draft positions at a time. Use
 `--dflash-draft N` to tune the 1 through 15 range. DwarfStar automatically
 falls back to ordinary Laguna decoding when sampling is stochastic or when
-speculation is slower for the current turn.
+speculation is slower for the current turn. Set `DS4_DFLASH_TIMING=1` to print
+per-cycle draft and verify timings.
 
 For Strix Halo:
 
@@ -235,13 +236,21 @@ make strix-halo
 ./ds4-server --rocm -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
 ```
 
-On the development Strix Halo, a 4,440-token prompt ran at about 153 tokens/s
-and short-context generation at about 25.5 tokens/s. Generation after an
-8,838-token prompt remained about 21.7 tokens/s. With the official Q4_K_M
-GGUF, the same machine measured about 134 tokens/s for a 4,440-token prefill
-and 22.3 tokens/s for short-context generation. Laguna currently requires full
-model residency; SSD streaming, distributed inference, and tensor parallelism
-are not implemented.
+On the development Strix Halo with the official Q4_K_M GGUF, a 2,048-token
+prefill runs at about 252 tokens/s and short-context generation at about 25.8
+tokens/s; after an 8,192-token prompt prefill is about 194 tokens/s and
+generation about 24.1 tokens/s. The smaller mixed Q2_K/Q3_K quant is faster
+still. Laguna currently requires full model residency; SSD streaming,
+distributed inference, and tensor parallelism are not implemented.
+
+DFlash speculative decoding works on ROCm and is token-exact against ordinary
+decoding, but on this GPU it is only a win on highly predictable text. Each
+draft position routes to its own ten experts, so the verifier's expert traffic
+grows with the draft length while a Strix Halo decode step is already
+bandwidth-bound; break-even needs roughly 60% of draft tokens accepted.
+DwarfStar measures throughput for the first cycles of every turn and drops back
+to ordinary decoding when speculation is not paying, so leaving `--dflash`
+enabled is safe.
 
 The shipped GGUF is configured for a 262144-token context. Laguna defaults to
 temperature 1.0, top-k 20, top-p 1.0, and min-p 0; explicit sampling options

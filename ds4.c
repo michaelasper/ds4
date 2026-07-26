@@ -48732,6 +48732,37 @@ static bool laguna_graph_capture_feature(
     return true;
 }
 
+/* Copy a run of sliding-window ring rows in at most two transfers per layer
+ * instead of one per row.  A speculative block is short and the ring wraps at
+ * most once inside it, and the per-transfer cost dominates at 2 KiB a row:
+ * doing this per row cost more than the draft pass it protects. */
+static bool laguna_graph_spec_ring_copy(
+        ds4_gpu_tensor *cache,
+        ds4_gpu_tensor *backup,
+        uint32_t        pos0,
+        uint32_t        first_row,
+        uint32_t        n_rows,
+        uint32_t        cache_cap,
+        uint64_t        row_bytes,
+        bool            to_backup) {
+    if (!cache || !backup || cache_cap == 0u) return false;
+    uint32_t row = first_row;
+    while (row < n_rows) {
+        const uint32_t ring = (pos0 + row) % cache_cap;
+        uint32_t run = n_rows - row;
+        if (run > cache_cap - ring) run = cache_cap - ring;
+        const uint64_t bytes = (uint64_t)run * row_bytes;
+        const uint64_t cache_off = (uint64_t)ring * row_bytes;
+        const uint64_t backup_off = (uint64_t)row * row_bytes;
+        const int ok = to_backup ?
+            ds4_gpu_tensor_copy(backup, backup_off, cache, cache_off, bytes) :
+            ds4_gpu_tensor_copy(cache, cache_off, backup, backup_off, bytes);
+        if (!ok) return false;
+        row += run;
+    }
+    return true;
+}
+
 static bool laguna_graph_spec_snapshot(
         ds4_laguna_gpu_graph *g,
         uint32_t              pos0,
@@ -48745,21 +48776,16 @@ static bool laguna_graph_spec_snapshot(
     bool ok = ds4_gpu_begin_commands() != 0;
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         if (!ds4_laguna_layer_is_swa(il)) continue;
-        for (uint32_t row = 0; ok && row < n_rows; row++) {
-            const uint64_t src =
-                (uint64_t)((pos0 + row) % g->cache_cap[il]) * row_bytes;
-            const uint64_t dst = (uint64_t)row * row_bytes;
-            ok = ds4_gpu_tensor_copy(g->spec_key_backup[il],
-                                     dst,
-                                     g->key_cache[il],
-                                     src,
-                                     row_bytes) != 0 &&
-                 ds4_gpu_tensor_copy(g->spec_value_backup[il],
-                                     dst,
-                                     g->value_cache[il],
-                                     src,
-                                     row_bytes) != 0;
-        }
+        ok = laguna_graph_spec_ring_copy(g->key_cache[il],
+                                         g->spec_key_backup[il],
+                                         pos0, 0, n_rows,
+                                         g->cache_cap[il],
+                                         row_bytes, true) &&
+             laguna_graph_spec_ring_copy(g->value_cache[il],
+                                         g->spec_value_backup[il],
+                                         pos0, 0, n_rows,
+                                         g->cache_cap[il],
+                                         row_bytes, true);
     }
     if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
     return ok;
@@ -48779,21 +48805,16 @@ static bool laguna_graph_spec_restore(
     bool ok = ds4_gpu_begin_commands() != 0;
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         if (!ds4_laguna_layer_is_swa(il)) continue;
-        for (uint32_t row = first_row; ok && row < n_rows; row++) {
-            const uint64_t src = (uint64_t)row * row_bytes;
-            const uint64_t dst =
-                (uint64_t)((pos0 + row) % g->cache_cap[il]) * row_bytes;
-            ok = ds4_gpu_tensor_copy(g->key_cache[il],
-                                     dst,
-                                     g->spec_key_backup[il],
-                                     src,
-                                     row_bytes) != 0 &&
-                 ds4_gpu_tensor_copy(g->value_cache[il],
-                                     dst,
-                                     g->spec_value_backup[il],
-                                     src,
-                                     row_bytes) != 0;
-        }
+        ok = laguna_graph_spec_ring_copy(g->key_cache[il],
+                                         g->spec_key_backup[il],
+                                         pos0, first_row, n_rows,
+                                         g->cache_cap[il],
+                                         row_bytes, false) &&
+             laguna_graph_spec_ring_copy(g->value_cache[il],
+                                         g->spec_value_backup[il],
+                                         pos0, first_row, n_rows,
+                                         g->cache_cap[il],
+                                         row_bytes, false);
     }
     if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
     return ok;
@@ -48909,6 +48930,34 @@ static bool laguna_graph_matmul_decode_rows(
     return laguna_graph_matmul(out, model, weight, x, n_rows);
 }
 
+static bool laguna_graph_matmul_q8_pair_decode_rows(
+        ds4_gpu_tensor       *out0,
+        ds4_gpu_tensor       *out1,
+        const ds4_model      *model,
+        const ds4_tensor     *weight0,
+        const ds4_tensor     *weight1,
+        const ds4_gpu_tensor *x,
+        uint32_t              n_rows) {
+    if (!out0 || !out1 || !model || !weight0 || !weight1 || !x ||
+        weight0->type != DS4_TENSOR_Q8_0 ||
+        weight1->type != DS4_TENSOR_Q8_0 ||
+        weight0->dim[0] != weight1->dim[0]) {
+        return false;
+    }
+    return ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
+               out0,
+               out1,
+               model->map,
+               model->size,
+               weight0->abs_offset,
+               weight1->abs_offset,
+               weight0->dim[0],
+               weight0->dim[1],
+               weight1->dim[1],
+               x,
+               n_rows) != 0;
+}
+
 static bool laguna_graph_routed_moe_decode_rows(
         ds4_laguna_gpu_graph   *g,
         const ds4_model        *model,
@@ -48937,6 +48986,81 @@ static bool laguna_graph_routed_moe_decode_rows(
         l->ffn_up_exps->type == DS4_TENSOR_Q4_K &&
         l->ffn_down_exps->type == DS4_TENSOR_Q4_K) {
         return ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
+                   g->ffn_out,
+                   g->routed_mid,
+                   model->map,
+                   model->size,
+                   l->ffn_gate_exps->abs_offset,
+                   l->ffn_up_exps->abs_offset,
+                   l->ffn_down_exps->abs_offset,
+                   l->ffn_gate_exps->type,
+                   l->ffn_up_exps->type,
+                   l->ffn_down_exps->type,
+                   gate_expert_bytes,
+                   gate_row_bytes,
+                   up_expert_bytes,
+                   up_row_bytes,
+                   down_expert_bytes,
+                   down_row_bytes,
+                   DS4_N_EMBD,
+                   DS4_N_FF_EXP,
+                   DS4_N_EMBD,
+                   g->router_selected,
+                   g->router_weights,
+                   DS4_N_EXPERT,
+                   DS4_N_EXPERT_USED,
+                   layer,
+                   g->ffn_norm,
+                   n_rows,
+                   (uint32_t)mid_elems) != 0;
+    }
+#endif
+#ifdef DS4_ROCM_BUILD
+    /* The ROCm Q4_K batch path keeps decode's per-token kernels when the row
+     * block is short, so it sweeps the selected experts once for the whole
+     * block while every row stays bit-identical to single-row decode.  Falling
+     * back to the row loop below would cost a launch storm and one full expert
+     * sweep per row, which is exactly what speculation is meant to avoid. */
+    if (l->ffn_gate_exps->type == DS4_TENSOR_Q4_K &&
+        l->ffn_up_exps->type == DS4_TENSOR_Q4_K &&
+        l->ffn_down_exps->type == DS4_TENSOR_Q4_K &&
+        n_rows <= DS4_DFLASH_BLOCK_SIZE) {
+        return ds4_gpu_glm_routed_moe_batch_tensor(
+                   g->ffn_out,
+                   g->routed_mid,
+                   model->map,
+                   model->size,
+                   l->ffn_gate_exps->abs_offset,
+                   l->ffn_up_exps->abs_offset,
+                   l->ffn_down_exps->abs_offset,
+                   l->ffn_gate_exps->type,
+                   l->ffn_up_exps->type,
+                   l->ffn_down_exps->type,
+                   gate_expert_bytes,
+                   gate_row_bytes,
+                   up_expert_bytes,
+                   up_row_bytes,
+                   down_expert_bytes,
+                   down_row_bytes,
+                   DS4_N_EMBD,
+                   DS4_N_FF_EXP,
+                   DS4_N_EMBD,
+                   g->router_selected,
+                   g->router_weights,
+                   DS4_N_EXPERT,
+                   DS4_N_EXPERT_USED,
+                   layer,
+                   g->ffn_norm,
+                   n_rows,
+                   (uint32_t)mid_elems,
+                   true) != 0;
+    }
+    if ((l->ffn_gate_exps->type == DS4_TENSOR_Q2_K ||
+         l->ffn_gate_exps->type == DS4_TENSOR_Q3_K) &&
+        l->ffn_up_exps->type == l->ffn_gate_exps->type &&
+        l->ffn_down_exps->type == l->ffn_gate_exps->type &&
+        n_rows <= DS4_DFLASH_BLOCK_SIZE) {
+        return ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
                    g->ffn_out,
                    g->routed_mid,
                    model->map,
@@ -49027,7 +49151,7 @@ static bool laguna_graph_router_decode_rows(
         const ds4_layer_weights *l,
         uint32_t                 n_rows) {
     if (!g || !model || !l || n_rows == 0u) return false;
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(DS4_ROCM_BUILD)
     return ds4_gpu_matmul_f32_decode_rows_exact_tensor(
                g->router_logits,
                model->map,
@@ -49366,21 +49490,14 @@ static bool dflash_graph_snapshot(
         DS4_SHAPE_LAGUNA_S21.n_head_dim * sizeof(uint16_t);
     bool ok = ds4_gpu_begin_commands() != 0;
     for (uint32_t il = 0; ok && il < DS4_DFLASH_N_LAYER; il++) {
-        for (uint32_t row = 0; ok && row < n_rows; row++) {
-            const uint64_t src =
-                (uint64_t)((pos0 + row) % g->cache_cap) * row_bytes;
-            const uint64_t dst = (uint64_t)row * row_bytes;
-            ok = ds4_gpu_tensor_copy(g->key_backup[il],
-                                     dst,
-                                     g->key_cache[il],
-                                     src,
-                                     row_bytes) != 0 &&
-                 ds4_gpu_tensor_copy(g->value_backup[il],
-                                     dst,
-                                     g->value_cache[il],
-                                     src,
-                                     row_bytes) != 0;
-        }
+        ok = laguna_graph_spec_ring_copy(g->key_cache[il],
+                                         g->key_backup[il],
+                                         pos0, 0, n_rows, g->cache_cap,
+                                         row_bytes, true) &&
+             laguna_graph_spec_ring_copy(g->value_cache[il],
+                                         g->value_backup[il],
+                                         pos0, 0, n_rows, g->cache_cap,
+                                         row_bytes, true);
     }
     if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
     return ok;
@@ -49398,21 +49515,14 @@ static bool dflash_graph_restore(
         DS4_SHAPE_LAGUNA_S21.n_head_dim * sizeof(uint16_t);
     bool ok = ds4_gpu_begin_commands() != 0;
     for (uint32_t il = 0; ok && il < DS4_DFLASH_N_LAYER; il++) {
-        for (uint32_t row = first_row; ok && row < n_rows; row++) {
-            const uint64_t src = (uint64_t)row * row_bytes;
-            const uint64_t dst =
-                (uint64_t)((pos0 + row) % g->cache_cap) * row_bytes;
-            ok = ds4_gpu_tensor_copy(g->key_cache[il],
-                                     dst,
-                                     g->key_backup[il],
-                                     src,
-                                     row_bytes) != 0 &&
-                 ds4_gpu_tensor_copy(g->value_cache[il],
-                                     dst,
-                                     g->value_backup[il],
-                                     src,
-                                     row_bytes) != 0;
-        }
+        ok = laguna_graph_spec_ring_copy(g->key_cache[il],
+                                         g->key_backup[il],
+                                         pos0, first_row, n_rows,
+                                         g->cache_cap, row_bytes, false) &&
+             laguna_graph_spec_ring_copy(g->value_cache[il],
+                                         g->value_backup[il],
+                                         pos0, first_row, n_rows,
+                                         g->cache_cap, row_bytes, false);
     }
     if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
     return ok;
@@ -49607,11 +49717,18 @@ static bool dflash_graph_draft_block(
                                  n_rows);
     }
     if (ok) {
+#ifdef DS4_ROCM_BUILD
+        ok = ds4_gpu_argmax_rows_tensor(g->argmax,
+                                        g->logits,
+                                        DS4_N_VOCAB,
+                                        n_rows) != 0;
+#else
         ok = ds4_gpu_indexer_topk_tensor(g->argmax,
                                           g->logits,
                                           DS4_N_VOCAB,
                                           n_rows,
                                           1) != 0;
+#endif
     }
     if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
     if (ok) {
@@ -50124,15 +50241,13 @@ static bool laguna_graph_capture_final_feature(
                                                 embd_bytes);
     bool ok = mid && after_attn && routed && shared && final;
     if (ok) {
-        ok = ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(
+        ok = laguna_graph_matmul_decode_rows(
                  shared,
-                 model->map,
-                 model->size,
-                 layer->ffn_down_shexp->abs_offset,
-                 DS4_N_FF_SHARED,
-                 DS4_N_EMBD,
+                 model,
+                 layer->ffn_down_shexp,
                  mid,
-                 capture->n_rows) != 0;
+                 capture->n_rows,
+                 true);
     }
     if (ok) {
         ok = ds4_gpu_add3_tensor(final,
@@ -50266,18 +50381,14 @@ static bool laguna_graph_forward_batch(
             l->attn_k->type == DS4_TENSOR_Q8_0;
         if (ok && exact_q8_qk) {
             failed_stage = "paired Q/K projection";
-            ok = ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
+            ok = laguna_graph_matmul_q8_pair_decode_rows(
                      g->q,
                      g->k,
-                     model->map,
-                     model->size,
-                     l->attn_q->abs_offset,
-                     l->attn_k->abs_offset,
-                     DS4_N_EMBD,
-                     (uint64_t)n_head * DS4_N_HEAD_DIM,
-                     DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
+                     model,
+                     l->attn_q,
+                     l->attn_k,
                      g->attn_norm,
-                     n_tokens) != 0;
+                     n_tokens);
         } else if (ok) {
             failed_stage = "Q/K projection";
             ok = laguna_graph_matmul_decode_rows(g->q,
@@ -50299,18 +50410,14 @@ static bool laguna_graph_forward_batch(
             l->attn_gate->type == DS4_TENSOR_Q8_0;
         if (ok && exact_q8_vg) {
             failed_stage = "paired V/gate projection";
-            ok = ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
+            ok = laguna_graph_matmul_q8_pair_decode_rows(
                      g->v,
                      g->gate,
-                     model->map,
-                     model->size,
-                     l->attn_v->abs_offset,
-                     l->attn_gate->abs_offset,
-                     DS4_N_EMBD,
-                     DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
-                     n_head,
+                     model,
+                     l->attn_v,
+                     l->attn_gate,
                      g->attn_norm,
-                     n_tokens) != 0;
+                     n_tokens);
         } else if (ok) {
             failed_stage = "V/gate projection";
             ok = laguna_graph_matmul_decode_rows(g->v,
@@ -50395,6 +50502,17 @@ static bool laguna_graph_forward_batch(
         }
         if (ok) {
             failed_stage = "causal attention";
+            /* Ask the backend to replay decode's split-key attention per
+             * verifier row.  On Metal that is a long-context throughput choice;
+             * on ROCm the batched causal kernel accumulates its softmax in a
+             * different order than the decode kernel, so the verifier needs the
+             * replay at every context length to accept the same tokens plain
+             * decoding would have produced. */
+            const int split_decode_rows = row_argmax_out != NULL &&
+#ifndef DS4_ROCM_BUILD
+                (uint64_t)pos0 + n_tokens > 256u &&
+#endif
+                true;
             ok = ds4_gpu_laguna_attention_prefill_tensor(
                     g->heads,
                     g->key_cache[il],
@@ -50412,8 +50530,7 @@ static bool laguna_graph_forward_batch(
                     DS4_N_HEAD_KV,
                     DS4_N_HEAD_DIM,
                     1.0f / sqrtf((float)DS4_N_HEAD_DIM),
-                    row_argmax_out != NULL &&
-                        (uint64_t)pos0 + n_tokens > 256u) != 0;
+                    split_decode_rows) != 0;
         }
         if (ok) {
             failed_stage = "attention output projection";
@@ -50710,11 +50827,18 @@ static bool laguna_graph_forward_batch(
         }
         if (ok) {
             failed_stage = "speculative row argmax";
+#ifdef DS4_ROCM_BUILD
+            ok = ds4_gpu_argmax_rows_tensor(g->spec_argmax,
+                                            g->spec_logits,
+                                            DS4_N_VOCAB,
+                                            n_tokens) != 0;
+#else
             ok = ds4_gpu_indexer_topk_tensor(g->spec_argmax,
                                               g->spec_logits,
                                               DS4_N_VOCAB,
                                               n_tokens,
                                               1) != 0;
+#endif
         }
     }
 
@@ -51757,6 +51881,12 @@ struct ds4_session {
     uint64_t dflash_window_tokens;
     uint32_t dflash_window_cycles;
     uint32_t dflash_slow_windows;
+    uint32_t dflash_active_draft;
+    uint32_t dflash_deferred_rows;
+    uint32_t dflash_deferred_pos0;
+    bool dflash_defer_inject;
+    uint32_t dflash_best_draft;
+    uint32_t dflash_stage_full_accepts;
     bool dflash_suspended;
     bool dflash_guard_decided;
     uint32_t glm_dense_cache_len;
@@ -60175,9 +60305,17 @@ static int ds4_engine_open_internal(ds4_engine **out,
             return 0;
         }
         if (opt->dflash_path && opt->dflash_path[0] &&
-            e->backend != DS4_BACKEND_METAL) {
+            e->backend != DS4_BACKEND_METAL
+#ifdef DS4_ROCM_BUILD
+            && e->backend != DS4_BACKEND_CUDA
+#endif
+        ) {
             fprintf(stderr,
-                    "ds4: Laguna DFlash currently requires the Metal backend\n");
+                    "ds4: Laguna DFlash currently requires the Metal"
+#ifdef DS4_ROCM_BUILD
+                    " or ROCm"
+#endif
+                    " backend\n");
             ds4_engine_close(e);
             *out = NULL;
             return 1;
@@ -61929,6 +62067,12 @@ void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled) {
     s->dflash_window_tokens = 0;
     s->dflash_window_cycles = 0;
     s->dflash_slow_windows = 0;
+    s->dflash_active_draft = 0;
+    s->dflash_best_draft = 0;
+    s->dflash_stage_full_accepts = 0;
+    s->dflash_deferred_rows = 0;
+    s->dflash_deferred_pos0 = 0;
+    s->dflash_defer_inject = false;
     s->dflash_suspended = false;
     s->dflash_guard_decided = false;
 #endif
@@ -62021,6 +62165,18 @@ static bool ds4_session_dflash_finish_capture(
         s->dflash_synced = false;
         return false;
     }
+    return true;
+}
+
+static bool ds4_session_dflash_flush_deferred(ds4_session *s) {
+    if (!s || s->dflash_deferred_rows == 0u) return true;
+    if (!ds4_session_dflash_finish_capture(s,
+                                           s->dflash_deferred_pos0,
+                                           s->dflash_deferred_rows)) {
+        return false;
+    }
+    s->dflash_deferred_rows = 0u;
+    s->dflash_deferred_pos0 = 0u;
     return true;
 }
 #endif
@@ -63019,8 +63175,20 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         s->dflash_window_tokens = 0;
         s->dflash_window_cycles = 0;
         s->dflash_slow_windows = 0;
+        s->dflash_active_draft = 0;
+        s->dflash_best_draft = 0;
+        s->dflash_stage_full_accepts = 0;
         s->dflash_suspended = false;
         s->dflash_guard_decided = false;
+        s->dflash_defer_inject = false;
+        if (!ds4_session_dflash_flush_deferred(s)) {
+            snprintf(err, errlen,
+                     "%s DFlash deferred injection failed before sync",
+                     backend_name);
+            s->checkpoint_valid = false;
+            s->dflash_synced = false;
+            return 1;
+        }
         int start = 0;
         if (s->checkpoint_valid &&
             prompt->len >= s->checkpoint.len &&
@@ -64751,8 +64919,32 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
         }
         const bool dflash_enabled = ds4_session_dflash_enabled(s);
         const bool dflash_was_synced = s->dflash_synced;
+        if (dflash_enabled && !s->dflash_defer_inject &&
+            !ds4_session_dflash_flush_deferred(s)) {
+            if (errlen) snprintf(err, errlen,
+                                 "%s DFlash deferred injection failed",
+                                 ds4_backend_name(e->backend));
+            s->checkpoint_valid = false;
+            return 1;
+        }
         ds4_laguna_feature_capture capture =
             ds4_session_dflash_capture(s, 0, 1);
+        if (dflash_enabled && s->dflash_defer_inject) {
+            const uint32_t pos = (uint32_t)s->checkpoint.len;
+            if (s->dflash_deferred_rows == 0u) {
+                s->dflash_deferred_pos0 = pos;
+            } else if (pos != s->dflash_deferred_pos0 +
+                              s->dflash_deferred_rows ||
+                       s->dflash_deferred_rows >=
+                           DS4_DFLASH_BLOCK_SIZE) {
+                if (errlen) snprintf(err, errlen,
+                                     "DFlash deferred capture is not contiguous");
+                s->checkpoint_valid = false;
+                s->dflash_synced = false;
+                return 1;
+            }
+            capture.dst_row0 = s->dflash_deferred_rows;
+        }
         if (!laguna_graph_forward_token(&s->laguna_graph,
                                         &e->model,
                                         &e->weights,
@@ -64766,7 +64958,9 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
             s->dflash_synced = false;
             return 1;
         }
-        if (dflash_enabled &&
+        if (dflash_enabled && s->dflash_defer_inject) {
+            s->dflash_deferred_rows++;
+        } else if (dflash_enabled &&
             !ds4_session_dflash_finish_capture(
                 s, (uint32_t)s->checkpoint.len, 1)) {
             if (errlen) snprintf(err, errlen,
@@ -69129,13 +69323,27 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
     if (s->dflash_suspended || s->dflash_baseline_tokens < 3u) {
         const double decode_t0 = now_sec();
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+        const bool defer_inject = !s->dflash_suspended;
+        s->dflash_defer_inject = defer_inject;
+        const int eval_rc = ds4_session_eval(s, first_token, err, errlen);
+        s->dflash_defer_inject = false;
+        if (eval_rc != 0) return -1;
         const double decode_ms = (now_sec() - decode_t0) * 1000.0;
         if (!s->dflash_suspended) {
-            s->dflash_baseline_ms += decode_ms + s->last_sample_ms;
             s->dflash_baseline_tokens++;
+            /* The first target token completes the support-model injection
+             * left queued by prefill. Keep it out of the plain-decode
+             * baseline, then inject all three calibration rows in one batch. */
+            if (s->dflash_baseline_tokens > 1u) {
+                s->dflash_baseline_ms += decode_ms + s->last_sample_ms;
+            }
             if (s->dflash_baseline_tokens == 3u) {
-                s->dflash_baseline_ms /= 3.0;
+                s->dflash_baseline_ms /= 2.0;
+                if (!ds4_session_dflash_flush_deferred(s)) {
+                    if (errlen) snprintf(err, errlen,
+                                         "DFlash baseline injection failed");
+                    return -1;
+                }
             }
         }
         accepted[0] = first_token;
@@ -69156,9 +69364,16 @@ static int ds4_session_eval_dflash_speculative_argmax(
         return 1;
     }
 
-    uint32_t n_draft = (uint32_t)e->dflash_draft_tokens;
-    if (n_draft > DS4_DFLASH_BLOCK_SIZE - 1u) {
-        n_draft = DS4_DFLASH_BLOCK_SIZE - 1u;
+    uint32_t requested_draft = (uint32_t)e->dflash_draft_tokens;
+    if (requested_draft > DS4_DFLASH_BLOCK_SIZE - 1u) {
+        requested_draft = DS4_DFLASH_BLOCK_SIZE - 1u;
+    }
+    if (s->dflash_active_draft == 0u) {
+        s->dflash_active_draft = requested_draft < 3u ? requested_draft : 3u;
+    }
+    uint32_t n_draft = requested_draft;
+    if (n_draft > s->dflash_active_draft) {
+        n_draft = s->dflash_active_draft;
     }
     if (n_draft > (uint32_t)(max_tokens - 1)) {
         n_draft = (uint32_t)(max_tokens - 1);
@@ -69292,13 +69507,56 @@ static int ds4_session_eval_dflash_speculative_argmax(
     s->dflash_window_ms += cycle_ms;
     s->dflash_window_tokens += (uint64_t)n_accept;
     s->dflash_window_cycles++;
+    if ((uint32_t)(n_accept - 1) == n_draft) {
+        s->dflash_stage_full_accepts++;
+    }
     if (!s->dflash_guard_decided &&
-        s->dflash_window_cycles >= 3u &&
+        s->dflash_window_cycles >= 5u &&
         s->dflash_window_tokens != 0u) {
         const double spec_ms_per_token =
             s->dflash_window_ms / (double)s->dflash_window_tokens;
-        s->dflash_guard_decided = true;
-        if (spec_ms_per_token >= s->dflash_baseline_ms * 0.98) {
+        if (spec_ms_per_token < s->dflash_baseline_ms * 0.98) {
+            s->dflash_best_draft = s->dflash_active_draft;
+            if (s->dflash_active_draft < requested_draft) {
+                const bool short_block_correlates =
+                    s->dflash_active_draft > 3u ||
+                    s->dflash_stage_full_accepts >= 3u;
+                if (short_block_correlates) {
+                    uint32_t next = s->dflash_active_draft * 2u + 1u;
+                    if (next > requested_draft) next = requested_draft;
+                    s->dflash_active_draft = next;
+                    if (getenv("DS4_DFLASH_TIMING") != NULL) {
+                        fprintf(stderr,
+                                "ds4: DFlash testing draft depth %u "
+                                "after %.2f ms/token at depth %u\n",
+                                next,
+                                spec_ms_per_token,
+                                s->dflash_best_draft);
+                    }
+                } else if (getenv("DS4_DFLASH_TIMING") != NULL) {
+                    fprintf(stderr,
+                            "ds4: DFlash retaining draft depth %u; "
+                            "only %u/5 calibration blocks were fully accepted\n",
+                            s->dflash_active_draft,
+                            s->dflash_stage_full_accepts);
+                }
+            } else {
+                s->dflash_guard_decided = true;
+            }
+        } else if (s->dflash_best_draft != 0u &&
+                   s->dflash_best_draft != s->dflash_active_draft) {
+            const uint32_t rejected = s->dflash_active_draft;
+            s->dflash_active_draft = s->dflash_best_draft;
+            s->dflash_guard_decided = true;
+            fprintf(stderr,
+                    "ds4: DFlash using draft depth %u; depth %u measured "
+                    "%.2f ms/token versus %.2f ms normal decode\n",
+                    s->dflash_active_draft,
+                    rejected,
+                    spec_ms_per_token,
+                    s->dflash_baseline_ms);
+        } else {
+            s->dflash_guard_decided = true;
             s->dflash_suspended = true;
             s->dflash_synced = false;
             fprintf(stderr,
@@ -69310,6 +69568,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
         s->dflash_window_ms = 0.0;
         s->dflash_window_tokens = 0;
         s->dflash_window_cycles = 0;
+        s->dflash_stage_full_accepts = 0;
     } else if (s->dflash_guard_decided &&
                s->dflash_window_cycles >= 8u &&
                s->dflash_window_tokens != 0u) {
@@ -70106,6 +70365,10 @@ void ds4_session_invalidate(ds4_session *s) {
     s->mtp_draft_valid = false;
     ds4_session_dspark_capture_invalidate(s);
 #ifndef DS4_NO_GPU
+    s->dflash_synced = false;
+    s->dflash_deferred_rows = 0;
+    s->dflash_deferred_pos0 = 0;
+    s->dflash_defer_inject = false;
     ds4_session_glm_reset_dense_cache(s);
 #endif
 }
@@ -70121,6 +70384,10 @@ void ds4_session_rewind(ds4_session *s, int pos) {
     s->mtp_draft_valid = false;
     ds4_session_dspark_capture_invalidate(s);
 #ifndef DS4_NO_GPU
+    s->dflash_synced = false;
+    s->dflash_deferred_rows = 0;
+    s->dflash_deferred_pos0 = 0;
+    s->dflash_defer_inject = false;
     ds4_session_glm_cap_dense_cache(s);
 #endif
 }
