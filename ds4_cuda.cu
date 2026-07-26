@@ -116,6 +116,7 @@ static const char *g_model_device_base;
 static uint64_t g_model_registered_size;
 static int g_model_registered;
 static thread_local bool g_glm_mtp_verify_mode;
+static thread_local bool g_laguna_dflash_verify_rows;
 static int g_model_device_owned;
 static int g_model_range_mapping_supported = 1;
 static int g_model_hmm_direct;
@@ -15336,11 +15337,48 @@ extern "C" int ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(
                  "q8_0 decode rows exact quantize launch")) {
         return 0;
     }
-    dim3 grid(((unsigned)out_dim + 7u) / 8u, n_rows, 1u);
+    const int use_dp4a = cuda_q8_use_dp4a();
+    const unsigned row_blocks = ((unsigned)out_dim + 7u) / 8u;
+    if (getenv("DS4_CUDA_DFLASH_NO_Q8_ROW_REUSE") == NULL) {
+        /*
+         * Every verifier row uses the same weight matrix.  Keep the reference
+         * warp reduction and DP4A order, but evaluate up to eight activation
+         * rows while each Q8 block is resident in registers/L2.  Unlike the
+         * general prefill selector this is valid for blocks > 32: each lane
+         * still walks b = lane, lane + 32, ... in exactly decode order.
+         */
+        if (n_rows >= 8u) {
+            dim3 grid(row_blocks, (n_rows + 7u) / 8u, 1u);
+            matmul_q8_0_preq_batch_warp8_tok8_kernel<<<grid, 256>>>(
+                    (float *)out->ptr,
+                    reinterpret_cast<const unsigned char *>(wptr),
+                    xq, xscale, in_dim, out_dim, n_rows, blocks, use_dp4a);
+            return cuda_ok(cudaGetLastError(),
+                           "q8_0 decode rows exact tok8 launch");
+        }
+        if (n_rows >= 4u) {
+            dim3 grid(row_blocks, (n_rows + 3u) / 4u, 1u);
+            matmul_q8_0_preq_batch_warp8_tok4_kernel<<<grid, 256>>>(
+                    (float *)out->ptr,
+                    reinterpret_cast<const unsigned char *>(wptr),
+                    xq, xscale, in_dim, out_dim, n_rows, blocks, use_dp4a);
+            return cuda_ok(cudaGetLastError(),
+                           "q8_0 decode rows exact tok4 launch");
+        }
+        if (n_rows == 2u) {
+            matmul_q8_0_preq_batch_warp8_tok2_kernel<<<row_blocks, 256>>>(
+                    (float *)out->ptr,
+                    reinterpret_cast<const unsigned char *>(wptr),
+                    xq, xscale, in_dim, out_dim, blocks, use_dp4a);
+            return cuda_ok(cudaGetLastError(),
+                           "q8_0 decode rows exact tok2 launch");
+        }
+    }
+    dim3 grid(row_blocks, n_rows, 1u);
     matmul_q8_0_preq_warp8_kernel<<<grid, 256>>>(
             (float *)out->ptr,
             reinterpret_cast<const unsigned char *>(wptr),
-            xq, xscale, in_dim, out_dim, blocks, cuda_q8_use_dp4a());
+            xq, xscale, in_dim, out_dim, blocks, use_dp4a);
     return cuda_ok(cudaGetLastError(),
                    "q8_0 decode rows exact warp launch");
 }
@@ -15406,6 +15444,63 @@ extern "C" int ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
                  "q8_0 pair decode rows exact quantize launch")) {
         return 0;
     }
+    const int use_dp4a = cuda_q8_use_dp4a();
+    const unsigned grid0_x = ((unsigned)out0_dim + 7u) / 8u;
+    const unsigned grid1_x = ((unsigned)out1_dim + 7u) / 8u;
+    if (getenv("DS4_CUDA_DFLASH_NO_Q8_ROW_REUSE") == NULL) {
+        if (n_rows >= 8u) {
+            dim3 grid0(grid0_x, (n_rows + 7u) / 8u, 1u);
+            matmul_q8_0_preq_batch_warp8_tok8_kernel<<<grid0, 256>>>(
+                    (float *)out0->ptr,
+                    reinterpret_cast<const unsigned char *>(w0),
+                    xq, xscale, in_dim, out0_dim, n_rows, blocks, use_dp4a);
+            if (!cuda_ok(cudaGetLastError(),
+                         "q8_0 pair decode rows exact gate tok8 launch")) {
+                return 0;
+            }
+            dim3 grid1(grid1_x, (n_rows + 7u) / 8u, 1u);
+            matmul_q8_0_preq_batch_warp8_tok8_kernel<<<grid1, 256>>>(
+                    (float *)out1->ptr,
+                    reinterpret_cast<const unsigned char *>(w1),
+                    xq, xscale, in_dim, out1_dim, n_rows, blocks, use_dp4a);
+            return cuda_ok(cudaGetLastError(),
+                           "q8_0 pair decode rows exact up tok8 launch");
+        }
+        if (n_rows >= 4u) {
+            dim3 grid0(grid0_x, (n_rows + 3u) / 4u, 1u);
+            matmul_q8_0_preq_batch_warp8_tok4_kernel<<<grid0, 256>>>(
+                    (float *)out0->ptr,
+                    reinterpret_cast<const unsigned char *>(w0),
+                    xq, xscale, in_dim, out0_dim, n_rows, blocks, use_dp4a);
+            if (!cuda_ok(cudaGetLastError(),
+                         "q8_0 pair decode rows exact gate tok4 launch")) {
+                return 0;
+            }
+            dim3 grid1(grid1_x, (n_rows + 3u) / 4u, 1u);
+            matmul_q8_0_preq_batch_warp8_tok4_kernel<<<grid1, 256>>>(
+                    (float *)out1->ptr,
+                    reinterpret_cast<const unsigned char *>(w1),
+                    xq, xscale, in_dim, out1_dim, n_rows, blocks, use_dp4a);
+            return cuda_ok(cudaGetLastError(),
+                           "q8_0 pair decode rows exact up tok4 launch");
+        }
+        if (n_rows == 2u) {
+            matmul_q8_0_preq_batch_warp8_tok2_kernel<<<grid0_x, 256>>>(
+                    (float *)out0->ptr,
+                    reinterpret_cast<const unsigned char *>(w0),
+                    xq, xscale, in_dim, out0_dim, blocks, use_dp4a);
+            if (!cuda_ok(cudaGetLastError(),
+                         "q8_0 pair decode rows exact gate tok2 launch")) {
+                return 0;
+            }
+            matmul_q8_0_preq_batch_warp8_tok2_kernel<<<grid1_x, 256>>>(
+                    (float *)out1->ptr,
+                    reinterpret_cast<const unsigned char *>(w1),
+                    xq, xscale, in_dim, out1_dim, blocks, use_dp4a);
+            return cuda_ok(cudaGetLastError(),
+                           "q8_0 pair decode rows exact up tok2 launch");
+        }
+    }
     const uint64_t max_out = out0_dim > out1_dim ? out0_dim : out1_dim;
     dim3 grid(((unsigned)max_out + 7u) / 8u, n_rows, 1u);
     matmul_q8_0_pair_preq_warp8_kernel<<<grid, 256, 0, cuda_decode_stream()>>>(
@@ -15413,8 +15508,7 @@ extern "C" int ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
             (float *)out1->ptr,
             reinterpret_cast<const unsigned char *>(w0),
             reinterpret_cast<const unsigned char *>(w1),
-            xq, xscale, in_dim, out0_dim, out1_dim, blocks,
-            cuda_q8_use_dp4a());
+            xq, xscale, in_dim, out0_dim, out1_dim, blocks, use_dp4a);
     return cuda_ok(cudaGetLastError(),
                    "q8_0 pair decode rows exact warp launch");
 }
@@ -15954,6 +16048,43 @@ extern "C" int ds4_gpu_matmul_f32_tensor(ds4_gpu_tensor *out, const void *model_
     dim3 grid((unsigned)out_dim, (unsigned)n_tok, 1);
     matmul_f32_kernel<<<grid, 256>>>((float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim, n_tok);
     return cuda_ok(cudaGetLastError(), "matmul_f32 launch");
+}
+
+extern "C" int ds4_gpu_matmul_f32_decode_rows_exact_tensor(
+        ds4_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint64_t              in_dim,
+        uint64_t              out_dim,
+        const ds4_gpu_tensor *x,
+        uint32_t              n_rows) {
+    if (!out || !x || !model_map || in_dim == 0u || out_dim == 0u ||
+        n_rows == 0u || n_rows > 16u || in_dim > UINT32_MAX ||
+        out_dim > UINT32_MAX || out_dim > UINT64_MAX / in_dim) {
+        return 0;
+    }
+    const uint64_t weight_elems = out_dim * in_dim;
+    if (weight_elems > UINT64_MAX / sizeof(float)) return 0;
+    const uint64_t weight_bytes = weight_elems * sizeof(float);
+    if (weight_offset > model_size ||
+        weight_bytes > model_size - weight_offset ||
+        x->bytes < (uint64_t)n_rows * in_dim * sizeof(float) ||
+        out->bytes < (uint64_t)n_rows * out_dim * sizeof(float)) {
+        return 0;
+    }
+    const int logical_tier = ds4_tensor_device_idx(out);
+    if (ds4_tensor_device_idx(x) != logical_tier) return 0;
+    const char *wptr = cuda_resolve_weight_ptr(
+        model_map, weight_offset, weight_bytes, logical_tier,
+        "DFlash exact F32 router");
+    if (!wptr) return 0;
+    const dim3 grid((unsigned)out_dim, n_rows, 1u);
+    matmul_f32_kernel<<<grid, 256>>>(
+        (float *)out->ptr, (const float *)wptr, (const float *)x->ptr,
+        in_dim, out_dim, n_rows);
+    return cuda_ok(cudaGetLastError(),
+                   "DFlash exact F32 router rows launch");
 }
 
 extern "C" int ds4_gpu_repeat_hc_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *row, uint32_t n_embd, uint32_t n_hc) {
@@ -30858,9 +30989,12 @@ extern "C" int ds4_gpu_glm_routed_moe_batch_tensor(
                 (const int32_t *)selected->ptr,
                 gate_expert_bytes, gate_row_bytes, up_expert_bytes, up_row_bytes,
                 xq_blocks, expert_mid_dim, n_expert, n_tokens, mid_token_stride);
-    } else if (n_tokens == 1u &&
+    } else if ((n_tokens == 1u || g_laguna_dflash_verify_rows) &&
                getenv("DS4_CUDA_MOE_NO_Q2_HALFWARP") == NULL) {
-        dim3 g1((expert_mid_dim + 15u) / 16u, n_expert, 1u);
+        dim3 g1(
+            (expert_mid_dim + 15u) / 16u,
+            n_expert,
+            g_laguna_dflash_verify_rows ? n_tokens : 1u);
         const uint32_t sh1 =
             xq_blocks * (uint32_t)sizeof(cuda_block_q8_K);
         glm_routed_moe_gateup_halfwarp_kernel<<<g1, 256u, sh1>>>(
@@ -30914,6 +31048,55 @@ extern "C" int ds4_gpu_glm_routed_moe_batch_tensor(
     return glm_routed_moe_finish_batch(
             out, out_work, out_work_bytes,
             "glm routed moe batch launch");
+}
+
+extern "C" int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
+        ds4_gpu_tensor       *out,
+        ds4_gpu_tensor       *mid,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              gate_offset,
+        uint64_t              up_offset,
+        uint64_t              down_offset,
+        uint32_t              gate_type,
+        uint32_t              up_type,
+        uint32_t              down_type,
+        uint64_t              gate_expert_bytes,
+        uint64_t              gate_row_bytes,
+        uint64_t              up_expert_bytes,
+        uint64_t              up_row_bytes,
+        uint64_t              down_expert_bytes,
+        uint64_t              down_row_bytes,
+        uint32_t              expert_in_dim,
+        uint32_t              expert_mid_dim,
+        uint32_t              out_dim,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *weights,
+        uint32_t              n_total_expert,
+        uint32_t              n_expert,
+        uint32_t              layer_index,
+        const ds4_gpu_tensor *x,
+        uint32_t              n_tokens,
+        uint32_t              mid_token_stride) {
+    if (n_tokens == 0u || n_tokens > 16u ||
+        (gate_type != 10u && gate_type != 11u) ||
+        up_type != gate_type || down_type != gate_type) {
+        return 0;
+    }
+    const bool previous = g_laguna_dflash_verify_rows;
+    g_laguna_dflash_verify_rows = true;
+    const int ok = ds4_gpu_glm_routed_moe_batch_tensor(
+        out, mid, model_map, model_size,
+        gate_offset, up_offset, down_offset,
+        gate_type, up_type, down_type,
+        gate_expert_bytes, gate_row_bytes,
+        up_expert_bytes, up_row_bytes,
+        down_expert_bytes, down_row_bytes,
+        expert_in_dim, expert_mid_dim, out_dim,
+        selected, weights, n_total_expert, n_expert,
+        layer_index, x, n_tokens, mid_token_stride, true);
+    g_laguna_dflash_verify_rows = previous;
+    return ok;
 }
 
 extern "C" int ds4_gpu_glm_routed_moe_one_tensor(
@@ -31663,6 +31846,91 @@ extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_model_view_tensor(
             in_dim, out_dim, x, 1, clamp);
 }
 
+/* DFlash target verifier. Grid.y batches independent verifier rows, while
+ * each block executes the same arithmetic and shared-memory activation staging
+ * as glm_shared_gate_up_swiglu_one_kernel below. Concurrent blocks still let
+ * L2 service a single weight stream without changing decode's float results. */
+__global__ static void glm_shared_gate_up_swiglu_rows_exact_kernel(
+        float *gate,
+        float *up,
+        float *mid,
+        const char *gw,
+        const char *uw,
+        const float *x,
+        uint32_t in_dim,
+        uint32_t out_dim,
+        uint32_t n_rows,
+        float clamp) {
+    extern __shared__ float glm_sgu_rows_sh[];
+    const uint32_t warps = blockDim.x >> 5u;
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t row = blockIdx.x * warps + warp;
+    const uint32_t tok = blockIdx.y;
+    if (tok >= n_rows) return;
+    const float *xrow = x + (uint64_t)tok * in_dim;
+    for (uint32_t i = threadIdx.x; i < in_dim; i += blockDim.x) {
+        glm_sgu_rows_sh[i] = xrow[i];
+    }
+    __syncthreads();
+    if (row >= out_dim) return;
+
+    const uint32_t nblk = in_dim >> 5u;
+    const uint64_t row_bytes = (uint64_t)nblk * 34u;
+    const char *grow = gw + (uint64_t)row * row_bytes;
+    const char *urow = uw + (uint64_t)row * row_bytes;
+    float g = 0.0f;
+    float u = 0.0f;
+    for (uint32_t blk = lane; blk < nblk; blk += 32u) {
+        const char *gb = grow + (uint64_t)blk * 34u;
+        const char *ub = urow + (uint64_t)blk * 34u;
+        const float gd = __half2float(*(const __half *)gb);
+        const float ud = __half2float(*(const __half *)ub);
+        const int8_t *gq = (const int8_t *)(gb + 2);
+        const int8_t *uq = (const int8_t *)(ub + 2);
+        const float *xb = glm_sgu_rows_sh + (uint64_t)blk * 32u;
+        float gs = 0.0f;
+        float us = 0.0f;
+#pragma unroll
+        for (uint32_t k = 0; k < 32u; k++) {
+            const float xv = xb[k];
+            gs += (float)gq[k] * xv;
+            us += (float)uq[k] * xv;
+        }
+        g += gd * gs;
+        u += ud * us;
+    }
+    for (int off = 16; off > 0; off >>= 1) {
+        g += __shfl_down_sync(0xffffffffu, g, off);
+        u += __shfl_down_sync(0xffffffffu, u, off);
+    }
+    if (lane == 0u) {
+        float sg = g;
+        float su = u;
+        if (clamp > 1.0e-6f) {
+            if (sg > clamp) sg = clamp;
+            if (su > clamp) su = clamp;
+            if (su < -clamp) su = -clamp;
+        }
+        const uint64_t off = (uint64_t)tok * out_dim + row;
+        if (gate) gate[off] = g;
+        if (up) up[off] = u;
+        mid[off] = (sg / (1.0f + expf(-sg))) * su;
+    }
+}
+
+__global__ static void glm_shared_gate_up_swiglu_tok2_exact_kernel(
+        float *gate,
+        float *up,
+        float *mid,
+        const char *gw,
+        const char *uw,
+        const float *x,
+        uint32_t in_dim,
+        uint32_t out_dim,
+        uint32_t n_rows,
+        float clamp);
+
 extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_scalar_tensor(
         ds4_gpu_tensor       *gate,
         ds4_gpu_tensor       *up,
@@ -31676,10 +31944,65 @@ extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_scalar_tensor(
         const ds4_gpu_tensor *x,
         uint64_t                n_tok,
         float                   clamp) {
-    (void)gate; (void)up; (void)mid; (void)model_map; (void)model_size;
-    (void)gate_offset; (void)up_offset; (void)in_dim; (void)out_dim;
-    (void)x; (void)n_tok; (void)clamp;
-    return 0;
+    if (!mid || !x || !model_map || in_dim == 0u || out_dim == 0u ||
+        (in_dim & 31u) != 0u || in_dim > UINT32_MAX ||
+        out_dim > UINT32_MAX || n_tok == 0u || n_tok > 16u ||
+        x->bytes < n_tok * in_dim * sizeof(float) ||
+        mid->bytes < n_tok * out_dim * sizeof(float) ||
+        (gate && gate->bytes < n_tok * out_dim * sizeof(float)) ||
+        (up && up->bytes < n_tok * out_dim * sizeof(float))) {
+        return 0;
+    }
+    const uint64_t row_bytes = (in_dim / 32u) * 34u;
+    if (out_dim > UINT64_MAX / row_bytes) return 0;
+    const uint64_t weight_bytes = out_dim * row_bytes;
+    if (gate_offset > model_size || up_offset > model_size ||
+        weight_bytes > model_size - gate_offset ||
+        weight_bytes > model_size - up_offset) {
+        return 0;
+    }
+    const int logical_tier = ds4_tensor_device_idx(x);
+    if (logical_tier < 0 || logical_tier >= g_n_gpus ||
+        ds4_tensor_device_idx(mid) != logical_tier ||
+        (gate && ds4_tensor_device_idx(gate) != logical_tier) ||
+        (up && ds4_tensor_device_idx(up) != logical_tier)) {
+        return 0;
+    }
+    const char *gw = cuda_resolve_weight_ptr(
+        model_map, gate_offset, weight_bytes, logical_tier,
+        "DFlash shared gate");
+    const char *uw = cuda_resolve_weight_ptr(
+        model_map, up_offset, weight_bytes, logical_tier,
+        "DFlash shared up");
+    if (!gw || !uw) return 0;
+
+    const uint32_t warps = 8u;
+    const unsigned row_grid =
+        (unsigned)((out_dim + warps - 1u) / warps);
+    if (n_tok >= 2u &&
+        getenv("DS4_CUDA_DFLASH_NO_SHARED_ROW_REUSE") == NULL) {
+        const dim3 grid(row_grid, (unsigned)((n_tok + 1u) / 2u), 1u);
+        const size_t shmem = 2u * (size_t)in_dim * sizeof(float);
+        glm_shared_gate_up_swiglu_tok2_exact_kernel
+            <<<grid, warps * 32u, shmem>>>(
+                gate ? (float *)gate->ptr : NULL,
+                up ? (float *)up->ptr : NULL,
+                (float *)mid->ptr, gw, uw, (const float *)x->ptr,
+                (uint32_t)in_dim, (uint32_t)out_dim,
+                (uint32_t)n_tok, clamp);
+        return cuda_ok(cudaGetLastError(),
+                       "DFlash shared gate/up exact tok2 launch");
+    }
+    const dim3 grid(row_grid, (unsigned)n_tok, 1u);
+    glm_shared_gate_up_swiglu_rows_exact_kernel
+        <<<grid, warps * 32u, (size_t)in_dim * sizeof(float)>>>(
+            gate ? (float *)gate->ptr : NULL,
+            up ? (float *)up->ptr : NULL,
+            (float *)mid->ptr, gw, uw, (const float *)x->ptr,
+            (uint32_t)in_dim, (uint32_t)out_dim,
+            (uint32_t)n_tok, clamp);
+    return cuda_ok(cudaGetLastError(),
+                   "DFlash shared gate/up exact rows launch");
 }
 
 /* Fused single-token shared-expert gate+up+swiglu: one warp per output
@@ -31743,22 +32066,29 @@ __global__ static void glm_shared_gate_up_swiglu_one_kernel(
  * gate/up weight row once, while each token keeps the decode kernel's block
  * order and warp reduction tree independently. */
 __global__ static void glm_shared_gate_up_swiglu_tok2_exact_kernel(
+        float *gate,
+        float *up,
         float *mid,
         const char *gw,
         const char *uw,
         const float *x,
         uint32_t in_dim,
         uint32_t out_dim,
+        uint32_t n_rows,
         float clamp) {
     extern __shared__ float glm_sgu2_sh[];
     float *x0 = glm_sgu2_sh;
     float *x1 = glm_sgu2_sh + in_dim;
+    const uint32_t tok0 = blockIdx.y * 2u;
+    const bool valid1 = tok0 + 1u < n_rows;
+    if (tok0 >= n_rows) return;
+    x += (uint64_t)tok0 * in_dim;
     const uint32_t warps = blockDim.x >> 5;
     const uint32_t warp = threadIdx.x >> 5;
     const uint32_t lane = threadIdx.x & 31u;
     for (uint32_t i = threadIdx.x; i < in_dim; i += blockDim.x) {
         x0[i] = x[i];
-        x1[i] = x[in_dim + i];
+        if (valid1) x1[i] = x[in_dim + i];
     }
     __syncthreads();
     const uint32_t r = blockIdx.x * warps + warp;
@@ -31786,8 +32116,10 @@ __global__ static void glm_shared_gate_up_swiglu_tok2_exact_kernel(
             const float uk = (float)uq[k];
             gs0 += gk * xs0[k];
             us0 += uk * xs0[k];
-            gs1 += gk * xs1[k];
-            us1 += uk * xs1[k];
+            if (valid1) {
+                gs1 += gk * xs1[k];
+                us1 += uk * xs1[k];
+            }
         }
         g0 += gd * gs0;
         u0 += ud * us0;
@@ -31797,20 +32129,36 @@ __global__ static void glm_shared_gate_up_swiglu_tok2_exact_kernel(
     for (int off = 16; off > 0; off >>= 1) {
         g0 += __shfl_down_sync(0xffffffffu, g0, off);
         u0 += __shfl_down_sync(0xffffffffu, u0, off);
-        g1 += __shfl_down_sync(0xffffffffu, g1, off);
-        u1 += __shfl_down_sync(0xffffffffu, u1, off);
+        if (valid1) {
+            g1 += __shfl_down_sync(0xffffffffu, g1, off);
+            u1 += __shfl_down_sync(0xffffffffu, u1, off);
+        }
     }
     if (lane == 0u) {
+        const float raw_g0 = g0;
+        const float raw_u0 = u0;
+        const float raw_g1 = g1;
+        const float raw_u1 = u1;
         if (clamp > 1.0e-6f) {
             if (g0 > clamp) g0 = clamp;
             if (u0 > clamp) u0 = clamp;
             if (u0 < -clamp) u0 = -clamp;
-            if (g1 > clamp) g1 = clamp;
-            if (u1 > clamp) u1 = clamp;
-            if (u1 < -clamp) u1 = -clamp;
+            if (valid1) {
+                if (g1 > clamp) g1 = clamp;
+                if (u1 > clamp) u1 = clamp;
+                if (u1 < -clamp) u1 = -clamp;
+            }
         }
-        mid[r] = (g0 / (1.0f + expf(-g0))) * u0;
-        mid[out_dim + r] = (g1 / (1.0f + expf(-g1))) * u1;
+        const uint64_t off0 = (uint64_t)tok0 * out_dim + r;
+        if (gate) gate[off0] = raw_g0;
+        if (up) up[off0] = raw_u0;
+        mid[off0] = (g0 / (1.0f + expf(-g0))) * u0;
+        if (valid1) {
+            const uint64_t off1 = off0 + out_dim;
+            if (gate) gate[off1] = raw_g1;
+            if (up) up[off1] = raw_u1;
+            mid[off1] = (g1 / (1.0f + expf(-g1))) * u1;
+        }
     }
 }
 
@@ -31845,11 +32193,14 @@ extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_tensor(
             if (gw && uw) {
                 const uint32_t warps = 8u;
                 const uint32_t sh = 2u * (uint32_t)in_dim * sizeof(float);
+                const dim3 grid(
+                    (unsigned)((out_dim + warps - 1u) / warps), 1u, 1u);
                 glm_shared_gate_up_swiglu_tok2_exact_kernel
-                        <<<(unsigned)((out_dim + warps - 1u) / warps),
-                           warps * 32u, sh>>>(
+                        <<<grid, warps * 32u, sh>>>(
+                        (float *)gate->ptr,
+                        (float *)up->ptr,
                         (float *)mid->ptr, gw, uw, (const float *)x->ptr,
-                        (uint32_t)in_dim, (uint32_t)out_dim, clamp);
+                        (uint32_t)in_dim, (uint32_t)out_dim, 2u, clamp);
                 return cuda_ok(cudaGetLastError(),
                                "glm shared swiglu tok2 exact");
             }

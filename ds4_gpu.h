@@ -2639,8 +2639,8 @@ int ds4_gpu_glm_routed_moe_batch_direct_scalar_q4_tensor(
         uint32_t                n_tokens,
         uint32_t                mid_token_stride);
 
-#if defined(__APPLE__) || defined(DS4_ROCM_BUILD)
-/* DFlash verifier path: batch Q2_K/Q3_K rows while retaining decode math. */
+/* DFlash verifier path: batch Q2_K/Q3_K rows while retaining decode math.
+ * Implemented by the native CUDA and ROCm backends. */
 int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         ds4_gpu_tensor       *out,
         ds4_gpu_tensor       *mid,
@@ -2669,7 +2669,6 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         const ds4_gpu_tensor *x,
         uint32_t              n_tokens,
         uint32_t              mid_token_stride);
-#endif
 
 #if defined(__APPLE__)
 /* Metal verifier path: batch rows while preserving decode's Q4 kernels. */

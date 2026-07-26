@@ -1771,7 +1771,7 @@ static cli_config parse_options(int argc, char **argv) {
             .model_path = "ds4flash.gguf",
             .backend = default_backend(),
             .mtp_draft_tokens = 1,
-            .dflash_draft_tokens = 3,
+            .dflash_draft_tokens = 0,
             .mtp_margin = 3.0f,
         },
         .gen = {
