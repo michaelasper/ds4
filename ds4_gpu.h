@@ -77,6 +77,8 @@ int ds4_gpu_pack_slot_rows_f32_tensor(
 int ds4_gpu_begin_commands(void);
 int ds4_gpu_flush_encoder(void);
 int ds4_gpu_flush_commands(void);
+/* Commit the active batch without waiting; later batches remain queue-ordered. */
+int ds4_gpu_submit_commands(void);
 int ds4_gpu_commands_active(void);
 int ds4_gpu_signal_selected_readback_ready(uint64_t *event_value);
 int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *label);

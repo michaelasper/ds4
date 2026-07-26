@@ -171,6 +171,27 @@ struct ds4_metal_args_laguna_prefill_attention {
     uint32_t pad0;
 };
 
+// Before the sliding window wraps, verifier rows occupy distinct cache slots.
+// Store the complete speculative block at once; each query still limits its
+// key count, so later rows cannot become visible to earlier queries.
+kernel void kernel_laguna_store_kv_rows_f16(
+        constant ds4_metal_args_laguna_prefill_attention &args,
+        device const float *k,
+        device const float *v,
+        device half *key_cache,
+        device half *value_cache,
+        uint gid [[thread_position_in_grid]]) {
+    const uint width = args.n_head_kv * args.head_dim;
+    const uint values = args.n_tokens * width;
+    if (gid >= values) return;
+    const uint token = gid / width;
+    const uint col = gid - token * width;
+    const uint cache_row = (args.pos0 + token) % args.cache_cap;
+    const uint64_t dst = (uint64_t)cache_row * width + col;
+    key_cache[dst] = (half)k[gid];
+    value_cache[dst] = (half)v[gid];
+}
+
 // Stage the current chunk as f16 before attention. This preserves the same KV
 // precision as decode without overwriting sliding-window rows that early
 // queries in the chunk still need.
@@ -630,7 +651,8 @@ struct ds4_metal_args_laguna_gqa3_decode {
     uint32_t n_head;
     uint32_t n_head_kv;
     uint32_t head_dim;
-    uint32_t key_count;
+    uint32_t key_count0;
+    uint32_t n_tokens;
     uint32_t nsg;
     uint32_t nwg;
     float    scale;
@@ -638,7 +660,8 @@ struct ds4_metal_args_laguna_gqa3_decode {
 
 // Global layers split keys across 32 workgroups. Evaluate three query heads
 // sharing one KV head together so each K/V row is loaded once instead of three
-// times; the established gated reducer still merges the resulting partials.
+// times. DFlash verifier rows use the second grid dimension while retaining
+// the exact one-row arithmetic and established gated reduction.
 kernel void kernel_laguna_attention_decode_gqa3_split_f16(
         constant ds4_metal_args_laguna_gqa3_decode &args,
         device const float *q,
@@ -651,10 +674,13 @@ kernel void kernel_laguna_attention_decode_gqa3_split_f16(
         uint3 tgpig [[threadgroup_position_in_grid]]) {
     const uint head0 = tgpig.x * 3u;
     const uint head2 = head0 + 2u;
+    const uint token = tgpig.y;
     const uint iwg = tgpig.z;
     const uint simd_group = (uint)simd_group_u;
-    if (head2 >= args.n_head || args.n_head_kv == 0u ||
-        args.head_dim != 128u || args.key_count == 0u ||
+    const uint key_count = args.key_count0 + token;
+    if (head2 >= args.n_head || token >= args.n_tokens ||
+        args.n_head_kv == 0u || args.head_dim != 128u ||
+        key_count == 0u ||
         args.nsg == 0u || simd_group >= args.nsg || iwg >= args.nwg) {
         return;
     }
@@ -663,7 +689,10 @@ kernel void kernel_laguna_attention_decode_gqa3_split_f16(
     const uint kv_head = head0 / heads_per_kv;
     if (head2 / heads_per_kv != kv_head) return;
     const uint cache_width = args.n_head_kv * args.head_dim;
-    device const float *qh0 = q + (uint64_t)head0 * args.head_dim;
+    const uint64_t query_base =
+        (uint64_t)token * args.n_head * args.head_dim;
+    device const float *qh0 = q + query_base +
+                              (uint64_t)head0 * args.head_dim;
     device const float *qh1 = qh0 + args.head_dim;
     device const float *qh2 = qh1 + args.head_dim;
 
@@ -678,7 +707,7 @@ kernel void kernel_laguna_attention_decode_gqa3_split_f16(
     float sum2 = 0.0f;
     const uint first = iwg * args.nsg + simd_group;
     const uint stride = args.nwg * args.nsg;
-    for (uint i = first; i < args.key_count; i += stride) {
+    for (uint i = first; i < key_count; i += stride) {
         const uint64_t kv_base =
             (uint64_t)i * cache_width +
             (uint64_t)kv_head * args.head_dim;
@@ -747,8 +776,9 @@ kernel void kernel_laguna_attention_decode_gqa3_split_f16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (simd_group != 0u) return;
-    device float *stats = tmp +
-        (uint64_t)args.n_head * args.head_dim * args.nwg;
+    const uint nrows = args.n_tokens * args.n_head;
+    device float *stats =
+        tmp + (uint64_t)nrows * args.head_dim * args.nwg;
     for (uint h = 0u; h < 3u; h++) {
         const uint slot_base = h * args.nsg;
         float global_max = partial_max[slot_base];
@@ -769,8 +799,9 @@ kernel void kernel_laguna_attention_decode_gqa3_split_f16(
             merged.w += partial_value[base + 96u] * weight;
         }
 
-        const uint row = head0 + h;
-        const uint64_t row_base = (uint64_t)row * args.head_dim * args.nwg;
+        const uint row = token * args.n_head + head0 + h;
+        const uint64_t row_base =
+            (uint64_t)row * args.head_dim * args.nwg;
         const uint dims[4] = {lane, lane + 32u, lane + 64u, lane + 96u};
         const float outputs[4] = {merged.x, merged.y, merged.z, merged.w};
         for (uint j = 0u; j < 4u; j++) {
@@ -891,6 +922,121 @@ kernel void kernel_laguna_attention_decode_gqa_f16(
     const float gate_scale = gate_value > 20.0f ?
         gate_value : log(1.0f + exp(gate_value));
     device float *oh = out + (uint64_t)head * args.head_dim;
+    oh[lane]       = merged.x * inv_sum * gate_scale;
+    oh[lane + 32u] = merged.y * inv_sum * gate_scale;
+    oh[lane + 64u] = merged.z * inv_sum * gate_scale;
+    oh[lane + 96u] = merged.w * inv_sum * gate_scale;
+}
+
+// Batch independent pre-wrap verifier rows in the grid's Y dimension. This is
+// deliberately the same per-head reduction as decode; only command encoding
+// and dispatch are shared across rows.
+kernel void kernel_laguna_attention_decode_rows_gqa_f16(
+        constant ds4_metal_args_laguna_prefill_attention &args,
+        device const float *q,
+        device const float *gate,
+        device const half  *key_cache,
+        device const half  *value_cache,
+        device float       *out,
+        threadgroup float  *scratch [[threadgroup(0)]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd_group_u [[simdgroup_index_in_threadgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    constexpr uint split_simd_groups = 8u;
+    constexpr uint split_threshold = 256u;
+    const uint head = tgpig.x;
+    const uint token = tgpig.y;
+    if (head >= args.n_head || token >= args.n_tokens ||
+        args.n_head_kv == 0u || args.head_dim != 128u) {
+        return;
+    }
+    const uint key_count = min(args.pos0 + token + 1u, args.cache_cap);
+    if (key_count == 0u) return;
+    const uint key_start = args.pos0 + token + 1u - key_count;
+    const uint simd_group = (uint)simd_group_u;
+    const bool split = key_count > split_threshold;
+    const uint heads_per_kv = args.n_head / args.n_head_kv;
+    const uint kv_head = head / heads_per_kv;
+    const uint cache_width = args.n_head_kv * args.head_dim;
+    const uint64_t row = (uint64_t)token * args.n_head + head;
+    device const float *qh = q + row * args.head_dim;
+
+    float4 acc = float4(0.0f);
+    float max_score = -INFINITY;
+    float score_sum = 0.0f;
+    const uint key_first = split ? simd_group : 0u;
+    const uint key_stride = split ? split_simd_groups : 1u;
+    for (uint i = key_first; i < key_count; i += key_stride) {
+        const uint key_pos = key_start + i;
+        const uint cache_row = key_pos % args.cache_cap;
+        const uint64_t kv_base =
+            (uint64_t)cache_row * cache_width +
+            (uint64_t)kv_head * args.head_dim;
+
+        float partial = 0.0f;
+        for (uint d = lane; d < args.head_dim; d += 32u) {
+            partial += qh[d] * (float)key_cache[kv_base + d];
+        }
+        const float score = simd_sum(partial) * args.scale;
+        const float next_max = max(max_score, score);
+        const float old_scale = max_score == -INFINITY ?
+            0.0f : exp(max_score - next_max);
+        const float value_scale = exp(score - next_max);
+        score_sum = score_sum * old_scale + value_scale;
+        const uint d0 = lane;
+        acc.x = acc.x * old_scale +
+            value_scale * (float)value_cache[kv_base + d0];
+        acc.y = acc.y * old_scale +
+            value_scale * (float)value_cache[kv_base + d0 + 32u];
+        acc.z = acc.z * old_scale +
+            value_scale * (float)value_cache[kv_base + d0 + 64u];
+        acc.w = acc.w * old_scale +
+            value_scale * (float)value_cache[kv_base + d0 + 96u];
+        max_score = next_max;
+    }
+
+    threadgroup float *partial_max = scratch;
+    threadgroup float *partial_sum = partial_max + split_simd_groups;
+    threadgroup float *partial_value = partial_sum + split_simd_groups;
+    if (lane == 0u) {
+        partial_max[simd_group] = max_score;
+        partial_sum[simd_group] = score_sum;
+    }
+    const uint value_base = simd_group * args.head_dim;
+    partial_value[value_base + lane] = acc.x;
+    partial_value[value_base + lane + 32u] = acc.y;
+    partial_value[value_base + lane + 64u] = acc.z;
+    partial_value[value_base + lane + 96u] = acc.w;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group != 0u) return;
+
+    float4 merged = acc;
+    float merged_sum = score_sum;
+    if (split) {
+        float global_max = partial_max[0];
+        for (uint sg = 1u; sg < split_simd_groups; sg++) {
+            global_max = max(global_max, partial_max[sg]);
+        }
+        merged = float4(0.0f);
+        merged_sum = 0.0f;
+        for (uint sg = 0u; sg < split_simd_groups; sg++) {
+            const float weight = partial_sum[sg] > 0.0f ?
+                exp(partial_max[sg] - global_max) : 0.0f;
+            merged_sum += partial_sum[sg] * weight;
+            const uint base = sg * args.head_dim + lane;
+            merged.x += partial_value[base] * weight;
+            merged.y += partial_value[base + 32u] * weight;
+            merged.z += partial_value[base + 64u] * weight;
+            merged.w += partial_value[base + 96u] * weight;
+        }
+    }
+
+    const float inv_sum = merged_sum > 0.0f ? 1.0f / merged_sum : 0.0f;
+    const float gate_value = gate[row];
+    const float gate_scale = gate_value > 20.0f ?
+        gate_value : log(1.0f + exp(gate_value));
+    device float *oh = out + row * args.head_dim;
     oh[lane]       = merged.x * inv_sum * gate_scale;
     oh[lane + 32u] = merged.y * inv_sum * gate_scale;
     oh[lane + 64u] = merged.z * inv_sum * gate_scale;
