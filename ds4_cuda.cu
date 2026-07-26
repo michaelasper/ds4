@@ -19159,6 +19159,25 @@ __device__ __forceinline__ static int dev_q3_K_value(
                 : 4);
 }
 
+__device__ __forceinline__ static uint32_t dev_q3_K_packed4(
+        const cuda_block_q3_K *block,
+        uint32_t group,
+        uint32_t lane) {
+    const uint32_t q_index =
+        (group >> 3u) * 32u + (group & 1u) * 16u + lane;
+    const uint32_t q_shift = ((group >> 1u) & 3u) * 2u;
+    const uint32_t high_shift = group >> 1u;
+    const uint32_t q =
+        (ldu32_unaligned(block->qs + q_index) >> q_shift) & 0x03030303u;
+    const uint32_t h =
+        ((~ldu32_unaligned(
+              block->hmask + (group & 1u) * 16u + lane) >>
+          high_shift) &
+         0x01010101u)
+        << 2u;
+    return (uint32_t)__vsubss4((int32_t)q, (int32_t)h);
+}
+
 __device__ static float dev_dot_q3_K_q8_K_block(
         const cuda_block_q3_K *x,
         const cuda_block_q8_K *y) {
@@ -19169,13 +19188,7 @@ __device__ static float dev_dot_q3_K_q8_K_block(
 #pragma unroll
         for (uint32_t lane = 0; lane < 16u; lane += 4u) {
             const uint32_t i0 = group * 16u + lane;
-            uint32_t packed = 0;
-#pragma unroll
-            for (uint32_t j = 0; j < 4u; j++) {
-                packed |=
-                    (uint32_t)(uint8_t)(int8_t)dev_q3_K_value(x, i0 + j)
-                    << (8u * j);
-            }
+            const uint32_t packed = dev_q3_K_packed4(x, group, lane);
             group_sum = __dp4a(
                 (int32_t)packed,
                 *reinterpret_cast<const int32_t *>(y->qs + i0),
@@ -19184,6 +19197,52 @@ __device__ static float dev_dot_q3_K_q8_K_block(
         isum += dev_q3_K_scale(x, group) * group_sum;
     }
     return dev_f16_to_f32(x->d) * y->d * (float)isum;
+}
+
+/* Compute two Q3_K x Q8_K block dots cooperatively, one per half warp.
+ * Each lane owns one 16-value Q3_K scale group, so the packed weights and
+ * activation words are read contiguously instead of making one lane unpack
+ * the whole 256-value block.  The integer reduction is exact; only lanes 0
+ * and 16 receive complete floating-point block results. */
+__device__ __forceinline__ static void dev_dot_q3_K_q8_K_block_pair_warp(
+        const cuda_block_q3_K *x0,
+        const cuda_block_q8_K *y0,
+        bool valid0,
+        const cuda_block_q3_K *x1,
+        const cuda_block_q8_K *y1,
+        bool valid1,
+        float *result0,
+        float *result1) {
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t group = lane & 15u;
+    const bool upper = (lane & 16u) != 0u;
+    const cuda_block_q3_K *x = upper ? x1 : x0;
+    const cuda_block_q8_K *y = upper ? y1 : y0;
+    const bool valid = upper ? valid1 : valid0;
+    int term = 0;
+    if (valid) {
+        int group_sum = 0;
+#pragma unroll
+        for (uint32_t i = 0; i < 16u; i += 4u) {
+            const uint32_t index = group * 16u + i;
+            group_sum = __dp4a(
+                (int32_t)dev_q3_K_packed4(x, group, i),
+                *reinterpret_cast<const int32_t *>(y->qs + index),
+                group_sum);
+        }
+        term = dev_q3_K_scale(x, group) * group_sum;
+    }
+    const uint32_t mask = upper ? 0xffff0000u : 0x0000ffffu;
+#pragma unroll
+    for (int off = 8; off > 0; off >>= 1) {
+        term += __shfl_down_sync(mask, term, off, 16);
+    }
+    float result = 0.0f;
+    if ((lane & 15u) == 0u && valid) {
+        result = dev_f16_to_f32(x->d) * y->d * (float)term;
+    }
+    *result0 = upper ? 0.0f : result;
+    *result1 = upper ? result : 0.0f;
 }
 
 __device__ static void dev_dot_q3_K_q8_K_block8(
@@ -19207,13 +19266,7 @@ __device__ static void dev_dot_q3_K_q8_K_block8(
 #pragma unroll
         for (uint32_t lane = 0; lane < 16u; lane += 4u) {
             const uint32_t i0 = group * 16u + lane;
-            uint32_t packed = 0;
-#pragma unroll
-            for (uint32_t j = 0; j < 4u; j++) {
-                packed |=
-                    (uint32_t)(uint8_t)(int8_t)dev_q3_K_value(x, i0 + j)
-                    << (8u * j);
-            }
+            const uint32_t packed = dev_q3_K_packed4(x, group, lane);
 #pragma unroll
             for (uint32_t p = 0; p < 8u; p++) {
                 if (p < n) {
@@ -22112,6 +22165,63 @@ __global__ static void laguna_moe_down_q3K_sum_kernel(
             acc += dev_dot_q3_K_q8_K_block(wr + b, xq + b);
         }
         acc = quarter_warp_sum_f32(acc, lane);
+        if (lane == 0u) total += acc;
+    }
+    if (lane == 0u) out[(uint64_t)tok * out_dim + row] = total;
+}
+
+/* Generation-specialized Q3_K down projection.  A warp owns one output row
+ * and computes two quant blocks cooperatively.  Completed block dots are
+ * returned to lanes 0..midq_blocks-1 before the original reduction tree, so
+ * expert and block floating-point accumulation remains unchanged. */
+__global__ static void laguna_moe_down_q3K_group_warp_kernel(
+        float *out,
+        const char *down_base,
+        const cuda_block_q8_K *midq,
+        const int32_t *selected,
+        uint64_t down_expert_bytes,
+        uint64_t down_row_bytes,
+        uint32_t midq_blocks,
+        uint32_t out_dim,
+        uint32_t n_expert) {
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t warp = threadIdx.x >> 5u;
+    const uint32_t row = blockIdx.x * 8u + warp;
+    const uint32_t tok = blockIdx.y;
+    if (row >= out_dim) return;
+    float total = 0.0f;
+    for (uint32_t slot = 0; slot < n_expert; slot++) {
+        int32_t expert_i =
+            selected[(uint64_t)tok * n_expert + slot];
+        if (expert_i < 0) expert_i = 0;
+        const cuda_block_q3_K *wr =
+            (const cuda_block_q3_K *)(down_base +
+                (uint64_t)(uint32_t)expert_i * down_expert_bytes +
+                (uint64_t)row * down_row_bytes);
+        const cuda_block_q8_K *xq =
+            midq + ((uint64_t)tok * n_expert + slot) * midq_blocks;
+        float acc = 0.0f;
+        for (uint32_t b = 0; b < midq_blocks; b += 2u) {
+            const bool valid1 = b + 1u < midq_blocks;
+            const uint32_t b1 = valid1 ? b + 1u : b;
+            float result0, result1;
+            dev_dot_q3_K_q8_K_block_pair_warp(
+                wr + b, xq + b, true,
+                wr + b1, xq + b1, valid1, &result0, &result1);
+            const float block0 =
+                __shfl_sync(0xffffffffu, result0, 0);
+            const float block1 =
+                __shfl_sync(0xffffffffu, result1, 16);
+            if (lane == b) {
+                acc = block0;
+            } else if (valid1 && lane == b + 1u) {
+                acc = block1;
+            }
+        }
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc += __shfl_down_sync(0xffffffffu, acc, off);
+        }
         if (lane == 0u) total += acc;
     }
     if (lane == 0u) out[(uint64_t)tok * out_dim + row] = total;
@@ -29050,6 +29160,71 @@ __global__ static void glm_routed_moe_gateup_warp_kernel(
     }
 }
 
+/* Decode gate/up for short Q2_K batches.  Each half warp owns a row, keeping
+ * the native lane-per-quant-block memory pattern while evaluating two rows
+ * per warp.  Laguna's 3072-wide routed input has twelve Q2_K blocks, so this
+ * raises useful lane occupancy from 12/32 to 24/32 without changing either
+ * the block dot or its floating-point reduction tree. */
+__global__ static void glm_routed_moe_gateup_halfwarp_kernel(
+        float *mid,
+        const char *gate_base,
+        const char *up_base,
+        const cuda_block_q8_K *xq,
+        const int32_t *selected,
+        uint64_t gate_expert_bytes,
+        uint64_t gate_row_bytes,
+        uint64_t up_expert_bytes,
+        uint64_t up_row_bytes,
+        uint32_t xq_blocks,
+        uint32_t expert_mid_dim,
+        uint32_t n_expert,
+        uint32_t n_tokens) {
+    const uint32_t tok = blockIdx.z;
+    const uint32_t slot = blockIdx.y;
+    const uint32_t lane = threadIdx.x & 15u;
+    const uint32_t row_lane = threadIdx.x >> 4u;
+    if (tok >= n_tokens || slot >= n_expert) return;
+    const int32_t expert = selected[(uint64_t)tok * n_expert + slot];
+
+    extern __shared__ unsigned int glm_moe_half_sh_u32[];
+    {
+        const unsigned int *src =
+            (const unsigned int *)(xq + (uint64_t)tok * xq_blocks);
+        const uint32_t words =
+            xq_blocks * (uint32_t)sizeof(cuda_block_q8_K) / 4u;
+        for (uint32_t i = threadIdx.x; i < words; i += blockDim.x) {
+            glm_moe_half_sh_u32[i] = src[i];
+        }
+    }
+    __syncthreads();
+    if (expert < 0) return;
+    const cuda_block_q8_K *xrow =
+        (const cuda_block_q8_K *)glm_moe_half_sh_u32;
+
+    const uint32_t row = blockIdx.x * 16u + row_lane;
+    if (row >= expert_mid_dim) return;
+    const char *gr =
+        gate_base + (uint64_t)expert * gate_expert_bytes +
+        (uint64_t)row * gate_row_bytes;
+    const char *ur =
+        up_base + (uint64_t)expert * up_expert_bytes +
+        (uint64_t)row * up_row_bytes;
+    float g = 0.0f;
+    float u = 0.0f;
+    for (uint32_t b = lane; b < xq_blocks; b += 16u) {
+        g += dev_dot_q2_K_q8_K_block(
+            (const cuda_block_q2_K *)(gr + (uint64_t)b * 84u), xrow + b);
+        u += dev_dot_q2_K_q8_K_block(
+            (const cuda_block_q2_K *)(ur + (uint64_t)b * 84u), xrow + b);
+    }
+    g = half_warp_sum_f32(g, lane);
+    u = half_warp_sum_f32(u, lane);
+    if (lane == 0u) {
+        mid[((uint64_t)tok * n_expert + slot) * expert_mid_dim + row] =
+            (g / (1.0f + expf(-g))) * u;
+    }
+}
+
 /* Exact two-token gate/up with adjacent-token expert reuse. Token 0 owns an
  * expert present in both rows; token 1 only launches work for unmatched
  * experts. Each token keeps the native lane assignment and warp reduction. */
@@ -30130,6 +30305,8 @@ static int laguna_routed_moe_q34_batch(
     const bool tiled_q4 = q4k && n_tokens >= 16u;
     const bool tiled_q3 = q3k && n_tokens >= 16u;
     const bool tiled_experts = tiled_q4 || tiled_q3;
+    const bool q3_group_down =
+        q3k && getenv("DS4_CUDA_MOE_NO_Q3_GROUP_DOWN") == NULL;
     uint32_t *sorted_pairs = NULL;
     uint32_t *offsets = NULL;
     uint32_t *counts = NULL;
@@ -30316,11 +30493,22 @@ static int laguna_routed_moe_q34_batch(
                 down_expert_bytes, down_row_bytes,
                 midq_blocks, out_dim, n_expert);
         } else {
-            laguna_moe_down_q3K_sum_kernel<<<down_grid, 256>>>(
-                (float *)out->ptr, dw, midq,
-                (const int32_t *)selected->ptr,
-                down_expert_bytes, down_row_bytes,
-                midq_blocks, out_dim, n_expert);
+            if (q3_group_down) {
+                const dim3 group_down_grid(
+                    (out_dim + 7u) / 8u, n_tokens, 1);
+                laguna_moe_down_q3K_group_warp_kernel<<<
+                    group_down_grid, 256>>>(
+                    (float *)out->ptr, dw, midq,
+                    (const int32_t *)selected->ptr,
+                    down_expert_bytes, down_row_bytes,
+                    midq_blocks, out_dim, n_expert);
+            } else {
+                laguna_moe_down_q3K_sum_kernel<<<down_grid, 256>>>(
+                    (float *)out->ptr, dw, midq,
+                    (const int32_t *)selected->ptr,
+                    down_expert_bytes, down_row_bytes,
+                    midq_blocks, out_dim, n_expert);
+            }
         }
     }
     return cuda_ok(cudaGetLastError(),
@@ -30666,6 +30854,18 @@ extern "C" int ds4_gpu_glm_routed_moe_batch_tensor(
                 (const int32_t *)selected->ptr,
                 gate_expert_bytes, gate_row_bytes, up_expert_bytes, up_row_bytes,
                 xq_blocks, expert_mid_dim, n_expert, n_tokens, mid_token_stride);
+    } else if (n_tokens == 1u &&
+               getenv("DS4_CUDA_MOE_NO_Q2_HALFWARP") == NULL) {
+        dim3 g1((expert_mid_dim + 15u) / 16u, n_expert, 1u);
+        const uint32_t sh1 =
+            xq_blocks * (uint32_t)sizeof(cuda_block_q8_K);
+        glm_routed_moe_gateup_halfwarp_kernel<<<g1, 256u, sh1>>>(
+                mid_work, gw, uw,
+                (const cuda_block_q8_K *)xq_scratch[dev]->ptr,
+                (const int32_t *)selected->ptr,
+                gate_expert_bytes, gate_row_bytes,
+                up_expert_bytes, up_row_bytes,
+                xq_blocks, expert_mid_dim, n_expert, n_tokens);
     } else {
         const uint32_t warps = 8u;
         dim3 g1((expert_mid_dim + warps - 1u) / warps, n_expert, n_tokens);

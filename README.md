@@ -258,11 +258,14 @@ make cuda-spark
 
 On the development DGX Spark with that mixed Q2_K/Q3_K GGUF, a 4,096-token
 prefill runs at about 580 tokens/s and generation after that prompt at about
-25.6 tokens/s. Long CUDA prefills compact routed tokens by expert, dequantize
+26.7 tokens/s. Long CUDA prefills compact routed tokens by expert, dequantize
 only active expert matrices, and use variable-size FP16 tensor-core GEMMs with
-FP32 projection outputs. Decode and short prefills retain the quantized
-matvec kernels. Set `DS4_CUDA_MOE_NO_TC_PREFILL=1` to select the quantized
-long-prefill fallback for diagnostics.
+FP32 projection outputs. Decode reuses each Laguna KV-cache row across grouped
+query heads and uses denser Q2_K/Q3_K warp layouts; short prefills retain the
+quantized matvec kernels. Set `DS4_CUDA_MOE_NO_TC_PREFILL=1` to select the
+quantized long-prefill fallback. The decode optimizations can be isolated with
+`DS4_CUDA_LAGUNA_NO_GQA_DECODE=1`, `DS4_CUDA_MOE_NO_Q2_HALFWARP=1`, and
+`DS4_CUDA_MOE_NO_Q3_GROUP_DOWN=1`.
 
 On the development Strix Halo with the official Q4_K_M GGUF, a 2,048-token
 prefill runs at about 252 tokens/s and short-context generation at about 25.8
