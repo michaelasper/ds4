@@ -36770,6 +36770,7 @@ struct ds4_engine {
     uint32_t support_stages;
     int mtp_draft_tokens;
     int dflash_draft_tokens;
+    float dflash_p_min;
     float mtp_margin;
     float dspark_confidence_threshold;
     char *directional_steering_file;
@@ -48476,6 +48477,7 @@ typedef struct {
     ds4_gpu_tensor *output_norm;
     ds4_gpu_tensor *logits;
     ds4_gpu_tensor *argmax;
+    ds4_gpu_tensor *probabilities;
     ds4_gpu_tensor *key_cache[DS4_DFLASH_N_LAYER];
     ds4_gpu_tensor *value_cache[DS4_DFLASH_N_LAYER];
 } ds4_dflash_gpu_graph;
@@ -49005,6 +49007,45 @@ static bool laguna_graph_routed_moe_decode_rows(
                    n_rows,
                    (uint32_t)mid_elems) != 0;
     }
+    if ((l->ffn_gate_exps->type == DS4_TENSOR_Q2_K ||
+         l->ffn_gate_exps->type == DS4_TENSOR_Q3_K) &&
+        l->ffn_up_exps->type == l->ffn_gate_exps->type &&
+        l->ffn_down_exps->type == l->ffn_gate_exps->type &&
+        n_rows <= DS4_DFLASH_BLOCK_SIZE) {
+        /*
+         * The Q2_K/Q3_K batch dispatch uses the same independent per-token
+         * kernels as one-token decode. Encoding all verifier rows together
+         * removes repeated encoder boundaries without changing reductions.
+         */
+        return ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
+                   g->ffn_out,
+                   g->routed_mid,
+                   model->map,
+                   model->size,
+                   l->ffn_gate_exps->abs_offset,
+                   l->ffn_up_exps->abs_offset,
+                   l->ffn_down_exps->abs_offset,
+                   l->ffn_gate_exps->type,
+                   l->ffn_up_exps->type,
+                   l->ffn_down_exps->type,
+                   gate_expert_bytes,
+                   gate_row_bytes,
+                   up_expert_bytes,
+                   up_row_bytes,
+                   down_expert_bytes,
+                   down_row_bytes,
+                   DS4_N_EMBD,
+                   DS4_N_FF_EXP,
+                   DS4_N_EMBD,
+                   g->router_selected,
+                   g->router_weights,
+                   DS4_N_EXPERT,
+                   DS4_N_EXPERT_USED,
+                   layer,
+                   g->ffn_norm,
+                   n_rows,
+                   (uint32_t)mid_elems) != 0;
+    }
 #endif
 #ifdef DS4_ROCM_BUILD
     /* The ROCm Q4_K batch path keeps decode's per-token kernels when the row
@@ -49256,6 +49297,7 @@ static void dflash_graph_free(ds4_dflash_gpu_graph *g) {
     DS4_DFLASH_FREE(output_norm);
     DS4_DFLASH_FREE(logits);
     DS4_DFLASH_FREE(argmax);
+    DS4_DFLASH_FREE(probabilities);
 #undef DS4_DFLASH_FREE
     for (uint32_t il = 0; il < DS4_DFLASH_N_LAYER; il++) {
         ds4_gpu_tensor_free(g->key_cache[il]);
@@ -49317,6 +49359,7 @@ static bool dflash_graph_alloc(ds4_dflash_gpu_graph *g) {
     DS4_DFLASH_ALLOC(output_norm, block_rows * embd * f32);
     DS4_DFLASH_ALLOC(logits, block_rows * DS4_N_VOCAB * f32);
     DS4_DFLASH_ALLOC(argmax, block_rows * sizeof(int32_t));
+    DS4_DFLASH_ALLOC(probabilities, block_rows * f32);
 #undef DS4_DFLASH_ALLOC
 
     const uint64_t cache_bytes =
@@ -49365,6 +49408,17 @@ static bool dflash_graph_matmul(
                                          n_rows) != 0;
     }
     if (weight->type == DS4_TENSOR_Q8_0) {
+#ifdef __APPLE__
+        return ds4_gpu_matmul_q8_0_dflash_tensor(
+                out,
+                e->mtp_model.map,
+                e->mtp_model.size,
+                weight->abs_offset,
+                weight->dim[0],
+                weight->dim[1],
+                x,
+                n_rows) != 0;
+#else
         return ds4_gpu_matmul_q8_0_tensor(out,
                                           e->mtp_model.map,
                                           e->mtp_model.size,
@@ -49373,6 +49427,7 @@ static bool dflash_graph_matmul(
                                           weight->dim[1],
                                           x,
                                           n_rows) != 0;
+#endif
     }
     if (tensor_type_is_dense_quant(weight->type)) {
         return ds4_gpu_matmul_quant_tensor(out,
@@ -49682,11 +49737,26 @@ static bool dflash_graph_draft_block(
                  DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
     }
     if (ok) {
-        ok = laguna_graph_matmul(g->logits,
-                                 &e->model,
-                                 e->weights.output,
-                                 g->output_norm,
-                                 n_rows);
+#ifdef __APPLE__
+        if (e->weights.output->type == DS4_TENSOR_Q8_0) {
+            ok = ds4_gpu_matmul_q8_0_dflash_tensor(
+                     g->logits,
+                     e->model.map,
+                     e->model.size,
+                     e->weights.output->abs_offset,
+                     e->weights.output->dim[0],
+                     e->weights.output->dim[1],
+                     g->output_norm,
+                     n_rows) != 0;
+        } else
+#endif
+        {
+            ok = laguna_graph_matmul(g->logits,
+                                     &e->model,
+                                     e->weights.output,
+                                     g->output_norm,
+                                     n_rows);
+        }
     }
     if (ok) {
 #ifdef DS4_ROCM_BUILD
@@ -49701,6 +49771,14 @@ static bool dflash_graph_draft_block(
                                           n_rows,
                                           1) != 0;
 #endif
+    }
+    if (ok && e->dflash_p_min > 0.0f) {
+        ok = ds4_gpu_dflash_probabilities_tensor(
+                 g->probabilities,
+                 g->logits,
+                 g->argmax,
+                 n_rows,
+                 DS4_N_VOCAB) != 0;
     }
     if (!ok && ds4_gpu_commands_active()) {
         (void)ds4_gpu_end_commands();
@@ -51856,6 +51934,7 @@ struct ds4_session {
     bool dflash_synced;
     uint64_t dflash_cycles;
     uint64_t dflash_proposed;
+    uint64_t dflash_pruned;
     uint64_t dflash_accepted;
     double dflash_draft_ms;
     double dflash_verify_ms;
@@ -60118,6 +60197,17 @@ static int ds4_engine_open_internal(ds4_engine **out,
     }
     e->dflash_draft_tokens =
         opt->dflash_draft_tokens > 0 ? opt->dflash_draft_tokens : 3;
+    if (opt->dflash_p_min_set &&
+        (!isfinite(opt->dflash_p_min) ||
+         opt->dflash_p_min < 0.0f || opt->dflash_p_min > 1.0f)) {
+        fprintf(stderr,
+                "ds4: --dflash-p-min must be between 0 and 1\n");
+        free(e);
+        *out = NULL;
+        return 1;
+    }
+    e->dflash_p_min =
+        opt->dflash_p_min_set ? opt->dflash_p_min : 0.4f;
     e->mtp_margin = opt->mtp_margin >= 0.0f ? opt->mtp_margin : 3.0f;
     if (opt->dspark_confidence_threshold_set) {
         e->dspark_confidence_threshold = opt->dspark_confidence_threshold;
@@ -60628,10 +60718,12 @@ static int ds4_engine_open_internal(ds4_engine **out,
             e->dflash_ready = true;
             fprintf(stderr,
                     "ds4: Laguna DFlash support loaded: %s "
-                    "(weights=%s, draft=%d, block=%u, cache=%u)\n",
+                    "(weights=%s, draft=%d, p-min=%.2f, block=%u, "
+                    "cache=%u)\n",
                     support_path,
                     tensor_type_name(e->dflash_weights.fc->type),
                     e->dflash_draft_tokens,
+                    e->dflash_p_min,
                     e->dflash_weights.block_size,
                     DS4_DFLASH_CACHE_CAP);
         } else if (e->support_kind == DS4_SUPPORT_MTP_LEGACY) {
@@ -61949,6 +62041,7 @@ void ds4_session_free(ds4_session *s) {
                 fprintf(stderr,
                         "ds4: DFlash: %" PRIu64 " cycles, %" PRIu64
                         "/%" PRIu64 " draft tokens accepted (%.1f%%), "
+                        "%" PRIu64 " low-confidence skipped, "
                         "pipeline %.2f ms/cycle\n",
                         s->dflash_cycles,
                         s->dflash_accepted,
@@ -61956,6 +62049,7 @@ void ds4_session_free(ds4_session *s) {
                         s->dflash_proposed ?
                             100.0 * (double)s->dflash_accepted /
                                 (double)s->dflash_proposed : 0.0,
+                        s->dflash_pruned,
                         (s->dflash_draft_ms + s->dflash_verify_ms) /
                             (double)s->dflash_cycles);
             }
@@ -69383,10 +69477,13 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
 
     const uint32_t pos0 = (uint32_t)s->checkpoint.len;
-    const uint32_t n_rows = n_draft + 1u;
+    uint32_t n_rows = n_draft + 1u;
+    const uint32_t generated_draft = n_draft;
     int draft_top[DS4_DFLASH_BLOCK_SIZE] = {0};
     int target_top[DS4_DFLASH_BLOCK_SIZE] = {0};
     int verify_tokens[DS4_DFLASH_BLOCK_SIZE] = {0};
+    const float draft_p_min = e->dflash_p_min;
+    bool draft_read_ok = false;
 
     const double cycle_t0 = now_sec();
     if (!laguna_graph_spec_snapshot(&s->laguna_graph, pos0, n_rows)) {
@@ -69409,41 +69506,126 @@ static int ds4_session_eval_dflash_speculative_argmax(
         return 1;
     }
     const double submit_done = now_sec();
+    bool target_preencoded = false;
+#ifdef __APPLE__
+    if (draft_p_min > 0.0f && ds4_gpu_flush_commands() != 0) {
+        /*
+         * Confidence keeps the full draft on most cycles. Encode that common
+         * verifier while the draft is executing, then either commit it after
+         * reading confidence or discard it and encode the shorter verifier.
+         */
+        verify_tokens[0] = first_token;
+        ds4_laguna_feature_capture speculative_capture =
+            ds4_session_dflash_capture(s, 0, n_rows);
+        target_preencoded = laguna_graph_forward_batch(
+            &s->laguna_graph,
+            &e->model,
+            &e->weights,
+            verify_tokens,
+            s->dflash_graph.argmax,
+            n_rows,
+            pos0,
+            NULL,
+            target_top,
+            &speculative_capture,
+            NULL,
+            NULL,
+            0);
+        if (!target_preencoded && ds4_gpu_commands_active()) {
+            (void)ds4_gpu_discard_commands();
+        }
+    }
+#endif
+    if (draft_p_min > 0.0f) {
+        float draft_probabilities[DS4_DFLASH_BLOCK_SIZE] = {0};
+#ifdef __APPLE__
+        draft_read_ok =
+            ds4_gpu_wait_submitted_commands() != 0 &&
+            ds4_gpu_tensor_read(
+                s->dflash_graph.argmax,
+                0,
+                draft_top,
+                (uint64_t)n_rows * sizeof(draft_top[0])) != 0 &&
+            ds4_gpu_tensor_read(
+                s->dflash_graph.probabilities,
+                0,
+                draft_probabilities,
+                (uint64_t)n_rows *
+                    sizeof(draft_probabilities[0])) != 0;
+#else
+        draft_read_ok =
+            ds4_gpu_end_commands() != 0 &&
+            ds4_gpu_tensor_read(
+                s->dflash_graph.argmax,
+                0,
+                draft_top,
+                (uint64_t)n_rows * sizeof(draft_top[0])) != 0 &&
+            ds4_gpu_tensor_read(
+                s->dflash_graph.probabilities,
+                0,
+                draft_probabilities,
+                (uint64_t)n_rows *
+                    sizeof(draft_probabilities[0])) != 0;
+#endif
+        for (uint32_t i = 0; draft_read_ok && i < n_draft; i++) {
+            if (draft_probabilities[i + 1u] < draft_p_min) {
+                n_draft = i;
+                n_rows = n_draft + 1u;
+                break;
+            }
+        }
+        if (target_preencoded && n_draft != generated_draft) {
+            draft_read_ok = ds4_gpu_discard_commands() != 0;
+            target_preencoded = false;
+        }
+        if (!draft_read_ok ||
+            (!target_preencoded && ds4_gpu_begin_commands() == 0)) {
+            if (ds4_gpu_commands_active()) {
+                (void)ds4_gpu_discard_commands();
+            }
+            s->dflash_synced = false;
+            if (errlen) snprintf(err, errlen,
+                                 "DFlash confidence cutoff failed");
+            return -1;
+        }
+    }
 
     verify_tokens[0] = first_token;
     ds4_laguna_feature_capture capture =
         ds4_session_dflash_capture(s, 0, n_rows);
-    const bool verify_ok = laguna_graph_forward_batch(
-        &s->laguna_graph,
-        &e->model,
-        &e->weights,
-        verify_tokens,
-        s->dflash_graph.argmax,
-        n_rows,
-        pos0,
-        NULL,
-        target_top,
-        &capture,
-        NULL,
-        NULL,
-        0);
+    const bool verify_ok = target_preencoded ||
+        laguna_graph_forward_batch(
+            &s->laguna_graph,
+            &e->model,
+            &e->weights,
+            verify_tokens,
+            s->dflash_graph.argmax,
+            n_rows,
+            pos0,
+            NULL,
+            target_top,
+            &capture,
+            NULL,
+            NULL,
+            0);
     bool inject_ok = false;
     if (verify_ok) {
         inject_ok = ds4_session_dflash_finish_capture(s, pos0, n_rows);
     }
     bool target_read_ok = false;
-    bool draft_read_ok = false;
     if (inject_ok) {
         target_read_ok = ds4_gpu_tensor_read(
             s->laguna_graph.spec_argmax,
             0,
             target_top,
             (uint64_t)n_rows * sizeof(target_top[0])) != 0;
-        draft_read_ok = ds4_gpu_tensor_read(
-            s->dflash_graph.argmax,
-            0,
-            draft_top,
-            (uint64_t)n_rows * sizeof(draft_top[0])) != 0;
+        if (!draft_read_ok) {
+            draft_read_ok = ds4_gpu_tensor_read(
+                s->dflash_graph.argmax,
+                0,
+                draft_top,
+                (uint64_t)n_rows * sizeof(draft_top[0])) != 0;
+        }
     }
     if (!verify_ok || !inject_ok || !target_read_ok || !draft_read_ok) {
         (void)laguna_graph_spec_restore(
@@ -69491,7 +69673,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
     const double verify_done = now_sec();
     s->dflash_cycles++;
     s->dflash_cycles_since_baseline++;
-    s->dflash_proposed += n_draft;
+    s->dflash_proposed += generated_draft;
+    s->dflash_pruned += generated_draft - n_draft;
     s->dflash_accepted += (uint64_t)(n_accept - 1);
     s->dflash_draft_ms += (submit_done - cycle_t0) * 1000.0;
     s->dflash_verify_ms += (verify_done - submit_done) * 1000.0;
@@ -69500,7 +69683,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
     s->dflash_window_ms += cycle_ms;
     s->dflash_window_tokens += (uint64_t)n_accept;
     s->dflash_window_cycles++;
-    if ((uint32_t)(n_accept - 1) == n_draft) {
+    if (n_draft == generated_draft &&
+        (uint32_t)(n_accept - 1) == generated_draft) {
         s->dflash_stage_full_accepts++;
     }
     const uint64_t cumulative_tokens =
@@ -69574,6 +69758,15 @@ static int ds4_session_eval_dflash_speculative_argmax(
                         s->dflash_active_draft,
                         cumulative_ms_per_token);
             }
+        } else if (s->dflash_cycles < 10u &&
+                   spec_ms_per_token < s->dflash_baseline_ms * 1.05) {
+            if (getenv("DS4_DFLASH_TIMING") != NULL) {
+                fprintf(stderr,
+                        "ds4: DFlash calibration is within startup noise "
+                        "(%.2f vs %.2f ms/token); measuring another window\n",
+                        spec_ms_per_token,
+                        s->dflash_baseline_ms);
+            }
         } else {
             s->dflash_guard_decided = true;
             s->dflash_suspended = true;
@@ -69614,8 +69807,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
     if (getenv("DS4_DFLASH_TIMING") != NULL) {
         fprintf(stderr,
-                "ds4: DFlash cycle proposed=%u accepted=%d "
+                "ds4: DFlash cycle drafted=%u verified=%u accepted=%d "
                 "pipeline=%.3f ms\n",
+                generated_draft,
                 n_draft,
                 n_accept - 1,
                 (verify_done - cycle_t0) * 1000.0);

@@ -370,6 +370,20 @@ kernel void kernel_mul_mv_q8_0_f32_rows2_exact(
         args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
+[[host_name("kernel_mul_mv_q8_0_f32_rows3_exact")]]
+kernel void kernel_mul_mv_q8_0_f32_rows3_exact(
+        constant ds4_metal_args_mul_mv &args,
+        device const char *src0,
+        device const char *src1,
+        device char *dst,
+        threadgroup char *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    kernel_mul_mv_q8_0_f32_rows_exact_impl<3>(
+        args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+}
+
 [[host_name("kernel_mul_mv_q8_0_f32_rows4_exact")]]
 kernel void kernel_mul_mv_q8_0_f32_rows4_exact(
         constant ds4_metal_args_mul_mv &args,

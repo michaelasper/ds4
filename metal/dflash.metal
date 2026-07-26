@@ -99,3 +99,47 @@ kernel void kernel_dflash_commit_kv_f16(
     key_cache[dst] = (half)k[src];
     value_cache[dst] = (half)v[src];
 }
+
+struct ds4_metal_args_dflash_probabilities {
+    uint32_t n_rows;
+    uint32_t n_vocab;
+};
+
+kernel void kernel_dflash_probabilities(
+        constant ds4_metal_args_dflash_probabilities &args,
+        device const float   *logits,
+        device const int32_t *argmax,
+        device       float   *probabilities,
+        threadgroup float    *scratch [[threadgroup(0)]],
+        uint tid [[thread_index_in_threadgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint3 ntg [[threads_per_threadgroup]]) {
+    const uint row = tgpig.x;
+    if (row >= args.n_rows || args.n_vocab == 0u) return;
+    const int32_t top = argmax[row];
+    if (top < 0 || (uint32_t)top >= args.n_vocab) {
+        if (tid == 0u) probabilities[row] = 0.0f;
+        return;
+    }
+
+    device const float *row_logits =
+        logits + (uint64_t)row * args.n_vocab;
+    const float top_logit = row_logits[top];
+    float sum = 0.0f;
+    if (isfinite(top_logit)) {
+        for (uint col = tid; col < args.n_vocab; col += ntg.x) {
+            const float term = exp(row_logits[col] - top_logit);
+            if (isfinite(term)) sum += term;
+        }
+    }
+    scratch[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint step = ntg.x >> 1u; step != 0u; step >>= 1u) {
+        if (tid < step) scratch[tid] += scratch[tid + step];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) {
+        probabilities[row] =
+            scratch[0] > 0.0f ? 1.0f / scratch[0] : 0.0f;
+    }
+}
