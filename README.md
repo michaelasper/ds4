@@ -207,17 +207,20 @@ tagged tool-call formats:
 ```
 
 Poolside's standalone DFlash model can accelerate greedy Laguna decoding on
-Metal and ROCm without changing the generated tokens. Download it separately
-and pass it alongside any supported Laguna GGUF:
+Metal and ROCm without changing the generated tokens. The download target uses
+a 1.04 GiB Q8_0 quant of Poolside's support model: it drafts faster and uses
+half the memory of BF16, while the full Laguna model still verifies every
+accepted token. Download it separately and pass it alongside any supported
+Laguna GGUF:
 
 ```sh
 ./download_model.sh laguna-dflash
 ./ds4 -m gguf/laguna-s-2.1-Q4_K_M.gguf \
-  --dflash gguf/laguna-s-2.1-DFlash-BF16.gguf --temp 0
+  --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf --temp 0
 ./ds4-agent -m gguf/laguna-s-2.1-Q4_K_M.gguf \
-  --dflash gguf/laguna-s-2.1-DFlash-BF16.gguf
+  --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf
 ./ds4-server -m gguf/laguna-s-2.1-Q4_K_M.gguf \
-  --dflash gguf/laguna-s-2.1-DFlash-BF16.gguf
+  --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf
 ```
 
 The default verifies three draft positions at a time. Use

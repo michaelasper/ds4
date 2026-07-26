@@ -7096,11 +7096,20 @@ static void dflash_weights_validate_layout(const ds4_dflash_weights *w) {
     const uint64_t kv_dim =
         (uint64_t)DS4_SHAPE_LAGUNA_S21.n_head_kv *
         DS4_SHAPE_LAGUNA_S21.n_head_dim;
+    const uint32_t matrix_type = w->fc->type;
+
+    if (matrix_type != DS4_TENSOR_BF16 &&
+        !tensor_type_is_dense_quant(matrix_type)) {
+        fprintf(stderr,
+                "ds4: DFlash matrices have unsupported type %s\n",
+                tensor_type_name(matrix_type));
+        exit(1);
+    }
 
     tensor_expect_layout(w->aux_norm, DS4_TENSOR_F32, 2,
                          DS4_SHAPE_LAGUNA_S21.n_embd,
                          DS4_DFLASH_N_AUX, 0);
-    tensor_expect_layout(w->fc, DS4_TENSOR_BF16, 2,
+    tensor_expect_layout(w->fc, matrix_type, 2,
                          (uint64_t)DS4_DFLASH_N_AUX *
                              DS4_SHAPE_LAGUNA_S21.n_embd,
                          DS4_SHAPE_LAGUNA_S21.n_embd, 0);
@@ -7113,30 +7122,30 @@ static void dflash_weights_validate_layout(const ds4_dflash_weights *w) {
         const ds4_dflash_layer_weights *l = &w->layer[il];
         tensor_expect_layout(l->attn_norm, DS4_TENSOR_F32, 1,
                              DS4_SHAPE_LAGUNA_S21.n_embd, 0, 0);
-        tensor_expect_layout(l->attn_q, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->attn_q, matrix_type, 2,
                              DS4_SHAPE_LAGUNA_S21.n_embd, q_dim, 0);
-        tensor_expect_layout(l->attn_k, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->attn_k, matrix_type, 2,
                              DS4_SHAPE_LAGUNA_S21.n_embd, kv_dim, 0);
-        tensor_expect_layout(l->attn_v, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->attn_v, matrix_type, 2,
                              DS4_SHAPE_LAGUNA_S21.n_embd, kv_dim, 0);
-        tensor_expect_layout(l->attn_gate, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->attn_gate, matrix_type, 2,
                              DS4_SHAPE_LAGUNA_S21.n_embd,
                              DS4_SHAPE_LAGUNA_S21.n_head, 0);
         tensor_expect_layout(l->attn_q_norm, DS4_TENSOR_F32, 1,
                              DS4_SHAPE_LAGUNA_S21.n_head_dim, 0, 0);
         tensor_expect_layout(l->attn_k_norm, DS4_TENSOR_F32, 1,
                              DS4_SHAPE_LAGUNA_S21.n_head_dim, 0, 0);
-        tensor_expect_layout(l->attn_output, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->attn_output, matrix_type, 2,
                              q_dim, DS4_SHAPE_LAGUNA_S21.n_embd, 0);
         tensor_expect_layout(l->ffn_norm, DS4_TENSOR_F32, 1,
                              DS4_SHAPE_LAGUNA_S21.n_embd, 0, 0);
-        tensor_expect_layout(l->ffn_gate, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->ffn_gate, matrix_type, 2,
                              DS4_SHAPE_LAGUNA_S21.n_embd,
                              DS4_SHAPE_LAGUNA_S21.n_ff_dense, 0);
-        tensor_expect_layout(l->ffn_up, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->ffn_up, matrix_type, 2,
                              DS4_SHAPE_LAGUNA_S21.n_embd,
                              DS4_SHAPE_LAGUNA_S21.n_ff_dense, 0);
-        tensor_expect_layout(l->ffn_down, DS4_TENSOR_BF16, 2,
+        tensor_expect_layout(l->ffn_down, matrix_type, 2,
                              DS4_SHAPE_LAGUNA_S21.n_ff_dense,
                              DS4_SHAPE_LAGUNA_S21.n_embd, 0);
     }
@@ -50404,18 +50413,50 @@ static bool dflash_graph_matmul(
         const ds4_tensor     *weight,
         const ds4_gpu_tensor *x,
         uint32_t              n_rows) {
-    if (!out || !e || !weight || !x || weight->ndim < 2 ||
-        weight->type != DS4_TENSOR_BF16 || !e->dflash_f16_map) {
+    if (!out || !e || !weight || !x || weight->ndim < 2) {
         return false;
     }
-    return ds4_gpu_matmul_f16_tensor(out,
-                                     e->dflash_f16_map,
-                                     e->dflash_f16_map_size,
-                                     weight->abs_offset,
-                                     weight->dim[0],
-                                     weight->dim[1],
-                                     x,
-                                     n_rows) != 0;
+    if (weight->type == DS4_TENSOR_BF16 && e->dflash_f16_map) {
+        return ds4_gpu_matmul_f16_tensor(out,
+                                         e->dflash_f16_map,
+                                         e->dflash_f16_map_size,
+                                         weight->abs_offset,
+                                         weight->dim[0],
+                                         weight->dim[1],
+                                         x,
+                                         n_rows) != 0;
+    }
+    if (weight->type == DS4_TENSOR_Q8_0) {
+        return ds4_gpu_matmul_q8_0_tensor(out,
+                                          e->mtp_model.map,
+                                          e->mtp_model.size,
+                                          weight->abs_offset,
+                                          weight->dim[0],
+                                          weight->dim[1],
+                                          x,
+                                          n_rows) != 0;
+    }
+    if (tensor_type_is_dense_quant(weight->type)) {
+        return ds4_gpu_matmul_quant_tensor(out,
+                                           e->mtp_model.map,
+                                           e->mtp_model.size,
+                                           weight->abs_offset,
+                                           weight->type,
+                                           weight->dim[0],
+                                           weight->dim[1],
+                                           x,
+                                           n_rows) != 0;
+    }
+    return false;
+}
+
+static const void *dflash_graph_weight_map(const ds4_engine *e) {
+    return e->dflash_f16_map ? e->dflash_f16_map : e->mtp_model.map;
+}
+
+static uint64_t dflash_graph_weight_map_size(const ds4_engine *e) {
+    return e->dflash_f16_map ?
+        e->dflash_f16_map_size : e->mtp_model.size;
 }
 
 static bool dflash_graph_encode_inject(
@@ -50431,13 +50472,15 @@ static bool dflash_graph_encode_inject(
     const uint32_t embd = DS4_SHAPE_LAGUNA_S21.n_embd;
     const uint32_t n_head_kv = DS4_SHAPE_LAGUNA_S21.n_head_kv;
     const uint32_t head_dim = DS4_SHAPE_LAGUNA_S21.n_head_dim;
+    const void *weight_map = dflash_graph_weight_map(e);
+    const uint64_t weight_map_size = dflash_graph_weight_map_size(e);
 
     bool ok = ds4_gpu_begin_commands() != 0;
     if (ok) {
         ok = ds4_gpu_dflash_aux_norm_tensor(
                  g->features,
-                 e->dflash_f16_map,
-                 e->dflash_f16_map_size,
+                 weight_map,
+                 weight_map_size,
                  w->aux_norm->abs_offset,
                  n_rows,
                  embd,
@@ -50455,8 +50498,8 @@ static bool dflash_graph_encode_inject(
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->encoder_norm,
                  g->encoder,
-                 e->dflash_f16_map,
-                 e->dflash_f16_map_size,
+                 weight_map,
+                 weight_map_size,
                  w->encoder_output_norm->abs_offset,
                  embd,
                  n_rows,
@@ -50467,8 +50510,8 @@ static bool dflash_graph_encode_inject(
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->norm,
                  g->encoder_norm,
-                 e->dflash_f16_map,
-                 e->dflash_f16_map_size,
+                 weight_map,
+                 weight_map_size,
                  l->attn_norm->abs_offset,
                  embd,
                  n_rows,
@@ -50482,8 +50525,8 @@ static bool dflash_graph_encode_inject(
         if (ok) {
             ok = ds4_gpu_laguna_head_rms_norm_rope_tensor(
                      g->k,
-                     e->dflash_f16_map,
-                     e->dflash_f16_map_size,
+                     weight_map,
+                     weight_map_size,
                      l->attn_k_norm->abs_offset,
                      n_rows,
                      n_head_kv,
@@ -50597,6 +50640,8 @@ static bool dflash_graph_draft_block(
     const uint32_t q_dim = n_head * head_dim;
     const uint32_t kv_dim = n_head_kv * head_dim;
     const uint32_t ff = DS4_SHAPE_LAGUNA_S21.n_ff_dense;
+    const void *weight_map = dflash_graph_weight_map(e);
+    const uint64_t weight_map_size = dflash_graph_weight_map_size(e);
 
     bool ok = ds4_gpu_begin_commands() != 0;
     if (ok) {
@@ -50616,8 +50661,8 @@ static bool dflash_graph_draft_block(
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->norm,
                  g->cur,
-                 e->dflash_f16_map,
-                 e->dflash_f16_map_size,
+                 weight_map,
+                 weight_map_size,
                  l->attn_norm->abs_offset,
                  embd,
                  n_rows,
@@ -50636,8 +50681,8 @@ static bool dflash_graph_draft_block(
             ok = ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
                      g->q,
                      g->k,
-                     e->dflash_f16_map,
-                     e->dflash_f16_map_size,
+                     weight_map,
+                     weight_map_size,
                      l->attn_q_norm->abs_offset,
                      l->attn_k_norm->abs_offset,
                      n_rows,
@@ -50690,8 +50735,8 @@ static bool dflash_graph_draft_block(
             ok = ds4_gpu_rms_norm_weight_rows_tensor(
                      g->ffn_norm,
                      g->after_attn,
-                     e->dflash_f16_map,
-                     e->dflash_f16_map_size,
+                     weight_map,
+                     weight_map_size,
                      l->ffn_norm->abs_offset,
                      embd,
                      n_rows,
@@ -50738,8 +50783,8 @@ static bool dflash_graph_draft_block(
         ok = ds4_gpu_rms_norm_weight_rows_tensor(
                  g->output_norm,
                  g->cur,
-                 e->dflash_f16_map,
-                 e->dflash_f16_map_size,
+                 weight_map,
+                 weight_map_size,
                  w->output_norm->abs_offset,
                  embd,
                  n_rows,
@@ -61673,18 +61718,21 @@ static int ds4_engine_open_internal(ds4_engine **out,
                 return 1;
             }
             dflash_weights_bind(&e->dflash_weights, &e->mtp_model);
-            e->dflash_f16_map = dflash_prepare_f16_map(&e->mtp_model);
-            if (!e->dflash_f16_map) {
-                ds4_engine_close(e);
-                *out = NULL;
-                return 1;
+            if (e->dflash_weights.fc->type == DS4_TENSOR_BF16) {
+                e->dflash_f16_map = dflash_prepare_f16_map(&e->mtp_model);
+                if (!e->dflash_f16_map) {
+                    ds4_engine_close(e);
+                    *out = NULL;
+                    return 1;
+                }
+                e->dflash_f16_map_size = e->mtp_model.size;
             }
-            e->dflash_f16_map_size = e->mtp_model.size;
             e->dflash_ready = true;
             fprintf(stderr,
                     "ds4: Laguna DFlash support loaded: %s "
-                    "(draft=%d, block=%u, cache=%u)\n",
+                    "(weights=%s, draft=%d, block=%u, cache=%u)\n",
                     support_path,
+                    tensor_type_name(e->dflash_weights.fc->type),
                     e->dflash_draft_tokens,
                     e->dflash_weights.block_size,
                     DS4_DFLASH_CACHE_CAP);
@@ -62113,8 +62161,9 @@ static int ds4_engine_open_internal(ds4_engine **out,
             e->mtp_ready ||
             (e->support_kind == DS4_SUPPORT_DSPARK && e->dspark) ||
             e->dflash_ready;
-        const void *support_model_map = e->dflash_ready ?
-            e->dflash_f16_map : e->mtp_model.map;
+        const void *support_model_map =
+            (e->dflash_ready && e->dflash_f16_map) ?
+                e->dflash_f16_map : e->mtp_model.map;
         if (support_model_runtime_ready &&
             !ds4_gpu_set_model_map_range(support_model_map,
                                            e->mtp_model.size,

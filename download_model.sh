@@ -23,7 +23,7 @@ GLM_ANTIREZ_Q2_FILE="GLM-5.2-UD-Q2_K_RoutedQ2K.gguf"
 GLM_ANTIREZ_Q4_FILE="GLM-5.2-UD-Q4_K_RoutedQ4K.gguf"
 LAGUNA_Q4_FILE="laguna-s-2.1-Q4_K_M.gguf"
 LAGUNA_Q2_Q3_FILE="laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf"
-LAGUNA_DFLASH_FILE="laguna-s-2.1-DFlash-BF16.gguf"
+LAGUNA_DFLASH_FILE="laguna-s-2.1-DFlash-Q8_0.gguf"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUT_DIR=${DS4_GGUF_DIR:-"$ROOT/gguf"}
@@ -126,9 +126,9 @@ Targets:
        Metal and ROCm with full model residency.
 
   laguna-dflash
-       Official Laguna S 2.1 DFlash speculative support GGUF from Poolside.
-       About 2.08 GiB on disk. This is an optional support model and does not
-       replace or relink the main Laguna model.
+       Q8_0 Laguna S 2.1 DFlash speculative support GGUF, quantized from
+       Poolside's official support model. About 1.04 GiB on disk. This is an
+       optional support model and does not replace or relink the main model.
 
 Options:
   --token TOKEN  Hugging Face token. Otherwise HF_TOKEN or the local HF token
@@ -216,10 +216,9 @@ case "$MODEL" in
         FORCE_HF_DOWNLOAD=1
         ;;
     laguna-dflash)
-        REPO=$LAGUNA_REPO
+        REPO=$LAGUNA_ANTIREZ_REPO
         MODEL_FILE=$LAGUNA_DFLASH_FILE
         FORCE_HF_DOWNLOAD=1
-        HF_REVISION=$LAGUNA_REVISION
         LINK_MODEL=0
         ;;
     -h|--help|help)
