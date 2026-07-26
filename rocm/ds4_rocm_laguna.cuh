@@ -406,6 +406,147 @@ __global__ static void laguna_attention_decode_split_kernel(
     oh[lane + 96u] = merged[3] * inv_sum * gate_scale;
 }
 
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__)
+/* CUDA decode specialization for Laguna GQA.  Multiple query heads sharing
+ * one KV head are evaluated by each split warp, so every key/value cache load
+ * is reused.  The per-head key traversal and split merge order are identical
+ * to laguna_attention_decode_split_kernel.  The launcher uses groups of two
+ * for the 48/8 layout and three for 72/8, retaining enough blocks for GB10. */
+template <uint32_t HEAD_GROUP>
+__global__ static void laguna_attention_decode_gqa_split_kernel(
+        float *out,
+        const float *q,
+        const float *gate,
+        const __half *key_cache,
+        const __half *value_cache,
+        uint32_t cache_cap,
+        uint32_t key_start,
+        uint32_t key_count,
+        uint32_t n_head,
+        uint32_t n_head_kv,
+        uint32_t head_dim,
+        float scale,
+        uint32_t n_splits) {
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t split = threadIdx.x >> 5u;
+    const uint32_t head0 = blockIdx.x * HEAD_GROUP;
+    if (head0 + HEAD_GROUP > n_head ||
+        split >= DS4_LAGUNA_ATTN_SPLITS || head_dim != 128u) {
+        return;
+    }
+    const uint32_t heads_per_kv = n_head / n_head_kv;
+    const uint32_t kv_head = head0 / heads_per_kv;
+    if ((head0 + HEAD_GROUP - 1u) / heads_per_kv != kv_head) return;
+    const uint32_t cache_width = n_head_kv * head_dim;
+
+    float acc[HEAD_GROUP][4] = {};
+    float max_score[HEAD_GROUP];
+    float score_sum[HEAD_GROUP] = {};
+#pragma unroll
+    for (uint32_t h = 0; h < HEAD_GROUP; h++) {
+        max_score[h] = -INFINITY;
+    }
+    if (split < n_splits) {
+        for (uint32_t i = split; i < key_count; i += n_splits) {
+            const uint32_t cache_row = (key_start + i) % cache_cap;
+            const uint64_t kv_base =
+                (uint64_t)cache_row * cache_width +
+                (uint64_t)kv_head * head_dim;
+            const float key0 = __half2float(key_cache[kv_base + lane]);
+            const float key1 =
+                __half2float(key_cache[kv_base + lane + 32u]);
+            const float key2 =
+                __half2float(key_cache[kv_base + lane + 64u]);
+            const float key3 =
+                __half2float(key_cache[kv_base + lane + 96u]);
+            const float value0 =
+                __half2float(value_cache[kv_base + lane]);
+            const float value1 =
+                __half2float(value_cache[kv_base + lane + 32u]);
+            const float value2 =
+                __half2float(value_cache[kv_base + lane + 64u]);
+            const float value3 =
+                __half2float(value_cache[kv_base + lane + 96u]);
+#pragma unroll
+            for (uint32_t h = 0; h < HEAD_GROUP; h++) {
+                const float *qh =
+                    q + (uint64_t)(head0 + h) * head_dim;
+                float partial =
+                    qh[lane] * key0 +
+                    qh[lane + 32u] * key1 +
+                    qh[lane + 64u] * key2 +
+                    qh[lane + 96u] * key3;
+                float score = warp_sum_f32(partial) * scale;
+                score = laguna_warp_broadcast(score);
+                const float next_max = fmaxf(max_score[h], score);
+                const float old_scale = max_score[h] == -INFINITY ?
+                    0.0f : expf(max_score[h] - next_max);
+                const float value_scale = expf(score - next_max);
+                score_sum[h] =
+                    score_sum[h] * old_scale + value_scale;
+                acc[h][0] =
+                    acc[h][0] * old_scale + value0 * value_scale;
+                acc[h][1] =
+                    acc[h][1] * old_scale + value1 * value_scale;
+                acc[h][2] =
+                    acc[h][2] * old_scale + value2 * value_scale;
+                acc[h][3] =
+                    acc[h][3] * old_scale + value3 * value_scale;
+                max_score[h] = next_max;
+            }
+        }
+    }
+
+    __shared__ float partial_max[HEAD_GROUP][DS4_LAGUNA_ATTN_SPLITS];
+    __shared__ float partial_sum[HEAD_GROUP][DS4_LAGUNA_ATTN_SPLITS];
+    __shared__ float
+        partial_value[HEAD_GROUP][DS4_LAGUNA_ATTN_SPLITS][128];
+#pragma unroll
+    for (uint32_t h = 0; h < HEAD_GROUP; h++) {
+        if (lane == 0u) {
+            partial_max[h][split] = max_score[h];
+            partial_sum[h][split] = score_sum[h];
+        }
+        partial_value[h][split][lane] = acc[h][0];
+        partial_value[h][split][lane + 32u] = acc[h][1];
+        partial_value[h][split][lane + 64u] = acc[h][2];
+        partial_value[h][split][lane + 96u] = acc[h][3];
+    }
+    __syncthreads();
+    if (split != 0u) return;
+
+#pragma unroll
+    for (uint32_t h = 0; h < HEAD_GROUP; h++) {
+        float global_max = partial_max[h][0];
+        for (uint32_t s = 1u; s < n_splits; s++) {
+            global_max = fmaxf(global_max, partial_max[h][s]);
+        }
+        float merged[4] = {};
+        float merged_sum = 0.0f;
+        for (uint32_t s = 0u; s < n_splits; s++) {
+            const float merge_scale = partial_sum[h][s] > 0.0f ?
+                expf(partial_max[h][s] - global_max) : 0.0f;
+            merged_sum += partial_sum[h][s] * merge_scale;
+            merged[0] += partial_value[h][s][lane] * merge_scale;
+            merged[1] +=
+                partial_value[h][s][lane + 32u] * merge_scale;
+            merged[2] +=
+                partial_value[h][s][lane + 64u] * merge_scale;
+            merged[3] +=
+                partial_value[h][s][lane + 96u] * merge_scale;
+        }
+        const float inv_sum =
+            merged_sum > 0.0f ? 1.0f / merged_sum : 0.0f;
+        const float gate_scale = laguna_softplus(gate[head0 + h]);
+        float *oh = out + (uint64_t)(head0 + h) * head_dim;
+        oh[lane] = merged[0] * inv_sum * gate_scale;
+        oh[lane + 32u] = merged[1] * inv_sum * gate_scale;
+        oh[lane + 64u] = merged[2] * inv_sum * gate_scale;
+        oh[lane + 96u] = merged[3] * inv_sum * gate_scale;
+    }
+}
+#endif
+
 static int laguna_rope_args_valid(
         uint32_t n_tokens,
         uint32_t n_head,
@@ -528,12 +669,41 @@ extern "C" int ds4_gpu_laguna_store_attention_tensor(
     if (!cuda_ok(cudaGetLastError(), "Laguna KV store launch")) return 0;
     const uint32_t n_splits = key_count < DS4_LAGUNA_ATTN_SPLITS ?
         key_count : DS4_LAGUNA_ATTN_SPLITS;
-    laguna_attention_decode_split_kernel<<<
-            n_head, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
-        (float *)heads->ptr, (const float *)q->ptr, (const float *)gate->ptr,
-        (const __half *)key_cache->ptr, (const __half *)value_cache->ptr,
-        cache_cap, key_start, key_count, n_head, n_head_kv, head_dim, scale,
-        n_splits);
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__)
+    const uint32_t heads_per_kv = n_head / n_head_kv;
+    if (n_head == 48u && (heads_per_kv % 2u) == 0u &&
+        getenv("DS4_CUDA_LAGUNA_NO_GQA_DECODE") == NULL) {
+        laguna_attention_decode_gqa_split_kernel<2u><<<
+                n_head / 2u, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
+            (float *)heads->ptr,
+            (const float *)q->ptr, (const float *)gate->ptr,
+            (const __half *)key_cache->ptr,
+            (const __half *)value_cache->ptr,
+            cache_cap, key_start, key_count,
+            n_head, n_head_kv, head_dim, scale, n_splits);
+    } else if ((n_head % 3u) == 0u &&
+               (heads_per_kv % 3u) == 0u &&
+               getenv("DS4_CUDA_LAGUNA_NO_GQA_DECODE") == NULL) {
+        laguna_attention_decode_gqa_split_kernel<3u><<<
+                n_head / 3u, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
+            (float *)heads->ptr,
+            (const float *)q->ptr, (const float *)gate->ptr,
+            (const __half *)key_cache->ptr,
+            (const __half *)value_cache->ptr,
+            cache_cap, key_start, key_count,
+            n_head, n_head_kv, head_dim, scale, n_splits);
+    } else
+#endif
+    {
+        laguna_attention_decode_split_kernel<<<
+                n_head, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
+            (float *)heads->ptr,
+            (const float *)q->ptr, (const float *)gate->ptr,
+            (const __half *)key_cache->ptr,
+            (const __half *)value_cache->ptr,
+            cache_cap, key_start, key_count,
+            n_head, n_head_kv, head_dim, scale, n_splits);
+    }
     return cuda_ok(cudaGetLastError(), "Laguna decode attention launch");
 }
 
@@ -594,15 +764,50 @@ extern "C" int ds4_gpu_laguna_attention_prefill_tensor(
             }
             const uint32_t n_splits = key_count < DS4_LAGUNA_ATTN_SPLITS ?
                 key_count : DS4_LAGUNA_ATTN_SPLITS;
-            laguna_attention_decode_split_kernel<<<
-                    n_head, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
-                (float *)heads->ptr + (uint64_t)row * q_row,
-                (const float *)q->ptr + (uint64_t)row * q_row,
-                (const float *)gate->ptr + (uint64_t)row * n_head,
-                (const __half *)key_cache->ptr,
-                (const __half *)value_cache->ptr,
-                cache_cap, key_start, key_count, n_head, n_head_kv, head_dim,
-                scale, n_splits);
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__)
+            const uint32_t heads_per_kv = n_head / n_head_kv;
+            if (n_head == 48u &&
+                (heads_per_kv % 2u) == 0u &&
+                getenv("DS4_CUDA_LAGUNA_NO_GQA_DECODE") == NULL) {
+                laguna_attention_decode_gqa_split_kernel<2u><<<
+                        n_head / 2u,
+                        DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
+                    (float *)heads->ptr + (uint64_t)row * q_row,
+                    (const float *)q->ptr + (uint64_t)row * q_row,
+                    (const float *)gate->ptr +
+                        (uint64_t)row * n_head,
+                    (const __half *)key_cache->ptr,
+                    (const __half *)value_cache->ptr,
+                    cache_cap, key_start, key_count,
+                    n_head, n_head_kv, head_dim, scale, n_splits);
+            } else if ((n_head % 3u) == 0u &&
+                       (heads_per_kv % 3u) == 0u &&
+                       getenv("DS4_CUDA_LAGUNA_NO_GQA_DECODE") == NULL) {
+                laguna_attention_decode_gqa_split_kernel<3u><<<
+                        n_head / 3u,
+                        DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
+                    (float *)heads->ptr + (uint64_t)row * q_row,
+                    (const float *)q->ptr + (uint64_t)row * q_row,
+                    (const float *)gate->ptr +
+                        (uint64_t)row * n_head,
+                    (const __half *)key_cache->ptr,
+                    (const __half *)value_cache->ptr,
+                    cache_cap, key_start, key_count,
+                    n_head, n_head_kv, head_dim, scale, n_splits);
+            } else
+#endif
+            {
+                laguna_attention_decode_split_kernel<<<
+                        n_head, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
+                    (float *)heads->ptr + (uint64_t)row * q_row,
+                    (const float *)q->ptr + (uint64_t)row * q_row,
+                    (const float *)gate->ptr +
+                        (uint64_t)row * n_head,
+                    (const __half *)key_cache->ptr,
+                    (const __half *)value_cache->ptr,
+                    cache_cap, key_start, key_count,
+                    n_head, n_head_kv, head_dim, scale, n_splits);
+            }
             if (!cuda_ok(cudaGetLastError(),
                          "Laguna verifier decode attention launch")) {
                 return 0;
