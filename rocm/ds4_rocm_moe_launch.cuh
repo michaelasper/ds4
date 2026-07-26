@@ -547,7 +547,8 @@ static int routed_moe_launch(
         const ds4_gpu_tensor *x,
         uint32_t layer_index,
         uint32_t n_tokens,
-        bool force_resident) {
+        bool force_resident,
+        bool exact_decode_rows) {
     routed_moe_launch_plan plan;
     if (!routed_moe_build_plan(out, gate, up, mid, down, model_map, model_size,
                                gate_offset, up_offset, down_offset, gate_type, down_type,
@@ -783,8 +784,14 @@ static int routed_moe_launch(
         const uint32_t gate_row_span = 1024u;
         const uint32_t down_row_span = 1024u;
         const uint32_t use_down_row2048 = !q4k_path && use_atomic_down && use_down_tile16;
+        /* The direct per-token down kernel is the only Q4_K down path whose
+         * accumulation order matches single-token decode, so the DFlash
+         * verifier needs it for its whole row block, not just one row.  The
+         * non-Q4 sibling is still single-row only. */
         const uint32_t use_direct_down_sum6 =
-            n_tokens == 1u && n_expert <= DS4_ROCM_N_EXPERT_USED;
+            n_expert <= DS4_ROCM_N_EXPERT_USED &&
+            (n_tokens == 1u ||
+             (q4k_path && n_tokens <= DS4_ROCM_VERIFY_MAX_ROWS));
         uint32_t *sorted_pairs = NULL;
         uint32_t *sorted_offsets = NULL;
         uint32_t *sorted_counts = NULL;
@@ -1141,16 +1148,17 @@ static int routed_moe_launch(
             dim3 mgrid((expert_mid_dim + 31u) / 32u, pair_count, 1);
             if (ok && sorted_pairs && use_expert_tiles && sorted_offsets && sorted_counts && tile_total && tile_experts && tile_starts) {
                 if (q4k_path) {
-                    dim3 tgrid((expert_mid_dim + 31u) / 32u, tile_capacity, 1);
+                    dim3 tgrid((expert_mid_dim + DS4_ROCM_MOE_ROWS - 1u) /
+                                   DS4_ROCM_MOE_ROWS, tile_capacity, 1);
                     if (expert_tile_m == 8u) {
-                        moe_gate_up_mid_q4K_expert_tile8_row32_kernel<<<tgrid, 256>>>(
+                        moe_gate_up_mid_q4K_expert_tile8_rows_kernel<<<tgrid, 256>>>(
                             (float *)gate->ptr, (float *)up->ptr, (float *)mid->ptr,
                             gate_w, up_w, xq, sorted_pairs, sorted_offsets, sorted_counts,
                             tile_total, tile_experts, tile_starts, (const float *)weights->ptr,
                             gate_expert_bytes, gate_row_bytes, xq_blocks, expert_mid_dim, n_expert,
                             0u, write_gate_up, clamp);
                     } else {
-                        moe_gate_up_mid_q4K_expert_tile4_row32_kernel<<<tgrid, 256>>>(
+                        moe_gate_up_mid_q4K_expert_tile4_rows_kernel<<<tgrid, 256>>>(
                             (float *)gate->ptr, (float *)up->ptr, (float *)mid->ptr,
                             gate_w, up_w, xq, sorted_pairs, sorted_offsets, sorted_counts,
                             tile_total, tile_experts, tile_starts, (const float *)weights->ptr,
@@ -1258,7 +1266,9 @@ static int routed_moe_launch(
             } else if (ok) {
                 dim3 qgrid((expert_mid_dim + 127u) / 128u, pair_count, 1);
                 if (q4k_path) {
-                    moe_gate_up_mid_decode_q4K_qwarp32_kernel<<<qgrid, 256>>>(
+                    dim3 q4grid((expert_mid_dim + DS4_ROCM_MOE_ROWS - 1u) /
+                                    DS4_ROCM_MOE_ROWS, pair_count, 1);
+                    moe_gate_up_mid_decode_q4K_qwarp32_kernel<<<q4grid, 256>>>(
                         (float *)gate->ptr,
                         (float *)up->ptr,
                         (float *)mid->ptr,
@@ -1465,7 +1475,9 @@ static int routed_moe_launch(
             if (use_direct_down_sum6) {
                 dim3 sgrid((out_dim + 31u) / 32u, 1, 1);
                 if (q4k_path) {
-                    moe_down_q4K_sum6_qwarp32_kernel<<<sgrid, 256>>>(
+                    dim3 q4grid((out_dim + DS4_ROCM_MOE_ROWS - 1u) /
+                                    DS4_ROCM_MOE_ROWS, n_tokens, 1);
+                    moe_down_q4K_sum6_qwarp32_kernel<<<q4grid, 256>>>(
                         (float *)out->ptr,
                         down_w,
                         midq,
@@ -1497,15 +1509,16 @@ static int routed_moe_launch(
             } else if (sorted_pairs && use_expert_tiles && sorted_offsets && sorted_counts &&
                 down_tile_total && down_tile_experts && down_tile_starts) {
                 if (q4k_path) {
-                    dim3 tgrid((out_dim + 31u) / 32u, down_tile_capacity, 1);
+                    dim3 tgrid((out_dim + DS4_ROCM_MOE_ROWS - 1u) /
+                                   DS4_ROCM_MOE_ROWS, down_tile_capacity, 1);
                     if (expert_tile_m == 8u) {
-                        moe_down_q4K_expert_tile8_row32_kernel<<<tgrid, 256>>>(
+                        moe_down_q4K_expert_tile8_rows_kernel<<<tgrid, 256>>>(
                             use_atomic_down ? (float *)out->ptr : (float *)down->ptr,
                             down_w, midq, sorted_pairs, sorted_offsets, sorted_counts,
                             down_tile_total, down_tile_experts, down_tile_starts, down_expert_bytes, down_row_bytes,
                             midq_blocks, out_dim, n_expert, use_atomic_down);
                     } else {
-                        moe_down_q4K_expert_tile4_row32_kernel<<<tgrid, 256>>>(
+                        moe_down_q4K_expert_tile4_rows_kernel<<<tgrid, 256>>>(
                             use_atomic_down ? (float *)out->ptr : (float *)down->ptr,
                             down_w, midq, sorted_pairs, sorted_offsets, sorted_counts,
                             down_tile_total, down_tile_experts, down_tile_starts, down_expert_bytes, down_row_bytes,
@@ -2000,6 +2013,8 @@ static int routed_moe_launch(
     }
 
     if (q2k_path || q3k_path) {
+        const int exact_q23_rows = exact_decode_rows &&
+            n_tokens <= DS4_ROCM_VERIFY_MAX_ROWS;
         uint32_t gate_rows_per_block = cfg->moe_decode_gate_rpb;
         if (gate_rows_per_block == 0u) gate_rows_per_block = 1u;
         const uint32_t gate_threads = gate_rows_per_block * 32u;
@@ -2007,7 +2022,8 @@ static int routed_moe_launch(
         if (down_rows_per_block == 0u) down_rows_per_block = 1u;
         const uint32_t down_threads = down_rows_per_block * 32u;
         const int store_gate_up = (g_quality_mode || cfg->graph_dump) ? 1 : 0;
-        const int q8k_gateup = !g_quality_mode && n_tokens == 1u &&
+        const int q8k_gateup = !g_quality_mode &&
+            (n_tokens == 1u || exact_q23_rows) &&
             down->bytes >= xq_bytes;
         const int decode_profile =
             n_tokens == 1u && routed_moe_decode_profile_enabled();
@@ -2254,7 +2270,8 @@ static int routed_moe_launch(
         }
         if (!ok_gateup) return 0;
         int ok_decode_moe = 1;
-        const int q8k_down = !g_quality_mode && n_tokens == 1u &&
+        const int q8k_down = !g_quality_mode &&
+            (n_tokens == 1u || exact_q23_rows) &&
             down->bytes >= midq_bytes;
         if (decode_profile && q8k_down) {
             g_moe_decode_profile_stats.q8_down_calls++;
@@ -2295,7 +2312,9 @@ static int routed_moe_launch(
                             out_dim,
                             n_expert);
                 } else if (q3k_path) {
-                    moe_down_sum6_q3K_qwarp32_kernel<<<(out_dim + 31u) / 32u, 256>>>(
+                    dim3 down_grid((out_dim + 31u) / 32u,
+                                   exact_q23_rows ? n_tokens : 1u, 1u);
+                    moe_down_sum6_q3K_qwarp32_kernel<<<down_grid, 256>>>(
                             (float *)out->ptr,
                             down_w,
                             midq,
@@ -2306,7 +2325,9 @@ static int routed_moe_launch(
                             out_dim,
                             n_expert);
                 } else {
-                    moe_down_sum6_qwarp32_kernel<<<(out_dim + 31u) / 32u, 256>>>(
+                    dim3 down_grid((out_dim + 31u) / 32u,
+                                   exact_q23_rows ? n_tokens : 1u, 1u);
+                    moe_down_sum6_qwarp32_kernel<<<down_grid, 256>>>(
                             (float *)out->ptr,
                             down_w,
                             midq,
@@ -2463,7 +2484,7 @@ extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor
                              down_expert_bytes, down_row_bytes,
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, n_total_expert, n_expert, clamp, x, layer_index, 1,
-                             force_resident);
+                             force_resident, false);
 }
 extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_total_expert, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t layer_index, uint32_t n_tokens, bool *mid_is_f16, bool force_resident) {
     if (mid_is_f16) *mid_is_f16 = false;
@@ -2474,5 +2495,28 @@ extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tens
                              down_expert_bytes, down_row_bytes,
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, n_total_expert, n_expert, clamp, x, layer_index, n_tokens,
-                             force_resident);
+                             force_resident, false);
+}
+
+extern "C" int ds4_gpu_routed_moe_batch_decode_exact_q2_q3_tensor(
+        ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up,
+        ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map,
+        uint64_t model_size, uint64_t gate_offset, uint64_t up_offset,
+        uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
+        uint64_t gate_expert_bytes, uint64_t gate_row_bytes,
+        uint64_t down_expert_bytes, uint64_t down_row_bytes,
+        uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim,
+        const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights,
+        uint32_t n_total_expert, uint32_t n_expert, float clamp,
+        const ds4_gpu_tensor *x, uint32_t layer_index, uint32_t n_tokens,
+        bool force_resident) {
+    return routed_moe_launch(out, gate, up, mid, down, model_map, model_size,
+                             gate_offset, up_offset, down_offset,
+                             gate_type, down_type,
+                             gate_expert_bytes, gate_row_bytes,
+                             down_expert_bytes, down_row_bytes,
+                             expert_in_dim, expert_mid_dim, out_dim,
+                             selected, weights, n_total_expert, n_expert,
+                             clamp, x, layer_index, n_tokens,
+                             force_resident, true);
 }

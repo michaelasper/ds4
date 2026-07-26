@@ -297,6 +297,11 @@ __global__ static void laguna_attention_prefill_gqa_kernel(
     }
 }
 
+/* Fill the block with independent online-softmax partials. The previous
+ * key-count heuristic left most waves idle for short and sliding-window
+ * decode, even though merging more partials remains numerically accurate. */
+enum { DS4_LAGUNA_ATTN_SPLITS = 16u };
+
 __global__ static void laguna_attention_decode_split_kernel(
         float *out,
         const float *q,
@@ -314,7 +319,10 @@ __global__ static void laguna_attention_decode_split_kernel(
     const uint32_t lane = threadIdx.x & 31u;
     const uint32_t split = threadIdx.x >> 5u;
     const uint32_t head = blockIdx.x;
-    if (head >= n_head || split >= 8u || head_dim != 128u) return;
+    if (head >= n_head || split >= DS4_LAGUNA_ATTN_SPLITS ||
+        head_dim != 128u) {
+        return;
+    }
     const uint32_t heads_per_kv = n_head / n_head_kv;
     const uint32_t kv_head = head / heads_per_kv;
     const uint32_t cache_width = n_head_kv * head_dim;
@@ -360,9 +368,9 @@ __global__ static void laguna_attention_decode_split_kernel(
         }
     }
 
-    __shared__ float partial_max[8];
-    __shared__ float partial_sum[8];
-    __shared__ float partial_value[8][128];
+    __shared__ float partial_max[DS4_LAGUNA_ATTN_SPLITS];
+    __shared__ float partial_sum[DS4_LAGUNA_ATTN_SPLITS];
+    __shared__ float partial_value[DS4_LAGUNA_ATTN_SPLITS][128];
     if (lane == 0u) {
         partial_max[split] = max_score;
         partial_sum[split] = score_sum;
@@ -518,10 +526,10 @@ extern "C" int ds4_gpu_laguna_store_attention_tensor(
         (const float *)k->ptr, (const float *)v->ptr,
         pos % cache_cap, cache_cap, width);
     if (!cuda_ok(cudaGetLastError(), "Laguna KV store launch")) return 0;
-    uint32_t n_splits = (key_count + 255u) / 256u;
-    if (n_splits == 0u) n_splits = 1u;
-    if (n_splits > 8u) n_splits = 8u;
-    laguna_attention_decode_split_kernel<<<n_head, 256>>>(
+    const uint32_t n_splits = key_count < DS4_LAGUNA_ATTN_SPLITS ?
+        key_count : DS4_LAGUNA_ATTN_SPLITS;
+    laguna_attention_decode_split_kernel<<<
+            n_head, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
         (float *)heads->ptr, (const float *)q->ptr, (const float *)gate->ptr,
         (const __half *)key_cache->ptr, (const __half *)value_cache->ptr,
         cache_cap, key_start, key_count, n_head, n_head_kv, head_dim, scale,
@@ -537,7 +545,6 @@ extern "C" int ds4_gpu_laguna_attention_prefill_tensor(
         const ds4_gpu_tensor *gate, uint32_t pos0, uint32_t n_tokens,
         uint32_t cache_cap, uint32_t n_head, uint32_t n_head_kv,
         uint32_t head_dim, float scale, int split_decode_rows) {
-    (void)split_decode_rows;
     if (!heads || !key_cache || !value_cache || !staged_key ||
         !staged_value || !q || !k || !v || !gate || n_tokens == 0u ||
         pos0 > UINT32_MAX - n_tokens || cache_cap == 0u || n_head == 0u ||
@@ -560,6 +567,48 @@ extern "C" int ds4_gpu_laguna_attention_prefill_tensor(
         key_cache->bytes < cache_values * sizeof(__half) ||
         value_cache->bytes < cache_values * sizeof(__half)) {
         return 0;
+    }
+
+    /* A speculative verifier has only a handful of query rows.  Replay the
+     * decode store-then-attend sequence once per row instead of running the
+     * batched causal kernel: storing rows in order preserves causal and SWA
+     * ring semantics, and reusing the decode kernel is what makes each row's
+     * result identical to what plain decoding would have produced -- which is
+     * the whole contract of speculative decoding. */
+    if (split_decode_rows && n_tokens <= DS4_ROCM_VERIFY_MAX_ROWS) {
+        const uint32_t width = n_head_kv * head_dim;
+        const uint32_t q_row = n_head * head_dim;
+        for (uint32_t row = 0; row < n_tokens; row++) {
+            const uint32_t pos = pos0 + row;
+            const uint32_t key_count =
+                pos + 1u < cache_cap ? pos + 1u : cache_cap;
+            const uint32_t key_start = pos + 1u - key_count;
+            laguna_store_kv_f16_kernel<<<(width + 255u) / 256u, 256>>>(
+                (__half *)key_cache->ptr, (__half *)value_cache->ptr,
+                (const float *)k->ptr + (uint64_t)row * width,
+                (const float *)v->ptr + (uint64_t)row * width,
+                pos % cache_cap, cache_cap, width);
+            if (!cuda_ok(cudaGetLastError(),
+                         "Laguna verifier KV store launch")) {
+                return 0;
+            }
+            const uint32_t n_splits = key_count < DS4_LAGUNA_ATTN_SPLITS ?
+                key_count : DS4_LAGUNA_ATTN_SPLITS;
+            laguna_attention_decode_split_kernel<<<
+                    n_head, DS4_LAGUNA_ATTN_SPLITS * 32u>>>(
+                (float *)heads->ptr + (uint64_t)row * q_row,
+                (const float *)q->ptr + (uint64_t)row * q_row,
+                (const float *)gate->ptr + (uint64_t)row * n_head,
+                (const __half *)key_cache->ptr,
+                (const __half *)value_cache->ptr,
+                cache_cap, key_start, key_count, n_head, n_head_kv, head_dim,
+                scale, n_splits);
+            if (!cuda_ok(cudaGetLastError(),
+                         "Laguna verifier decode attention launch")) {
+                return 0;
+            }
+        }
+        return 1;
     }
 
     laguna_stage_kv_f16_kernel<<<(kv_values + 255u) / 256u, 256>>>(

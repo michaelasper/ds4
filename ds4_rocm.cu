@@ -108,6 +108,8 @@ static_assert(sizeof(cuda_block_q3_K) == 110, "Q3_K block layout mismatch");
 
 #include "rocm/ds4_rocm_laguna.cuh"
 
+#include "rocm/ds4_rocm_dflash.cuh"
+
 #include "rocm/ds4_rocm_fp8_kv.cuh"
 
 #include "rocm/ds4_rocm_attention.cuh"

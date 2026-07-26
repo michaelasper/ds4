@@ -544,6 +544,14 @@ int ds4_gpu_argmax_tensor(
         const ds4_gpu_tensor *logits,
         uint32_t                n_vocab);
 
+#ifdef DS4_ROCM_BUILD
+int ds4_gpu_argmax_rows_tensor(
+        ds4_gpu_tensor       *out_idx,
+        const ds4_gpu_tensor *logits,
+        uint32_t              n_vocab,
+        uint32_t              n_rows);
+#endif
+
 int ds4_gpu_dsv4_topk_mask_tensor(
         ds4_gpu_tensor       *mask,
         const ds4_gpu_tensor *topk,
@@ -688,7 +696,8 @@ int ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
         const ds4_gpu_tensor *x,
         uint32_t              n_rows);
 
-#if defined(__APPLE__)
+/* Implemented by the Metal and ROCm backends; the DFlash verifier is the only
+ * caller, and it needs each row bit-identical to single-row decode. */
 int ds4_gpu_matmul_f32_decode_rows_exact_tensor(
         ds4_gpu_tensor       *out,
         const void           *model_map,
@@ -698,7 +707,6 @@ int ds4_gpu_matmul_f32_decode_rows_exact_tensor(
         uint64_t              out_dim,
         const ds4_gpu_tensor *x,
         uint32_t              n_rows);
-#endif
 
 int ds4_gpu_matmul_q8_0_f16_out_tensor(
         ds4_gpu_tensor       *out_h,
@@ -2609,6 +2617,38 @@ int ds4_gpu_glm_routed_moe_batch_direct_scalar_q4_tensor(
         const ds4_gpu_tensor *x,
         uint32_t                n_tokens,
         uint32_t                mid_token_stride);
+
+#ifdef DS4_ROCM_BUILD
+/* DFlash verifier path: batch Q2_K/Q3_K rows while retaining decode math. */
+int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
+        ds4_gpu_tensor       *out,
+        ds4_gpu_tensor       *mid,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              gate_offset,
+        uint64_t              up_offset,
+        uint64_t              down_offset,
+        uint32_t              gate_type,
+        uint32_t              up_type,
+        uint32_t              down_type,
+        uint64_t              gate_expert_bytes,
+        uint64_t              gate_row_bytes,
+        uint64_t              up_expert_bytes,
+        uint64_t              up_row_bytes,
+        uint64_t              down_expert_bytes,
+        uint64_t              down_row_bytes,
+        uint32_t              expert_in_dim,
+        uint32_t              expert_mid_dim,
+        uint32_t              out_dim,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *weights,
+        uint32_t              n_total_expert,
+        uint32_t              n_expert,
+        uint32_t              layer_index,
+        const ds4_gpu_tensor *x,
+        uint32_t              n_tokens,
+        uint32_t              mid_token_stride);
+#endif
 
 #if defined(__APPLE__)
 /* Metal verifier path: batch rows while preserving decode's Q4 kernels. */
