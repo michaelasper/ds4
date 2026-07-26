@@ -1,4 +1,4 @@
-// Laguna-specific ROCm attention primitives. The model graph and tensor
+// Laguna-specific CUDA/HIP attention primitives. The model graph and tensor
 // scheduling live in ds4.c; this module covers the weighted per-head RoPE and
 // gated GQA operations that are not shared with DeepSeek or GLM.
 
@@ -10,7 +10,7 @@ __device__ __forceinline__ static float laguna_warp_broadcast(float x) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     return __shfl(x, 0, 32);
 #else
-    return __shfl_sync(FULL_WARP_MASK, x, 0, 32);
+    return __shfl_sync(0xffffffffu, x, 0, 32);
 #endif
 }
 
@@ -575,7 +575,7 @@ extern "C" int ds4_gpu_laguna_attention_prefill_tensor(
      * ring semantics, and reusing the decode kernel is what makes each row's
      * result identical to what plain decoding would have produced -- which is
      * the whole contract of speculative decoding. */
-    if (split_decode_rows && n_tokens <= DS4_ROCM_VERIFY_MAX_ROWS) {
+    if (split_decode_rows && n_tokens <= 16u) {
         const uint32_t width = n_head_kv * head_dim;
         const uint32_t q_row = n_head * head_dim;
         for (uint32_t row = 0; row < n_tokens; row++) {

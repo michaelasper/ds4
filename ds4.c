@@ -60379,6 +60379,18 @@ static int ds4_engine_open_internal(ds4_engine **out,
             *out = e;
             return 0;
         }
+        if (e->backend != DS4_BACKEND_METAL &&
+            (!e->weights.layer[0].attn_q ||
+             e->weights.layer[0].attn_q->type != DS4_TENSOR_Q8_0)) {
+            fprintf(stderr,
+                    "ds4: %s Laguna inference requires the current Q8_0 "
+                    "signal-weight layout; the legacy F16/Q4_K/Q6_K recipe "
+                    "is Metal-only\n",
+                    ds4_backend_name(e->backend));
+            ds4_engine_close(e);
+            *out = NULL;
+            return 1;
+        }
         if (opt->dflash_path && opt->dflash_path[0] &&
             e->backend != DS4_BACKEND_METAL
 #ifdef DS4_ROCM_BUILD
@@ -60395,15 +60407,12 @@ static int ds4_engine_open_internal(ds4_engine **out,
             *out = NULL;
             return 1;
         }
-        if (e->backend != DS4_BACKEND_METAL
-#ifdef DS4_ROCM_BUILD
-            && e->backend != DS4_BACKEND_CUDA
-#endif
-        ) {
+        if (e->backend != DS4_BACKEND_METAL &&
+            e->backend != DS4_BACKEND_CUDA) {
             fprintf(stderr,
-                    "ds4: Laguna S 2.1 inference currently requires --metal"
+                    "ds4: Laguna S 2.1 inference currently requires --metal, --cuda"
 #ifdef DS4_ROCM_BUILD
-                    " or --rocm"
+                    ", or --rocm"
 #endif
                     "\n");
             ds4_engine_close(e);
@@ -61698,7 +61707,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
             DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
             fprintf(stderr,
-                    "ds4: %s sessions currently require the Metal graph backend\n",
+                    "ds4: %s sessions currently require a GPU graph backend\n",
                     DS4_MODEL_SHAPE_NAME);
             return 1;
         }
@@ -61735,6 +61744,9 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
             free(s);
             return 1;
         }
+        /* Laguna's signal path is Q8_0. Large prompt batches are substantially
+         * faster when CUDA/ROCm may dequantize once and use the backend GEMM. */
+        ds4_gpu_enable_q8_dequant_gemm();
         s->laguna_graph_ready = true;
         if (e->dflash_ready) {
             if (!dflash_graph_alloc(&s->dflash_graph)) {
