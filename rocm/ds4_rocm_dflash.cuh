@@ -1,4 +1,4 @@
-// DFlash-specific data movement for the ROCm backend. The draft and target
+// DFlash-specific CUDA/HIP data movement. The draft and target
 // graphs otherwise reuse Laguna's dense, normalization, RoPE, attention, and
 // FFN kernels; only these three shapes are unique to speculative decoding.
 
@@ -139,8 +139,8 @@ extern "C" int ds4_gpu_dflash_capture_rows_tensor(
         dst_values > UINT64_MAX / sizeof(float) ||
         src->bytes < src_values * sizeof(float) ||
         features->bytes < dst_values * sizeof(float)) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX
-                "DFlash capture received undersized buffers\n");
+        fprintf(stderr,
+                "ds4: GPU DFlash capture received undersized buffers\n");
         return 0;
     }
     const uint64_t count = (uint64_t)n_rows * n_embd;
@@ -171,8 +171,8 @@ extern "C" int ds4_gpu_dflash_aux_norm_tensor(
         features->bytes < feature_values * sizeof(float) ||
         weight_offset > model_size ||
         weight_bytes > model_size - weight_offset) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX
-                "DFlash auxiliary norm received invalid ranges\n");
+        fprintf(stderr,
+                "ds4: GPU DFlash auxiliary norm received invalid ranges\n");
         return 0;
     }
     const float *weights = (const float *)cuda_model_range_ptr(
@@ -208,8 +208,8 @@ extern "C" int ds4_gpu_dflash_commit_kv_tensor(
         v->bytes < src_values * sizeof(float) ||
         key_cache->bytes < cache_values * sizeof(__half) ||
         value_cache->bytes < cache_values * sizeof(__half)) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX
-                "DFlash KV commit received undersized buffers\n");
+        fprintf(stderr,
+                "ds4: GPU DFlash KV commit received undersized buffers\n");
         return 0;
     }
     dflash_commit_kv_f16_kernel<<<
