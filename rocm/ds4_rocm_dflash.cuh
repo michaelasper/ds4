@@ -83,6 +83,42 @@ __global__ static void dflash_commit_kv_f16_kernel(
     value_cache[dst] = __float2half(v[src]);
 }
 
+__global__ static void dflash_probabilities_kernel(
+        float *probabilities,
+        const float *logits,
+        const int32_t *argmax,
+        uint32_t n_rows,
+        uint32_t n_vocab) {
+    const uint32_t row = blockIdx.x;
+    const uint32_t tid = threadIdx.x;
+    if (row >= n_rows || n_vocab == 0u) return;
+    const int32_t top = argmax[row];
+    if (top < 0 || (uint32_t)top >= n_vocab) {
+        if (tid == 0u) probabilities[row] = 0.0f;
+        return;
+    }
+    const float *row_logits = logits + (uint64_t)row * n_vocab;
+    const float top_logit = row_logits[top];
+    float sum = 0.0f;
+    if (isfinite(top_logit)) {
+        for (uint32_t col = tid; col < n_vocab; col += blockDim.x) {
+            const float term = expf(row_logits[col] - top_logit);
+            if (isfinite(term)) sum += term;
+        }
+    }
+    __shared__ float scratch[256];
+    scratch[tid] = sum;
+    __syncthreads();
+    for (uint32_t step = blockDim.x >> 1u; step != 0u; step >>= 1u) {
+        if (tid < step) scratch[tid] += scratch[tid + step];
+        __syncthreads();
+    }
+    if (tid == 0u) {
+        probabilities[row] =
+            scratch[0] > 0.0f ? 1.0f / scratch[0] : 0.0f;
+    }
+}
+
 extern "C" int ds4_gpu_dflash_capture_rows_tensor(
         ds4_gpu_tensor       *features,
         const ds4_gpu_tensor *src,
@@ -182,4 +218,27 @@ extern "C" int ds4_gpu_dflash_commit_kv_tensor(
             (const float *)k->ptr, (const float *)v->ptr, n_rows, pos0,
             cache_cap, (uint32_t)width);
     return cuda_ok(cudaGetLastError(), "DFlash KV commit launch");
+}
+
+extern "C" int ds4_gpu_dflash_probabilities_tensor(
+        ds4_gpu_tensor       *probabilities,
+        const ds4_gpu_tensor *logits,
+        const ds4_gpu_tensor *argmax,
+        uint32_t              n_rows,
+        uint32_t              n_vocab) {
+    if (!probabilities || !logits || !argmax ||
+        n_rows == 0u || n_vocab == 0u ||
+        probabilities->bytes < (uint64_t)n_rows * sizeof(float) ||
+        logits->bytes < (uint64_t)n_rows * n_vocab * sizeof(float) ||
+        argmax->bytes < (uint64_t)n_rows * sizeof(int32_t)) {
+        return 0;
+    }
+    dflash_probabilities_kernel<<<n_rows, 256>>>(
+            (float *)probabilities->ptr,
+            (const float *)logits->ptr,
+            (const int32_t *)argmax->ptr,
+            n_rows,
+            n_vocab);
+    return cuda_ok(cudaGetLastError(),
+                   "DFlash draft probabilities launch");
 }

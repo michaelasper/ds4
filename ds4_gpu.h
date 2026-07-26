@@ -79,6 +79,8 @@ int ds4_gpu_flush_encoder(void);
 int ds4_gpu_flush_commands(void);
 /* Commit the active batch without waiting; later batches remain queue-ordered. */
 int ds4_gpu_submit_commands(void);
+int ds4_gpu_wait_submitted_commands(void);
+int ds4_gpu_discard_commands(void);
 int ds4_gpu_commands_active(void);
 #ifdef __APPLE__
 int ds4_gpu_parallel_ffn_finish(void);
@@ -570,6 +572,16 @@ int ds4_gpu_dsv4_topk_mask_tensor(
  */
 
 int ds4_gpu_matmul_q8_0_tensor(
+        ds4_gpu_tensor       *out,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t                n_tok);
+
+int ds4_gpu_matmul_q8_0_dflash_tensor(
         ds4_gpu_tensor       *out,
         const void             *model_map,
         uint64_t                model_size,
@@ -1340,6 +1352,13 @@ int ds4_gpu_dflash_commit_kv_tensor(
         uint32_t              cache_cap,
         uint32_t              n_head_kv,
         uint32_t              head_dim);
+
+int ds4_gpu_dflash_probabilities_tensor(
+        ds4_gpu_tensor       *probabilities,
+        const ds4_gpu_tensor *logits,
+        const ds4_gpu_tensor *argmax,
+        uint32_t              n_rows,
+        uint32_t              n_vocab);
 
 int ds4_gpu_glm_kv_lora_rms_norm_tensor(
         ds4_gpu_tensor       *out,
@@ -2620,7 +2639,7 @@ int ds4_gpu_glm_routed_moe_batch_direct_scalar_q4_tensor(
         uint32_t                n_tokens,
         uint32_t                mid_token_stride);
 
-#ifdef DS4_ROCM_BUILD
+#if defined(__APPLE__) || defined(DS4_ROCM_BUILD)
 /* DFlash verifier path: batch Q2_K/Q3_K rows while retaining decode math. */
 int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         ds4_gpu_tensor       *out,

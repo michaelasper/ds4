@@ -223,11 +223,17 @@ Laguna GGUF:
   --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf
 ```
 
-The default verifies three draft positions at a time. Use
-`--dflash-draft N` to tune the 1 through 15 range. DwarfStar automatically
-falls back to ordinary Laguna decoding when sampling is stochastic or when
-speculation is slower for the current turn. Set `DS4_DFLASH_TIMING=1` to print
-per-cycle draft and verify timings.
+The default verifies up to three draft positions at a time and stops before
+verification when a proposal's probability is below 0.4. Use
+`--dflash-draft N` to tune the 1 through 15 range and
+`--dflash-p-min P` to tune the confidence cutoff; set the latter to `0` to
+keep a fixed verifier width. A nonzero cutoff is faster, but varying the
+verifier batch width can resolve nearly tied greedy logits differently because
+floating-point reductions are not batch-invariant. Use `0` when fixed-width
+reproducibility matters. DwarfStar automatically falls back to ordinary
+Laguna decoding when sampling is stochastic or when speculation is slower for
+the current turn. Set `DS4_DFLASH_TIMING=1` to print per-cycle draft and
+verify timings.
 
 For Strix Halo:
 
@@ -246,11 +252,12 @@ generation about 24.1 tokens/s. The smaller mixed Q2_K/Q3_K quant is faster
 still. Laguna currently requires full model residency; SSD streaming,
 distributed inference, and tensor parallelism are not implemented.
 
-DFlash speculative decoding works on ROCm and is token-exact against ordinary
-decoding, but on this GPU it is only a win on highly predictable text. Each
-draft position routes to its own ten experts, so the verifier's expert traffic
-grows with the draft length while a Strix Halo decode step is already
-bandwidth-bound; break-even needs roughly 60% of draft tokens accepted.
+DFlash speculative decoding works on ROCm. With a fixed verifier width
+(`--dflash-p-min 0`) it is token-exact against ordinary decoding in the
+regression corpus, but on this GPU it is only a win on highly predictable
+text. Each draft position routes to its own ten experts, so the verifier's
+expert traffic grows with the draft length while a Strix Halo decode step is
+already bandwidth-bound; break-even needs roughly 60% of draft tokens accepted.
 DwarfStar measures throughput for the first cycles of every turn and drops back
 to ordinary decoding when speculation is not paying, so leaving `--dflash`
 enabled is safe.

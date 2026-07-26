@@ -13384,6 +13384,11 @@ static server_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--dflash-draft")) {
             c.engine.dflash_draft_tokens =
                 parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--dflash-p-min")) {
+            c.engine.dflash_p_min =
+                parse_float_arg(
+                    need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
+            c.engine.dflash_p_min_set = true;
         } else if (!strcmp(arg, "--mtp-draft")) {
             c.engine.mtp_draft_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-margin")) {

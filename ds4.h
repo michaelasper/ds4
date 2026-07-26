@@ -134,6 +134,7 @@ typedef struct {
     uint32_t prefill_chunk;
     int mtp_draft_tokens;
     int dflash_draft_tokens;
+    float dflash_p_min;
     float mtp_margin;
     float dspark_confidence_threshold;
     const char *directional_steering_file;
@@ -152,6 +153,7 @@ typedef struct {
     bool glm_mtp_timing;
     bool dspark;
     bool dspark_strict;
+    bool dflash_p_min_set;
     bool dspark_confidence_threshold_set;
     bool cuda_tensor_parallel;
     bool ssd_streaming;
