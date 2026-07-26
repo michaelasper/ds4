@@ -51,6 +51,11 @@
 #include "ds4_layer_pack.h"
 #include "ds4_gpu_mgpu.h"
 
+#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD) && \
+    !defined(DS4_NO_GPU)
+#define DS4_NATIVE_CUDA_BUILD 1
+#endif
+
 #define DS4_CUDA_TP_PEER_TMP_BYTES \
     ((uint64_t)DS4_N_EXPERT_USED * DS4_N_EMBD * sizeof(float) + 128u)
 
@@ -49047,6 +49052,7 @@ static bool laguna_graph_routed_moe_decode_rows(
                    (uint32_t)mid_elems) != 0;
     }
 #endif
+#if defined(DS4_ROCM_BUILD) || defined(DS4_NATIVE_CUDA_BUILD)
 #ifdef DS4_ROCM_BUILD
     /* The ROCm Q4_K batch path keeps decode's per-token kernels when the row
      * block is short, so it sweeps the selected experts once for the whole
@@ -49087,7 +49093,12 @@ static bool laguna_graph_routed_moe_decode_rows(
                    (uint32_t)mid_elems,
                    true) != 0;
     }
-    if ((l->ffn_gate_exps->type == DS4_TENSOR_Q2_K ||
+#endif
+    if (
+#ifdef DS4_NATIVE_CUDA_BUILD
+        getenv("DS4_CUDA_DFLASH_ROW_MOE") == NULL &&
+#endif
+        (l->ffn_gate_exps->type == DS4_TENSOR_Q2_K ||
          l->ffn_gate_exps->type == DS4_TENSOR_Q3_K) &&
         l->ffn_up_exps->type == l->ffn_gate_exps->type &&
         l->ffn_down_exps->type == l->ffn_gate_exps->type &&
@@ -49205,7 +49216,31 @@ static bool laguna_graph_router_decode_rows(
                DS4_N_EXPERT_USED,
                DS4_EXPERT_WEIGHT_SCALE,
                n_rows) != 0;
-#else
+#elif defined(DS4_NATIVE_CUDA_BUILD)
+    if (getenv("DS4_CUDA_DFLASH_ROW_ROUTER") == NULL) {
+        return ds4_gpu_matmul_f32_decode_rows_exact_tensor(
+                   g->router_logits,
+                   model->map,
+                   model->size,
+                   l->ffn_gate_inp->abs_offset,
+                   DS4_N_EMBD,
+                   DS4_N_EXPERT,
+                   g->ffn_norm,
+                   n_rows) != 0 &&
+               ds4_gpu_glm_router_select_batch_tensor(
+                   g->router_selected,
+                   g->router_weights,
+                   g->router_probs,
+                   model->map,
+                   model->size,
+                   l->ffn_exp_probs_b->abs_offset,
+                   g->router_logits,
+                   DS4_N_EXPERT,
+                   DS4_N_EXPERT_USED,
+                   DS4_EXPERT_WEIGHT_SCALE,
+                   n_rows) != 0;
+    }
+#endif
     const uint64_t embd_bytes =
         (uint64_t)DS4_N_EMBD * sizeof(float);
     const uint64_t expert_f32_bytes =
@@ -49264,7 +49299,6 @@ static bool laguna_graph_router_decode_rows(
         if (!ok) return false;
     }
     return true;
-#endif
 }
 
 static void dflash_graph_free(ds4_dflash_gpu_graph *g) {
@@ -51950,6 +51984,7 @@ struct ds4_session {
     uint32_t dflash_deferred_pos0;
     bool dflash_defer_inject;
     uint32_t dflash_best_draft;
+    double dflash_best_ms_per_token;
     uint32_t dflash_stage_full_accepts;
     bool dflash_suspended;
     bool dflash_guard_decided;
@@ -60195,8 +60230,14 @@ static int ds4_engine_open_internal(ds4_engine **out,
         *out = NULL;
         return 1;
     }
-    e->dflash_draft_tokens =
-        opt->dflash_draft_tokens > 0 ? opt->dflash_draft_tokens : 3;
+    e->dflash_draft_tokens = opt->dflash_draft_tokens;
+    if (e->dflash_draft_tokens <= 0) {
+#ifdef DS4_NATIVE_CUDA_BUILD
+        e->dflash_draft_tokens = 15;
+#else
+        e->dflash_draft_tokens = 3;
+#endif
+    }
     if (opt->dflash_p_min_set &&
         (!isfinite(opt->dflash_p_min) ||
          opt->dflash_p_min < 0.0f || opt->dflash_p_min > 1.0f)) {
@@ -60392,17 +60433,11 @@ static int ds4_engine_open_internal(ds4_engine **out,
             return 1;
         }
         if (opt->dflash_path && opt->dflash_path[0] &&
-            e->backend != DS4_BACKEND_METAL
-#ifdef DS4_ROCM_BUILD
-            && e->backend != DS4_BACKEND_CUDA
-#endif
-        ) {
+            e->backend != DS4_BACKEND_METAL &&
+            e->backend != DS4_BACKEND_CUDA) {
             fprintf(stderr,
-                    "ds4: Laguna DFlash currently requires the Metal"
-#ifdef DS4_ROCM_BUILD
-                    " or ROCm"
-#endif
-                    " backend\n");
+                    "ds4: Laguna DFlash currently requires the Metal, CUDA, "
+                    "or ROCm backend\n");
             ds4_engine_close(e);
             *out = NULL;
             return 1;
@@ -62164,6 +62199,7 @@ void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled) {
     s->dflash_slow_windows = 0;
     s->dflash_active_draft = 0;
     s->dflash_best_draft = 0;
+    s->dflash_best_ms_per_token = 0.0;
     s->dflash_stage_full_accepts = 0;
     s->dflash_deferred_rows = 0;
     s->dflash_deferred_pos0 = 0;
@@ -63272,6 +63308,7 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         s->dflash_slow_windows = 0;
         s->dflash_active_draft = 0;
         s->dflash_best_draft = 0;
+        s->dflash_best_ms_per_token = 0.0;
         s->dflash_stage_full_accepts = 0;
         s->dflash_suspended = false;
         s->dflash_guard_decided = false;
@@ -69683,6 +69720,10 @@ static int ds4_session_eval_dflash_speculative_argmax(
     s->dflash_synced = true;
 
     const double verify_done = now_sec();
+    /* CUDA installs the anonymous F16 support mapping lazily. Its first draft
+     * cycle faults roughly 2 GiB of weights and is intentionally a one-time
+     * warmup, not evidence that steady-state speculation is unprofitable. */
+    const bool dflash_warmup_cycle = s->dflash_cycles == 0u;
     s->dflash_cycles++;
     s->dflash_cycles_since_baseline++;
     s->dflash_proposed += generated_draft;
@@ -69692,10 +69733,13 @@ static int ds4_session_eval_dflash_speculative_argmax(
     s->dflash_verify_ms += (verify_done - submit_done) * 1000.0;
     const double cycle_ms =
         (verify_done - cycle_t0) * 1000.0 + s->last_sample_ms;
-    s->dflash_window_ms += cycle_ms;
-    s->dflash_window_tokens += (uint64_t)n_accept;
-    s->dflash_window_cycles++;
-    if (n_draft == generated_draft &&
+    if (!dflash_warmup_cycle) {
+        s->dflash_window_ms += cycle_ms;
+        s->dflash_window_tokens += (uint64_t)n_accept;
+        s->dflash_window_cycles++;
+    }
+    if (!dflash_warmup_cycle &&
+        n_draft == generated_draft &&
         (uint32_t)(n_accept - 1) == generated_draft) {
         s->dflash_stage_full_accepts++;
     }
@@ -69711,7 +69755,11 @@ static int ds4_session_eval_dflash_speculative_argmax(
         const double spec_ms_per_token =
             s->dflash_window_ms / (double)s->dflash_window_tokens;
         if (spec_ms_per_token < s->dflash_baseline_ms * 0.98) {
-            s->dflash_best_draft = s->dflash_active_draft;
+            if (s->dflash_best_draft == 0u ||
+                spec_ms_per_token < s->dflash_best_ms_per_token) {
+                s->dflash_best_draft = s->dflash_active_draft;
+                s->dflash_best_ms_per_token = spec_ms_per_token;
+            }
             if (s->dflash_active_draft < requested_draft) {
                 const bool short_block_correlates =
                     s->dflash_active_draft > 3u ||
@@ -69746,6 +69794,18 @@ static int ds4_session_eval_dflash_speculative_argmax(
                 }
             } else {
                 s->dflash_guard_decided = true;
+                if (s->dflash_best_draft != s->dflash_active_draft) {
+                    const uint32_t rejected = s->dflash_active_draft;
+                    s->dflash_active_draft = s->dflash_best_draft;
+                    fprintf(stderr,
+                            "ds4: DFlash using draft depth %u; depth %u "
+                            "measured %.2f ms/token versus %.2f ms/token "
+                            "at the best depth\n",
+                            s->dflash_active_draft,
+                            rejected,
+                            spec_ms_per_token,
+                            s->dflash_best_ms_per_token);
+                }
             }
         } else if (s->dflash_best_draft != 0u &&
                    s->dflash_best_draft != s->dflash_active_draft) {

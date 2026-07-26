@@ -208,7 +208,7 @@ tagged tool-call formats:
 ```
 
 Poolside's standalone DFlash model can accelerate greedy Laguna decoding on
-Metal and ROCm without changing the generated tokens. The download target uses
+Metal, CUDA, and ROCm without changing the generated tokens. The download target uses
 a 1.04 GiB Q8_0 quant of Poolside's support model: it drafts faster and uses
 half the memory of BF16, while the full Laguna model still verifies every
 accepted token. Download it separately and pass it alongside any supported
@@ -224,9 +224,10 @@ Laguna GGUF:
   --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf
 ```
 
-The default verifies up to three draft positions at a time and stops before
-verification when a proposal's probability is below 0.4. Use
-`--dflash-draft N` to tune the 1 through 15 range and
+On CUDA, DwarfStar starts with three draft positions, measures the result, and
+explores up to the configured ceiling (default 15) before retaining the fastest
+depth. Other backends retain a default ceiling of three. Use
+`--dflash-draft N` to set the adaptive exploration ceiling in the 1 through 15 range and
 `--dflash-p-min P` to tune the confidence cutoff; set the latter to `0` to
 keep a fixed verifier width. A nonzero cutoff is faster, but varying the
 verifier batch width can resolve nearly tied greedy logits differently because
