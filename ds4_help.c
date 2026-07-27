@@ -207,7 +207,7 @@ static void print_sampling(FILE *fp, const help_colors *c, bool full) {
     opt(fp, c, "--top-p F", "Nucleus sampling probability.");
     opt(fp, c, "--min-p F", "Keep tokens scoring at least F times the top token.");
     opt(fp, c, "--seed N", "Sampling seed for reproducible non-greedy runs.");
-    para(fp, c, "GLM defaults to temperature 1.0, top-p 0.95, and min-p 0. Laguna defaults to temperature 1.0, top-k 20, top-p 1.0, and min-p 0. Explicit options always win.");
+    para(fp, c, "GLM defaults to temperature 1.0, top-p 0.95, and min-p 0. Laguna defaults to temperature 0.7, top-k 20, top-p 0.95, and min-p 0.05. Explicit options always win.");
     opt(fp, c, "--think", "Use normal thinking mode.");
     opt(fp, c, "--think-max", "Use Think Max when context is large enough.");
     opt(fp, c, "--nothink", "Disable thinking and ask for direct replies.");
