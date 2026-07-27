@@ -286,10 +286,10 @@ to ordinary decoding when speculation is not paying, so leaving `--dflash`
 enabled is safe.
 
 The shipped GGUF is configured for a 262144-token context. Laguna defaults to
-temperature 1.0, top-k 20, top-p 1.0, and min-p 0; explicit sampling options
-always take precedence. Use `--nothink` or the `laguna-s-2.1-chat` server alias
-for direct replies, and preserve reasoning content between tool calls when
-building a client.
+temperature 0.7, top-k 20, top-p 0.95, and min-p 0.05; explicit sampling
+options always take precedence. Use `--nothink` or the
+`laguna-s-2.1-chat` server alias for direct replies, and preserve reasoning
+content between tool calls when building a client.
 
 Then build:
 

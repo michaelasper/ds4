@@ -62605,8 +62605,10 @@ void ds4_engine_sampling_defaults(ds4_engine *e, float *temperature,
         *top_p = 0.95f;
         *min_p = 0.0f;
     } else if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
+        *temperature = 0.7f;
         *top_k = 20;
-        *min_p = 0.0f;
+        *top_p = 0.95f;
+        *min_p = 0.05f;
     }
 }
 
