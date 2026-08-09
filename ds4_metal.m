@@ -21332,9 +21332,9 @@ int ds4_gpu_matmul_f16_pair_compressor_store_tensor(
         uint32_t                ratio,
         uint32_t                pos) {
     if (!g_initialized && !ds4_gpu_init()) return -1;
-    if ((g_quality_mode ||
-         (!ds4_gpu_device_name_contains("M3") &&
-          !ds4_gpu_device_name_contains("M5"))) ||
+    /* PSO creation below is the capability probe; do not reject a device by
+     * product-name when the exact fused kernel is available. */
+    if (g_quality_mode ||
         getenv("DS4_METAL_DISABLE_COMPRESSOR_PAIR_PROJ") != NULL ||
         getenv("DS4_METAL_DISABLE_COMPRESSOR_STORE_ONE") != NULL) {
         return 0;
@@ -21413,7 +21413,10 @@ int ds4_gpu_matmul_f16_pair_compressor_store_tensor(
         id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mv_pipeline(
             "kernel_mul_mv_f16_f32_pair_compressor_store_4",
             mv_dispatch.nsg);
-        if (!pipeline) return -1;
+        /* The fused PSO is optional.  Let the caller select the ordinary
+         * paired projection/store path when this source or device cannot
+         * provide it. */
+        if (!pipeline) return 0;
 
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
@@ -27413,12 +27416,12 @@ static int ds4_gpu_encode_flash_kv_stage_f16(
         ((uint64_t)n_raw + n_comp) * row_vecs64;
     const bool valid_grid =
         total_vecs64 != 0 && total_vecs64 <= UINT32_MAX;
+    /* The PSO is the capability probe.  Product-name gates rejected M4
+     * devices even though this kernel is available and exact there. */
     const bool eligible =
         supported_shape && valid_grid && !g_quality_mode &&
         getenv("DS4_METAL_DISABLE_GATHERED_KV_STAGE") == NULL &&
-        g_flash_kv_stage_f16_pipeline != nil &&
-        (ds4_gpu_device_name_contains("M3") ||
-         ds4_gpu_device_name_contains("M5"));
+        g_flash_kv_stage_f16_pipeline != nil;
     const bool component_disabled = eligible &&
         (ds4_gpu_env_bool("DS4_METAL_DISABLE_CONTIG_F32_F16_COPY") > 0 ||
          ds4_gpu_env_bool("DS4_METAL_DISABLE_CONTIG_F16_F16_COPY") > 0);
