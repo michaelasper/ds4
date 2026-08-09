@@ -34821,8 +34821,28 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     const uint32_t nwg = 32u;
     const uint32_t nsg = ds4_gpu_flash_attn_vec_nsg(key_count, nwg, ncpsg);
     const bool has_pad = (key_count % ncpsg) != 0u;
+    const bool swa_gqa3_requested =
+        cache_cap == 512u && key_count == 512u &&
+        n_head == 72u && n_head_kv == 8u &&
+        ds4_gpu_env_bool("DS4_METAL_LAGUNA_SWA_GQA3") > 0;
+    const bool staged_swa_active =
+        swa_gqa3_requested &&
+        ds4_gpu_env_bool("DS4_METAL_LAGUNA_STAGED_SWA") > 0;
+    /* Staged SWA currently reduces virtual-ring rows with the ordinary Flash
+     * arithmetic.  Do not silently compare or mix it with grouped GQA3 when
+     * both experiments are exported: staged SWA wins, and the grouped opt-in
+     * is ignored for this 512-slot production shape. */
+    static int staged_swa_gqa3_conflict_reported;
+    if (staged_swa_active && swa_gqa3_requested &&
+        !staged_swa_gqa3_conflict_reported) {
+        fprintf(stderr,
+                "ds4: Metal Laguna SWA GQA3 ignored while staged SWA is enabled; staged SWA takes precedence (benchmark these flags separately)\n");
+        staged_swa_gqa3_conflict_reported = 1;
+    }
     const bool use_gqa3 =
-        cache_cap > 512u && (n_head % 3u) == 0u &&
+        (cache_cap > 512u ||
+         (swa_gqa3_requested && !staged_swa_active)) &&
+        (n_head % 3u) == 0u &&
         ((n_head / n_head_kv) % 3u) == 0u;
     const NSUInteger head_bytes = (NSUInteger)head_dim * sizeof(uint16_t);
     const NSUInteger cache_row_bytes =
