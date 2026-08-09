@@ -30,7 +30,7 @@ and machine state are present.
 | --- | --- | --- |
 | Pre-rebase/basic | `448d5695d1c86401a4e9447c440feb983b73e6de` | Preserved Laguna lineage before rebasing onto `main` |
 | Rebased baseline | `729e0cedf54dccfef93fac5138b26d1157aea56a` | Same Laguna tip rebased onto `main`, before the new optimisation series |
-| Candidate | `de1a14111f9cc93237d0c8d5b6b7217108c2fc86` | Current source candidate, including the exact-on and opt-in experiments |
+| Candidate | `0e6c49fcf59a0d391e363c3ea990478db8303254` | Current source candidate, including the exact-on and opt-in experiments |
 
 Report these deltas separately:
 
@@ -82,7 +82,7 @@ export DS4_CONTROL_REPO="$DS4_BENCH_ROOT/control"
 export DS4_RESULTS="$DS4_BENCH_ROOT/results"
 export DS4_PRE_SHA=448d5695d1c86401a4e9447c440feb983b73e6de
 export DS4_BASE_SHA=729e0cedf54dccfef93fac5138b26d1157aea56a
-export DS4_CAND_SHA=de1a14111f9cc93237d0c8d5b6b7217108c2fc86
+export DS4_CAND_SHA=0e6c49fcf59a0d391e363c3ea990478db8303254
 export DS4_PRE_WT="$DS4_BENCH_ROOT/pre-rebase"
 export DS4_BASE_WT="$DS4_BENCH_ROOT/rebased-baseline"
 export DS4_CAND_WT="$DS4_BENCH_ROOT/candidate"
@@ -266,6 +266,7 @@ run_bench() {
   date -u '+%Y-%m-%dT%H:%M:%SZ' > "$out/start-utc.txt"
   pmset -g therm > "$out/thermal-before.txt" 2>&1 || true
   vm_stat > "$out/vm-before.txt" 2>&1 || true
+  memory_pressure -Q > "$out/memory-pressure-before.txt" 2>&1 || true
   (
     cd "$wt"
     /usr/bin/time -p env -i \
@@ -282,12 +283,13 @@ run_bench() {
   ) > "$out/stdout.log" 2> "$out/stderr.log"
   extract_bench_text "$out/stderr.log" > "$out/decoded.txt"
   pmset -g therm > "$out/thermal-after.txt" 2>&1 || true
+  memory_pressure -Q > "$out/memory-pressure-after.txt" 2>&1 || true
   vm_stat > "$out/vm-after.txt" 2>&1 || true
   shasum -a 256 "$out/metrics.csv" "$out/decoded.txt" \
     "$out/logits/frontier_008192.logits.json" > "$out/output-sha256.txt"
 }
 
-run_r1_probe() {
+run_decode_probe() {
   local run_id=$1
   local wt=$2
   local model=$3
@@ -310,6 +312,8 @@ run_r1_probe() {
   git -C "$wt" rev-parse HEAD > "$out/revision.txt"
   date -u '+%Y-%m-%dT%H:%M:%SZ' > "$out/start-utc.txt"
   pmset -g therm > "$out/thermal-before.txt" 2>&1 || true
+  vm_stat > "$out/vm-before.txt" 2>&1 || true
+  memory_pressure -Q > "$out/memory-pressure-before.txt" 2>&1 || true
   (
     cd "$wt"
     /usr/bin/time -p env -i \
@@ -323,8 +327,116 @@ run_r1_probe() {
         --csv "$out/metrics.csv"
   ) > "$out/stdout.log" 2> "$out/stderr.log"
   pmset -g therm > "$out/thermal-after.txt" 2>&1 || true
+  vm_stat > "$out/vm-after.txt" 2>&1 || true
+  memory_pressure -Q > "$out/memory-pressure-after.txt" 2>&1 || true
   shasum -a 256 "$out/metrics.csv" \
     "$out/logits/frontier_008193.logits.json" > "$out/output-sha256.txt"
+}
+
+compare_decode_logits() {
+  local off_run=$1
+  local on_run=$2
+  local report_rel=$3
+  local off_json="$DS4_RESULTS/$off_run/logits/frontier_008193.logits.json"
+  local on_json="$DS4_RESULTS/$on_run/logits/frontier_008193.logits.json"
+  local report="$DS4_RESULTS/$report_rel"
+  mkdir -p "${report:h}"
+  {
+    printf 'off_json=%q\n' "$off_json"
+    printf 'on_json=%q\n' "$on_json"
+    printf 'report=%q\n' "$report"
+  } > "$report.command.txt"
+  python3 - "$off_json" "$on_json" "$report" <<'PY'
+import csv
+import json
+import math
+import sys
+
+off_path, on_path, report_path = sys.argv[1:]
+
+def read_logits(path):
+    with open(path, encoding="utf-8") as stream:
+        document = json.load(stream)
+    logits = document.get("logits")
+    vocab = document.get("vocab")
+    if not isinstance(logits, list) or not logits:
+        raise SystemExit(f"missing logits in {path}")
+    if not isinstance(vocab, int) or vocab != len(logits):
+        raise SystemExit(f"vocab/logits length mismatch in {path}")
+    values = []
+    for value in logits:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SystemExit(f"non-numeric logit in {path}")
+        value = float(value)
+        if not math.isfinite(value):
+            raise SystemExit(f"non-finite logit in {path}")
+        values.append(value)
+    top = sorted(range(vocab), key=lambda index: (-values[index], index))
+    computed_argmax = top[0]
+    if document.get("argmax_id") != computed_argmax:
+        raise SystemExit(f"argmax metadata mismatch in {path}")
+    return values, vocab, top
+
+off, off_vocab, off_top = read_logits(off_path)
+on, on_vocab, on_top = read_logits(on_path)
+if off_vocab != on_vocab:
+    raise SystemExit(f"vocab differs: {off_vocab} != {on_vocab}")
+if len(off) != len(on):
+    raise SystemExit("logit vector lengths differ")
+if off_top[0] != on_top[0]:
+    raise SystemExit(f"argmax differs: {off_top[0]} != {on_top[0]}")
+
+absolute = [abs(left - right) for left, right in zip(off, on)]
+ordered = sorted(absolute)
+p99_index = max(0, math.ceil(0.99 * len(ordered)) - 1)
+max_abs = max(absolute)
+rms = math.sqrt(sum(error * error for error in absolute) / len(absolute))
+denominator = math.sqrt(sum(value * value for value in off)) * math.sqrt(
+    sum(value * value for value in on)
+)
+if denominator == 0.0:
+    raise SystemExit("cannot compute cosine for zero-norm logits")
+cosine = sum(left * right for left, right in zip(off, on)) / denominator
+off_margin = off[off_top[0]] - off[off_top[1]]
+on_margin = on[on_top[0]] - on[on_top[1]]
+investigate = max_abs > 1.0e-3 or rms > 1.0e-4
+fields = [
+    "off_json", "on_json", "vocab", "finite", "argmax_same",
+    "off_argmax_id", "on_argmax_id", "off_argmax_logit",
+    "on_argmax_logit", "off_margin", "on_margin", "max_abs", "rms",
+    "p99_abs", "cosine", "top10_overlap", "investigation_flag",
+]
+row = {
+    "off_json": off_path,
+    "on_json": on_path,
+    "vocab": off_vocab,
+    "finite": True,
+    "argmax_same": True,
+    "off_argmax_id": off_top[0],
+    "on_argmax_id": on_top[0],
+    "off_argmax_logit": off[off_top[0]],
+    "on_argmax_logit": on[on_top[0]],
+    "off_margin": off_margin,
+    "on_margin": on_margin,
+    "max_abs": max_abs,
+    "rms": rms,
+    "p99_abs": ordered[p99_index],
+    "cosine": cosine,
+    "top10_overlap": len(set(off_top[:10]) & set(on_top[:10])) / 10.0,
+    "investigation_flag": "investigate" if investigate else "within-first-pass-bound",
+}
+with open(report_path, "w", newline="", encoding="utf-8") as stream:
+    writer = csv.DictWriter(stream, fieldnames=fields)
+    writer.writeheader()
+    writer.writerow(row)
+print(f"{report_path}: max_abs={max_abs:.9g} rms={rms:.9g} "
+      f"p99_abs={ordered[p99_index]:.9g} cosine={cosine:.9g} "
+      f"argmax={off_top[0]} flag={row['investigation_flag']}")
+if investigate:
+    print("warning: numeric drift exceeds the uncalibrated first-pass bound; "
+          "investigate before promotion", file=sys.stderr)
+PY
+  shasum -a 256 "$report" > "$report.sha256"
 }
 
 run_raw() {
@@ -472,11 +584,11 @@ stderr/CSV evidence, and requires byte-exact frontier-logit parity between a
 clean arm and `DS4_METAL_GLM_QMV_R1=1` for both resident quants.
 
 ```zsh
-run_r1_probe r1-probe-q23/off "$DS4_CAND_WT" "$DS4_Q23_MODEL"
-run_r1_probe r1-probe-q23/on  "$DS4_CAND_WT" "$DS4_Q23_MODEL" \
+run_decode_probe r1-probe-q23/off "$DS4_CAND_WT" "$DS4_Q23_MODEL"
+run_decode_probe r1-probe-q23/on  "$DS4_CAND_WT" "$DS4_Q23_MODEL" \
   DS4_METAL_GLM_QMV_R1=1
-run_r1_probe r1-probe-q4/off  "$DS4_CAND_WT" "$DS4_Q4_MODEL"
-run_r1_probe r1-probe-q4/on   "$DS4_CAND_WT" "$DS4_Q4_MODEL" \
+run_decode_probe r1-probe-q4/off  "$DS4_CAND_WT" "$DS4_Q4_MODEL"
+run_decode_probe r1-probe-q4/on   "$DS4_CAND_WT" "$DS4_Q4_MODEL" \
   DS4_METAL_GLM_QMV_R1=1
 
 cmp "$DS4_RESULTS/r1-probe-q23/off/logits/frontier_008193.logits.json" \
@@ -507,7 +619,84 @@ The R1 gate is therefore the decoded-output parity from the measured arm, the
 8193 frontier probe above, and the exact Metal-kernel tests above; do not describe the 8192 frontier JSON alone as an R1 correctness
 result.
 
-### 3. Paired Laguna prefill Q/K norm and RoPE
+### 3. Full-ring Laguna SWA GQA3
+
+This is an isolated candidate experiment for the production Laguna SWA shape:
+72 query heads, 8 KV heads, head dimension 128, and a 512-slot ring at a full
+512-key decode. `DS4_METAL_LAGUNA_SWA_GQA3=1` is default-off and reuses the
+existing grouped GQA3 decode pipeline. The clean arm has no override; B sets
+only this flag. Every helper uses `env -i`, so `DS4_METAL_LAGUNA_STAGED_SWA` is
+absent even if it was exported by the calling shell. Never combine the flags:
+when both are exported in an ad hoc run, staged SWA takes precedence and emits
+a diagnostic, so such a run is not evidence for grouped GQA3 speed.
+
+First run the correctness probes, which advance from 8192 to 8193 without
+generated tokens. The 8193 vectors are allowed to differ in low bits because
+the ordinary and grouped reductions use different partition/order; the Python
+helper requires equal vocabulary, finite values, and equal argmax, then writes
+the measured drift to a preserved CSV and SHA-256 sidecar. It does not fail
+solely on the uncalibrated first-pass magnitude bound.
+
+```zsh
+run_decode_probe swa-gqa3-probe-q23/off "$DS4_CAND_WT" "$DS4_Q23_MODEL"
+run_decode_probe swa-gqa3-probe-q23/on  "$DS4_CAND_WT" "$DS4_Q23_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+run_decode_probe swa-gqa3-probe-q4/off  "$DS4_CAND_WT" "$DS4_Q4_MODEL"
+run_decode_probe swa-gqa3-probe-q4/on   "$DS4_CAND_WT" "$DS4_Q4_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+
+compare_decode_logits \
+  swa-gqa3-probe-q23/off swa-gqa3-probe-q23/on \
+  swa-gqa3-q23/8193-drift.csv
+compare_decode_logits \
+  swa-gqa3-probe-q4/off swa-gqa3-probe-q4/on \
+  swa-gqa3-q4/8193-drift.csv
+```
+
+Then measure the 8192-prefill control and generation in ABBA order. The
+frontier JSON at 8192 must remain byte-identical across the four measured arms;
+all generated token text must also remain byte-identical. Only B receives the
+GQA3 override.
+
+```zsh
+run_bench warmup/swa-gqa3-q23-off "$DS4_CAND_WT" "$DS4_Q23_MODEL"
+run_bench warmup/swa-gqa3-q23-on  "$DS4_CAND_WT" "$DS4_Q23_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+run_bench swa-gqa3-q23/01-off-A "$DS4_CAND_WT" "$DS4_Q23_MODEL"
+run_bench swa-gqa3-q23/02-on-B  "$DS4_CAND_WT" "$DS4_Q23_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+run_bench swa-gqa3-q23/03-on-B  "$DS4_CAND_WT" "$DS4_Q23_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+run_bench swa-gqa3-q23/04-off-A "$DS4_CAND_WT" "$DS4_Q23_MODEL"
+
+run_bench warmup/swa-gqa3-q4-off "$DS4_CAND_WT" "$DS4_Q4_MODEL"
+run_bench warmup/swa-gqa3-q4-on  "$DS4_CAND_WT" "$DS4_Q4_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+run_bench swa-gqa3-q4/01-off-A "$DS4_CAND_WT" "$DS4_Q4_MODEL"
+run_bench swa-gqa3-q4/02-on-B  "$DS4_CAND_WT" "$DS4_Q4_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+run_bench swa-gqa3-q4/03-on-B  "$DS4_CAND_WT" "$DS4_Q4_MODEL" \
+  DS4_METAL_LAGUNA_SWA_GQA3=1
+run_bench swa-gqa3-q4/04-off-A "$DS4_CAND_WT" "$DS4_Q4_MODEL"
+
+for quant in q23 q4; do
+  for run in 01-off-A 02-on-B 03-on-B 04-off-A; do
+    cmp "$DS4_RESULTS/swa-gqa3-$quant/$run/decoded.txt" \
+        "$DS4_RESULTS/swa-gqa3-$quant/01-off-A/decoded.txt"
+    cmp "$DS4_RESULTS/swa-gqa3-$quant/$run/logits/frontier_008192.logits.json" \
+        "$DS4_RESULTS/swa-gqa3-$quant/01-off-A/logits/frontier_008192.logits.json"
+  done
+done
+```
+
+Record `gen_steady_tps` as the primary performance metric, with `prefill_tps`
+as the unaffected control. Record both B observations and their median against
+both A observations and their median. Also copy the Q2/Q3 and Q4 8193 CSV rows
+into `SUMMARY.md`, including max absolute drift, RMS, p99 absolute drift,
+cosine, argmax IDs/logits/margins, top-10 overlap, and the helper's
+`investigation_flag`.
+
+### 4. Paired Laguna prefill Q/K norm and RoPE
 
 A is ordinary prefill; B sets only
 `DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED=1`.
@@ -528,7 +717,7 @@ Compare every `decoded.txt` and frontier-logit JSON with `01-off-A`. The
 primary metric here is `prefill_tps`; generation must not regress beyond the
 noise threshold.
 
-### 4. Direct raw GPU argmax
+### 5. Direct raw GPU argmax
 
 This experiment must use `ds4`, not `ds4-bench`: the optimisation applies to
 the direct, raw, single-tier Metal greedy path. A performs the ordinary logits
@@ -550,7 +739,7 @@ All four `generated.txt` files must be byte-identical. Both B logs must contain
 `Laguna GPU argmax enabled (single-dispatch)`; neither A log may contain it.
 Use the `ds4: Laguna prefill: ..., generation: ...` line for throughput.
 
-### 5. DFlash Q2/Q3 verifier batching and staged SWA
+### 6. DFlash Q2/Q3 verifier batching and staged SWA
 
 The long prompt places the target verifier beyond the 512-token SWA wrap.
 Draft width is fixed at three and the confidence cutoff is zero so verifier
@@ -566,8 +755,7 @@ shape cannot vary between arms.
 ```zsh
 run_dflash warmup/dflash-A DS4_METAL_DISABLE_Q23_EXACT_MULTIROW=1
 run_dflash warmup/dflash-B
-run_dflash warmup/dflash-C \
-  DS4_METAL_LAGUNA_STAGED_SWA=1 DS4_METAL_LAGUNA_REQUIRE_STAGED_SWA=1
+run_dflash warmup/dflash-C DS4_METAL_LAGUNA_STAGED_SWA=1 DS4_METAL_LAGUNA_REQUIRE_STAGED_SWA=1
 
 run_dflash dflash/01-legacy-multirow-A DS4_METAL_DISABLE_Q23_EXACT_MULTIROW=1
 run_dflash dflash/02-default-B
@@ -591,7 +779,13 @@ staged SWA.
 Before calculating speedups, apply all of these gates:
 
 - every command exited zero;
-- all parity comparisons required above passed byte-for-byte;
+- all required byte-parity comparisons passed (the 8193 GQA3 probe uses the
+  numeric CSV helper rather than a byte comparison);
+- the GQA3 8193 helper reports equal vocabulary, finite values, and equal
+  argmax IDs for both Q2/Q3 and Q4; a drift flag is observational on this
+  first M5 pass, but must be investigated before promotion;
+- GQA3 measured arms have byte-identical generated text and 8192 frontier JSON
+  between off/on; no staged-SWA override appears in their environment files;
 - `kvcache_bytes`, generated-token counts, and DFlash drafted/verified/accepted
   counts agree between paired arms;
 - no measured stderr contains an unexpected `failed`, `unavailable`,
@@ -616,6 +810,15 @@ For every `ds4-bench` arm, preserve both observations and report their median:
 - `gen_steady_tps`;
 - `kvcache_bytes`;
 - percentage delta of B or C relative to its named control.
+
+For full-ring SWA GQA3, report Q2/Q3 and Q4 independently:
+
+- off/on `gen_steady_tps` observations, medians, and B-versus-A percentage;
+- `prefill_tps` from the 8192 unaffected-prefill control;
+- 8193 `max_abs`, RMS, p99 absolute drift, cosine, argmax IDs/logits/margins,
+  and top-10 overlap from the preserved CSV;
+- whether the 8192 frontier and generated text parity gates passed;
+- whether the numeric helper set `investigation_flag`.
 
 For GPU argmax, report both raw observations of Laguna generation tokens/s,
 their median, and B versus A percentage change. Also report Laguna prefill
@@ -644,8 +847,9 @@ Create `SUMMARY.md` in `$DS4_RESULTS` with these tables:
 2. Input identity: all three source SHAs and all model/prompt SHA-256 values.
 3. Default Q2/Q3 and Q4: the two observations and median for each revision,
    followed by the three separately labelled deltas.
-4. Isolated experiments: R1 Q2/Q3, R1 Q4, paired prefill, and GPU argmax, with
-   A/B observations, medians, percentage deltas, and parity status.
+4. Isolated experiments: R1 Q2/Q3, R1 Q4, full-ring SWA GQA3 Q2/Q3, full-ring
+   SWA GQA3 Q4, paired prefill, and GPU argmax, with A/B observations,
+   medians, percentage deltas, parity status, and the 8193 numeric CSV fields.
 5. DFlash: the A/B/C metrics above, with A to B and B to C deltas.
 6. A decision for each opt-in path: `promote`, `keep opt-in`, `reject`, or
    `rerun`, with one sentence grounded in the measured metric and noise gate.
@@ -655,7 +859,13 @@ As initial decision thresholds, promote an experiment only when parity passes
 and its relevant median improves by at least 1.5% without a greater than 1%
 regression in an unaffected primary metric. A smaller positive result remains
 opt-in pending more repetitions. For staged SWA, require both lower DFlash
-pipeline latency and higher end-to-end generation throughput.
+pipeline latency and higher end-to-end generation throughput. For full-ring
+SWA GQA3, reject promotion if generated text or argmax differs, any probe
+value is non-finite, the numeric helper reports material drift (`max_abs` >
+1e-3 or RMS > 1e-4), or the median `gen_steady_tps` improvement is below
+1.5%. The first M5 pass must still record and return a numeric drift result
+instead of aborting solely on those uncalibrated magnitude thresholds; mark it
+for investigation and keep the flag opt-in until calibrated.
 
 ## Package the evidence
 
@@ -692,11 +902,15 @@ the repository's standard context frontiers using
 # Keep this as an array: an empty array is the clean default arm, while each
 # candidate override is one complete NAME=VALUE argument to env.
 typeset -a approved_candidate_env=()
-# Example winning candidate arm (both flags are supported by ds4-bench):
+# Example winning candidate arm (approved flags may be combined except staged SWA):
 # approved_candidate_env=(
 #   DS4_METAL_GLM_QMV_R1=1
 #   DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED=1
+#   DS4_METAL_LAGUNA_SWA_GQA3=1
 # )
+# Never put DS4_METAL_LAGUNA_SWA_GQA3=1 and DS4_METAL_LAGUNA_STAGED_SWA=1
+# in the same approved array. Staged SWA takes precedence for the production
+# 512-slot route and emits a diagnostic; benchmark and promote them separately.
 
 worktree="$DS4_CAND_WT"
 model="$DS4_Q4_MODEL"
