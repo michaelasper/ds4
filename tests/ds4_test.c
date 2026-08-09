@@ -4588,6 +4588,289 @@ static void test_metal_glm_qmv_r1_exact(void) {
     test_metal_glm_qmv_r1_case(12u);
 }
 
+static void test_metal_laguna_staged_swa_case(
+        uint32_t n_head,
+        uint32_t n_head_kv,
+        uint32_t pos0,
+        uint32_t n_tokens) {
+    const uint32_t head_dim = 128u;
+    const uint32_t cache_cap = 512u;
+    const uint32_t cache_width = n_head_kv * head_dim;
+    const uint64_t cache_values = (uint64_t)cache_cap * cache_width;
+    const uint64_t q_values = (uint64_t)n_tokens * n_head * head_dim;
+    const uint64_t kv_values = (uint64_t)n_tokens * cache_width;
+    const uint64_t gate_values = (uint64_t)n_tokens * n_head;
+    const uint64_t heads_bytes = q_values * sizeof(float);
+    const uint64_t cache_bytes = cache_values * sizeof(uint16_t);
+    const uint64_t current_kv_bytes = kv_values * sizeof(float);
+    const uint64_t staged_bytes = kv_values * sizeof(uint16_t);
+    const uint64_t gate_bytes = gate_values * sizeof(float);
+
+    ds4_gpu_tensor *heads = ds4_gpu_tensor_alloc(heads_bytes);
+    ds4_gpu_tensor *key_cache = ds4_gpu_tensor_alloc(cache_bytes);
+    ds4_gpu_tensor *value_cache = ds4_gpu_tensor_alloc(cache_bytes);
+    ds4_gpu_tensor *staged_key = ds4_gpu_tensor_alloc(staged_bytes);
+    ds4_gpu_tensor *staged_value = ds4_gpu_tensor_alloc(staged_bytes);
+    ds4_gpu_tensor *q = ds4_gpu_tensor_alloc(heads_bytes);
+    ds4_gpu_tensor *k = ds4_gpu_tensor_alloc(current_kv_bytes);
+    ds4_gpu_tensor *v = ds4_gpu_tensor_alloc(current_kv_bytes);
+    ds4_gpu_tensor *gate = ds4_gpu_tensor_alloc(gate_bytes);
+    uint16_t *initial_key = malloc((size_t)cache_bytes);
+    uint16_t *initial_value = malloc((size_t)cache_bytes);
+    uint16_t *baseline_key = malloc((size_t)cache_bytes);
+    uint16_t *baseline_value = malloc((size_t)cache_bytes);
+    uint16_t *staged_key_out = malloc((size_t)cache_bytes);
+    uint16_t *staged_value_out = malloc((size_t)cache_bytes);
+    uint16_t *staged_key_poison = malloc((size_t)staged_bytes);
+    uint16_t *staged_value_poison = malloc((size_t)staged_bytes);
+    float *q_host = malloc((size_t)heads_bytes);
+    float *k_host = malloc((size_t)current_kv_bytes);
+    float *v_host = malloc((size_t)current_kv_bytes);
+    float *gate_host = malloc((size_t)gate_bytes);
+    float *baseline_heads_seed = malloc((size_t)heads_bytes);
+    float *staged_heads_seed = malloc((size_t)heads_bytes);
+    float *baseline_heads = malloc((size_t)heads_bytes);
+    float *staged_heads = malloc((size_t)heads_bytes);
+    char *saved_staged_env = NULL;
+    char *saved_require_env = NULL;
+    bool staged_env_saved = false;
+    bool require_env_saved = false;
+    const char *staged_env_name = "DS4_METAL_LAGUNA_STAGED_SWA";
+    const char *require_env_name = "DS4_METAL_LAGUNA_REQUIRE_STAGED_SWA";
+    TEST_ASSERT(heads && key_cache && value_cache && staged_key &&
+                staged_value && q && k && v && gate && initial_key &&
+                initial_value && baseline_key && baseline_value &&
+                staged_key_out && staged_value_out && staged_key_poison &&
+                staged_value_poison && q_host && k_host &&
+                v_host && gate_host && baseline_heads_seed &&
+                staged_heads_seed && baseline_heads && staged_heads);
+    if (!heads || !key_cache || !value_cache || !staged_key ||
+        !staged_value || !q || !k || !v || !gate || !initial_key ||
+        !initial_value || !baseline_key || !baseline_value ||
+        !staged_key_out || !staged_value_out || !staged_key_poison ||
+        !staged_value_poison || !q_host || !k_host ||
+        !v_host || !gate_host || !baseline_heads_seed ||
+        !staged_heads_seed || !baseline_heads || !staged_heads) {
+        goto cleanup;
+    }
+
+    /* Each old slot is a sentinel with a distinct value.  New rows use much
+     * larger, row-distinct K/V values so a future-row substitution changes the
+     * first query visibly; the A/B comparison therefore catches leakage. */
+    for (uint32_t slot = 0; slot < cache_cap; slot++) {
+        for (uint32_t col = 0; col < cache_width; col++) {
+            const float key_value = 0.03125f +
+                (float)((slot * 17u + col * 11u) % 251u) / 64.0f;
+            const float value_value = -0.0625f +
+                (float)((slot * 23u + col * 7u) % 239u) / 72.0f;
+            initial_key[(uint64_t)slot * cache_width + col] =
+                test_float_to_f16(key_value);
+            initial_value[(uint64_t)slot * cache_width + col] =
+                test_float_to_f16(value_value);
+        }
+    }
+    for (uint32_t token = 0; token < n_tokens; token++) {
+        for (uint32_t col = 0; col < cache_width; col++) {
+            /* Make future rows deliberately unlike row zero. */
+            k_host[(uint64_t)token * cache_width + col] =
+                3.0f + (float)token * 2.75f +
+                (float)((col * 13u + token * 7u) % 31u) / 80.0f;
+            v_host[(uint64_t)token * cache_width + col] =
+                -4.0f - (float)token * 1.5f +
+                (float)((col * 19u + token * 5u) % 37u) / 96.0f;
+        }
+    }
+    for (uint64_t i = 0; i < q_values; i++) {
+        const uint32_t token = (uint32_t)(i / ((uint64_t)n_head * head_dim));
+        const uint32_t col = (uint32_t)(i % head_dim);
+        const uint32_t head =
+            (uint32_t)((i / head_dim) % n_head);
+        q_host[i] = 0.015625f + (float)token * 0.75f +
+            (float)head * 0.03125f + (float)(col % 17u) / 96.0f;
+    }
+    for (uint64_t i = 0; i < gate_values; i++) {
+        gate_host[i] = -0.25f + (float)(i % 11u) / 37.0f;
+    }
+    for (uint64_t i = 0; i < kv_values; i++) {
+        /* Sign-distinct NaN payloads make a missing stage write visible even
+         * when equal-sized GQA cases reuse the same allocator storage. */
+        staged_key_poison[i] = (uint16_t)(0x7c01u |
+                                          ((i + pos0 + n_head) & 0x03ffu));
+        staged_value_poison[i] = (uint16_t)(0xfc01u |
+                                            ((i * 3u + pos0 + n_tokens) &
+                                             0x03ffu));
+    }
+    for (uint64_t i = 0; i < q_values; i++) {
+        baseline_heads_seed[i] = 1000.0f + (float)i * 0.001f;
+        staged_heads_seed[i] = -2000.0f - (float)i * 0.001f;
+    }
+
+    TEST_ASSERT(ds4_gpu_tensor_write(q, 0, q_host, heads_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(k, 0, k_host, current_kv_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(v, 0, v_host, current_kv_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(gate, 0, gate_host, gate_bytes) != 0);
+
+    const bool allow_staged_fallback =
+        test_env_bool("DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK");
+    saved_staged_env = test_save_env(staged_env_name);
+    staged_env_saved = true;
+    saved_require_env = test_save_env(require_env_name);
+    require_env_saved = true;
+    TEST_ASSERT(unsetenv(staged_env_name) == 0);
+    TEST_ASSERT(unsetenv(require_env_name) == 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    heads, 0, baseline_heads_seed, heads_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    key_cache, 0, initial_key, cache_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    value_cache, 0, initial_value, cache_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    staged_key, 0, staged_key_poison, staged_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    staged_value, 0, staged_value_poison, staged_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_attention_prefill_tensor(
+                    heads, key_cache, value_cache, staged_key, staged_value,
+                    q, k, v, gate, pos0, n_tokens, cache_cap,
+                    n_head, n_head_kv, head_dim,
+                    1.0f / sqrtf((float)head_dim), 1) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    heads, 0, baseline_heads, heads_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    key_cache, 0, baseline_key, cache_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    value_cache, 0, baseline_value, cache_bytes) != 0);
+
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    heads, 0, staged_heads_seed, heads_bytes) != 0);
+    TEST_ASSERT(setenv(staged_env_name, "1", 1) == 0);
+    if (allow_staged_fallback) {
+        TEST_ASSERT(unsetenv(require_env_name) == 0);
+    } else {
+        TEST_ASSERT(setenv(require_env_name, "1", 1) == 0);
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    key_cache, 0, initial_key, cache_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    value_cache, 0, initial_value, cache_bytes) != 0);
+    /* Poison immediately before the required staged leg so a stage-kernel
+     * no-write cannot be masked by allocator reuse or a prior test case. */
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    staged_key, 0, staged_key_poison, staged_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    staged_value, 0, staged_value_poison, staged_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_attention_prefill_tensor(
+                    heads, key_cache, value_cache, staged_key, staged_value,
+                    q, k, v, gate, pos0, n_tokens, cache_cap,
+                    n_head, n_head_kv, head_dim,
+                    1.0f / sqrtf((float)head_dim), 1) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    heads, 0, staged_heads, heads_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    key_cache, 0, staged_key_out, cache_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    value_cache, 0, staged_value_out, cache_bytes) != 0);
+
+    TEST_ASSERT(memcmp(baseline_heads, staged_heads, (size_t)heads_bytes) == 0);
+    TEST_ASSERT(memcmp(baseline_key, staged_key_out, (size_t)cache_bytes) == 0);
+    TEST_ASSERT(memcmp(baseline_value, staged_value_out,
+                       (size_t)cache_bytes) == 0);
+
+    const uint32_t pos_mod = pos0 % cache_cap;
+    for (uint32_t slot = 0; slot < cache_cap; slot++) {
+        const uint32_t u = slot >= pos_mod ? slot - pos_mod :
+            slot + cache_cap - pos_mod;
+        const bool overwritten = u < n_tokens;
+        for (uint32_t col = 0; col < cache_width; col++) {
+            const uint16_t expected_key = overwritten ?
+                test_float_to_f16(k_host[(uint64_t)u * cache_width + col]) :
+                initial_key[(uint64_t)slot * cache_width + col];
+            const uint16_t expected_value = overwritten ?
+                test_float_to_f16(v_host[(uint64_t)u * cache_width + col]) :
+                initial_value[(uint64_t)slot * cache_width + col];
+            TEST_ASSERT(staged_key_out[(uint64_t)slot * cache_width + col] ==
+                        expected_key);
+            TEST_ASSERT(staged_value_out[(uint64_t)slot * cache_width + col] ==
+                        expected_value);
+            if (!overwritten) {
+                TEST_ASSERT(staged_key_out[(uint64_t)slot * cache_width + col] ==
+                            initial_key[(uint64_t)slot * cache_width + col]);
+                TEST_ASSERT(staged_value_out[(uint64_t)slot * cache_width + col] ==
+                            initial_value[(uint64_t)slot * cache_width + col]);
+            }
+        }
+    }
+    fprintf(stderr,
+            "ds4-test: Laguna staged SWA A/B exact GQA%u pos=%u rows=%u\n",
+            n_head / n_head_kv, pos0, n_tokens);
+
+    if (require_env_saved) {
+        test_restore_env(require_env_name, saved_require_env);
+        saved_require_env = NULL;
+        require_env_saved = false;
+    }
+    if (staged_env_saved) {
+        test_restore_env(staged_env_name, saved_staged_env);
+        saved_staged_env = NULL;
+        staged_env_saved = false;
+    }
+
+cleanup:
+    if (require_env_saved) {
+        test_restore_env(require_env_name, saved_require_env);
+        saved_require_env = NULL;
+        require_env_saved = false;
+    }
+    if (staged_env_saved) {
+        test_restore_env(staged_env_name, saved_staged_env);
+        saved_staged_env = NULL;
+        staged_env_saved = false;
+    }
+    free(staged_heads);
+    free(baseline_heads);
+    free(staged_heads_seed);
+    free(baseline_heads_seed);
+    free(gate_host);
+    free(v_host);
+    free(k_host);
+    free(q_host);
+    free(staged_value_out);
+    free(staged_key_out);
+    free(staged_value_poison);
+    free(staged_key_poison);
+    free(baseline_value);
+    free(baseline_key);
+    free(initial_value);
+    free(initial_key);
+    ds4_gpu_tensor_free(gate);
+    ds4_gpu_tensor_free(v);
+    ds4_gpu_tensor_free(k);
+    ds4_gpu_tensor_free(q);
+    ds4_gpu_tensor_free(staged_value);
+    ds4_gpu_tensor_free(staged_key);
+    ds4_gpu_tensor_free(value_cache);
+    ds4_gpu_tensor_free(key_cache);
+    ds4_gpu_tensor_free(heads);
+}
+
+static void test_metal_laguna_staged_swa_exact(void) {
+    static const struct {
+        uint32_t pos0;
+        uint32_t n_tokens;
+    } cases[] = {
+        { 512u, 2u },
+        { 516u, 4u },
+        { 1020u, 16u },
+        { 1024u, 16u },
+    };
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        test_metal_laguna_staged_swa_case(
+            72u, 8u, cases[i].pos0, cases[i].n_tokens);
+        test_metal_laguna_staged_swa_case(
+            48u, 8u, cases[i].pos0, cases[i].n_tokens);
+    }
+}
+
 static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
     typedef struct {
         uint32_t n_tokens;
@@ -6360,6 +6643,7 @@ static void test_metal_kernel_group(void) {
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
     test_metal_laguna_gpu_argmax();
+    test_metal_laguna_staged_swa_exact();
     test_metal_glm_qmv_r1_exact();
     test_metal_q8_0_output_nr4_exact();
     test_metal_f16_compressor_pair_state_store_exact();
