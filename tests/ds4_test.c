@@ -763,10 +763,17 @@ static void test_metal_q8_0_decode_pair_exact_case(
     const uint64_t weight1_offset = test_round_up_u64(weight0_bytes, page);
     const uint64_t weight_alloc =
         test_round_up_u64(weight1_offset + weight1_bytes, page);
+    /* Keep the stock pair A/B on the production NR2 selector even when the
+     * surrounding test process inherited a conflicting rows setting. */
+    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "2", 1) == 0);
 
     void *weights_raw = NULL;
     TEST_ASSERT(posix_memalign(&weights_raw, (size_t)page, (size_t)weight_alloc) == 0);
-    if (!weights_raw) return;
+    if (!weights_raw) {
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        return;
+    }
     memset(weights_raw, 0, (size_t)weight_alloc);
     test_fill_q8_0_weights((uint8_t *)weights_raw, in_dim, out0_dim, seed0);
     test_fill_q8_0_weights((uint8_t *)weights_raw + weight1_offset,
@@ -792,6 +799,7 @@ static void test_metal_q8_0_decode_pair_exact_case(
         ds4_gpu_tensor_free(pair0);
         ds4_gpu_tensor_free(pair1);
         free(weights_raw);
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
         return;
     }
 
@@ -817,6 +825,7 @@ static void test_metal_q8_0_decode_pair_exact_case(
         ds4_gpu_tensor_free(pair0);
         ds4_gpu_tensor_free(pair1);
         free(weights_raw);
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
         return;
     }
 
@@ -877,6 +886,7 @@ static void test_metal_q8_0_decode_pair_exact_case(
     ds4_gpu_tensor_free(pair0);
     ds4_gpu_tensor_free(pair1);
     free(weights_raw);
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
 }
 
 static void test_metal_q8_0_decode_pair_exact(void) {
@@ -991,6 +1001,332 @@ static void test_metal_q8_0_output_nr4_exact(void) {
     test_metal_q8_0_output_nr4_exact_case(128, 65540, 89);
 }
 
+static void test_metal_laguna_dense_q8_gate_up_swiglu(void) {
+    /* The production arm is intentionally opt-in: two 3072x12288 Q8_0
+     * matrices are about 77 MiB and this test compares every output bit. */
+    const char *focused = getenv("DS4_TEST_LAGUNA_DENSE_Q8_FUSED");
+    if (!focused) {
+        fprintf(stderr,
+                "ds4-test: Laguna dense Q8 gate/up+SwiGLU skipped "
+                "(set DS4_TEST_LAGUNA_DENSE_Q8_FUSED=1)\n");
+        return;
+    }
+    TEST_ASSERT(strcmp(focused, "1") == 0);
+    if (strcmp(focused, "1") != 0) return;
+
+    /* Keep the focused test's strict-selector contract executable without a
+     * model: production code and tests share this parser, so every malformed
+     * value has a direct proof before the model-path cases below. */
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(NULL) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode("") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode("0") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode("1") == 1);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode("01") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode("true") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(NULL) == 2);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode("") == 2);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode("2") == 2);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode("4") == 4);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode("3") < 0);
+
+    /* The pure production decision is also the fail-before-mutation hook:
+     * selector-on plus an alternate rows setting is an explicit conflict,
+     * while off ignores all backend certificates.  Keep route selection in the
+     * same shared helper used by the decode entrypoint. */
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    -1, 1, 1, 2, 1) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    2, 1, 1, 2, 1) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    0, 0, 0, 4, 0) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    1, 1, 1, 2, 1) == 1);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    1, 1, 1, 4, 1) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    1, 0, 1, 2, 1) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    1, 1, 0, 2, 1) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    1, 1, 1, 2, 0) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+                    0, 1, 0) == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+                    1, 1, 0) == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+                    1, 1, 1) == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+                    1, 0, 0) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+                    1, 0, 1) == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK);
+
+    /* Exercise the actual environment conflict separately from the model
+     * path. A strict request paired with rows=4 must be rejected before any
+     * graph/KV mutation; the later numeric reference always pins NR2. */
+    char *saved_selector =
+        test_save_env("DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU");
+    char *saved_conflict_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU", "1", 1) ==
+                0);
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "4", 1) == 0);
+    const int conflict_mode = ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(
+        getenv("DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU"));
+    const int conflict_rows = ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(
+        getenv("DS4_METAL_Q8_MV_ROWS"));
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                    conflict_mode, 1, 1, conflict_rows, 1) < 0);
+    test_restore_env("DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU",
+                     saved_selector);
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_conflict_rows);
+
+    /* Pin the production stock reference and fused candidates to the only
+     * dense Q8 topology currently exposed by the Metal library: NR2. */
+    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "2", 1) == 0);
+    const bool mid_rows2 = ds4_gpu_shared_mid_swiglu_q8_0_available() != 0;
+    TEST_ASSERT(mid_rows2);
+    if (!mid_rows2) {
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        return;
+    }
+
+    /* The focused selector is explicit, so an unavailable pipeline is a
+     * failed test rather than a silent skip. */
+    if (!ds4_gpu_shared_mid_swiglu_q8_0_available()) {
+        fprintf(stderr,
+                "ds4-test: Laguna dense Q8 gate/up+SwiGLU pipeline unavailable\n");
+        TEST_ASSERT(false);
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        return;
+    }
+
+    const uint32_t in_dim = 3072u;
+    const uint32_t out_dim = 12288u;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t row_bytes = (uint64_t)(in_dim / 32u) * 34u;
+    const uint64_t weight_bytes = (uint64_t)out_dim * row_bytes;
+    const uint64_t weight1_offset = test_round_up_u64(weight_bytes, page);
+    const uint64_t weight_alloc =
+        test_round_up_u64(weight1_offset + weight_bytes, page);
+    const uint64_t x_bytes = (uint64_t)in_dim * sizeof(float);
+    const uint64_t out_bytes = (uint64_t)out_dim * sizeof(float);
+
+    void *weights_raw = NULL;
+    TEST_ASSERT(posix_memalign(&weights_raw, (size_t)page,
+                               (size_t)weight_alloc) == 0);
+    if (!weights_raw) {
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        return;
+    }
+    memset(weights_raw, 0, (size_t)weight_alloc);
+    test_fill_q8_0_weights((uint8_t *)weights_raw, in_dim, out_dim, 173u);
+    test_fill_q8_0_weights((uint8_t *)weights_raw + weight1_offset,
+                           in_dim, out_dim, 239u);
+
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
+    ds4_gpu_tensor *ref_gate = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *ref_up = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *ref_mid = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *fused_gate = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *fused_up = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *fused_mid = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *mid_only = ds4_gpu_tensor_alloc(out_bytes);
+    TEST_ASSERT(x != NULL);
+    TEST_ASSERT(ref_gate != NULL);
+    TEST_ASSERT(ref_up != NULL);
+    TEST_ASSERT(ref_mid != NULL);
+    TEST_ASSERT(fused_gate != NULL);
+    TEST_ASSERT(fused_up != NULL);
+    TEST_ASSERT(fused_mid != NULL);
+    TEST_ASSERT(mid_only != NULL);
+    if (!x || !ref_gate || !ref_up || !ref_mid || !fused_gate ||
+        !fused_up || !fused_mid || !mid_only) {
+        ds4_gpu_tensor_free(mid_only);
+        ds4_gpu_tensor_free(fused_mid);
+        ds4_gpu_tensor_free(fused_up);
+        ds4_gpu_tensor_free(fused_gate);
+        ds4_gpu_tensor_free(ref_mid);
+        ds4_gpu_tensor_free(ref_up);
+        ds4_gpu_tensor_free(ref_gate);
+        ds4_gpu_tensor_free(x);
+        free(weights_raw);
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        return;
+    }
+
+    float *x_host = malloc((size_t)x_bytes);
+    float *ref_gate_host = malloc((size_t)out_bytes);
+    float *ref_up_host = malloc((size_t)out_bytes);
+    float *ref_mid_host = malloc((size_t)out_bytes);
+    float *fused_gate_host = malloc((size_t)out_bytes);
+    float *fused_up_host = malloc((size_t)out_bytes);
+    float *fused_mid_host = malloc((size_t)out_bytes);
+    float *mid_only_host = malloc((size_t)out_bytes);
+    TEST_ASSERT(x_host != NULL);
+    TEST_ASSERT(ref_gate_host != NULL);
+    TEST_ASSERT(ref_up_host != NULL);
+    TEST_ASSERT(ref_mid_host != NULL);
+    TEST_ASSERT(fused_gate_host != NULL);
+    TEST_ASSERT(fused_up_host != NULL);
+    TEST_ASSERT(fused_mid_host != NULL);
+    TEST_ASSERT(mid_only_host != NULL);
+    if (!x_host || !ref_gate_host || !ref_up_host || !ref_mid_host ||
+        !fused_gate_host || !fused_up_host || !fused_mid_host ||
+        !mid_only_host) {
+        free(mid_only_host);
+        free(fused_mid_host);
+        free(fused_up_host);
+        free(fused_gate_host);
+        free(ref_mid_host);
+        free(ref_up_host);
+        free(ref_gate_host);
+        free(x_host);
+        ds4_gpu_tensor_free(mid_only);
+        ds4_gpu_tensor_free(fused_mid);
+        ds4_gpu_tensor_free(fused_up);
+        ds4_gpu_tensor_free(fused_gate);
+        ds4_gpu_tensor_free(ref_mid);
+        ds4_gpu_tensor_free(ref_up);
+        ds4_gpu_tensor_free(ref_gate);
+        ds4_gpu_tensor_free(x);
+        free(weights_raw);
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        return;
+    }
+
+    TEST_ASSERT(ds4_gpu_set_model_map(weights_raw, weight_alloc) != 0);
+    ds4_gpu_set_quality(false);
+    /* The generic dense fused kernels are compiled with NR2 and load output
+     * rows in pairs.  Every host wrapper must reject an odd shape before it
+     * can create a command buffer. */
+    const uint32_t odd_out_dim = out_dim - 1u;
+    TEST_ASSERT(ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
+                    fused_gate, fused_up, fused_mid,
+                    weights_raw, weight_alloc, 0, weight1_offset,
+                    in_dim, odd_out_dim, x, 0.0f) == 0);
+    TEST_ASSERT(ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                    mid_only, weights_raw, weight_alloc, 0,
+                    weight1_offset, in_dim, odd_out_dim, x, 0.0f) == 0);
+    TEST_ASSERT(ds4_gpu_shared_gate_up_swiglu_q8_0_model_view_tensor(
+                    fused_gate, fused_up, fused_mid,
+                    weights_raw, weight_alloc, 0, weight1_offset,
+                    in_dim, odd_out_dim, x, 0.0f) == 0);
+    TEST_ASSERT(ds4_gpu_shared_gate_up_swiglu_q8_0_rows_tensor(
+                    fused_gate, fused_up, fused_mid,
+                    weights_raw, weight_alloc, 0, weight1_offset,
+                    in_dim, odd_out_dim, x, 1, 0.0f) == 0);
+    TEST_ASSERT(ds4_gpu_shared_gate_up_swiglu_q8_0_rows_scalar_tensor(
+                    fused_gate, fused_up, fused_mid,
+                    weights_raw, weight_alloc, 0, weight1_offset,
+                    in_dim, odd_out_dim, x, 1, 0.0f) == 0);
+    /* Zero dimensions must fail before range arithmetic or command encoding. */
+    TEST_ASSERT(ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                    mid_only, weights_raw, weight_alloc, 0,
+                    weight1_offset, 0, out_dim, x, 0.0f) == 0);
+    TEST_ASSERT(ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                    mid_only, weights_raw, weight_alloc, 0,
+                    weight1_offset, in_dim, 0, x, 0.0f) == 0);
+    for (uint32_t ci = 0; ci < 4u; ci++) {
+        for (uint32_t i = 0; i < in_dim; i++) {
+            uint32_t bits;
+            if (ci == 0u) {
+                const int value =
+                    (int)((i * 37u + (i ^ (i >> 2u)) * 11u) % 127u) - 63;
+                x_host[i] = (float)value / 72.0f;
+            } else if (ci == 1u) {
+                static const uint32_t patterns[] = {
+                    0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u,
+                    0x007fffffu, 0x807fffffu, 0x3f800000u, 0xbf800000u,
+                };
+                bits = patterns[i % (sizeof(patterns) / sizeof(patterns[0]))];
+                memcpy(&x_host[i], &bits, sizeof(bits));
+            } else if (ci == 2u) {
+                /* Alternating signed values force cancellation in a number
+                 * of rows while retaining ordinary finite magnitudes. */
+                const float magnitude =
+                    (float)(1u + ((i * 13u) % 31u)) / 19.0f;
+                x_host[i] = (i & 1u) ? -magnitude : magnitude;
+            } else {
+                const int value =
+                    (int)((i * 97u + (i >> 3u) * 5u) % 251u) - 125;
+                x_host[i] = (float)value / 211.0f;
+            }
+        }
+        TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                        ref_gate, weights_raw, weight_alloc, 0,
+                        in_dim, out_dim, x, 1) != 0);
+        TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                        ref_up, weights_raw, weight_alloc, weight1_offset,
+                        in_dim, out_dim, x, 1) != 0);
+        TEST_ASSERT(ds4_gpu_swiglu_tensor(
+                        ref_mid, ref_gate, ref_up, out_dim, 0.0f, 1.0f) != 0);
+        /* Primary proof: the stock path and both fused candidates use the
+         * same actual NR2 dispatch selected by the production verifier. */
+        TEST_ASSERT(ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
+                        fused_gate, fused_up, fused_mid,
+                        weights_raw, weight_alloc, 0, weight1_offset,
+                        in_dim, out_dim, x, 0.0f) != 0);
+        TEST_ASSERT(ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                        mid_only, weights_raw, weight_alloc, 0,
+                        weight1_offset, in_dim, out_dim, x, 0.0f) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(ref_gate, 0, ref_gate_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(ref_up, 0, ref_up_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(ref_mid, 0, ref_mid_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(fused_gate, 0, fused_gate_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(fused_up, 0, fused_up_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(fused_mid, 0, fused_mid_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(mid_only, 0, mid_only_host, out_bytes) != 0);
+        const test_float_compare_stats gate_stats =
+            test_compare_float_bits(ref_gate_host, fused_gate_host, out_dim);
+        const test_float_compare_stats up_stats =
+            test_compare_float_bits(ref_up_host, fused_up_host, out_dim);
+        const test_float_compare_stats mid_stats =
+            test_compare_float_bits(ref_mid_host, fused_mid_host, out_dim);
+        const test_float_compare_stats mid_only_stats =
+            test_compare_float_bits(ref_mid_host, mid_only_host, out_dim);
+        fprintf(stderr,
+                "ds4-test: Laguna dense fused case=%u gate=%zu up=%zu "
+                "mid=%zu mid_only=%zu\n",
+                ci,
+                gate_stats.mismatch_count,
+                up_stats.mismatch_count,
+                mid_stats.mismatch_count,
+                mid_only_stats.mismatch_count);
+        TEST_ASSERT(gate_stats.mismatch_count == 0u);
+        TEST_ASSERT(up_stats.mismatch_count == 0u);
+        TEST_ASSERT(mid_stats.mismatch_count == 0u);
+        TEST_ASSERT(mid_only_stats.mismatch_count == 0u);
+
+    }
+
+    /* A production-sized call with a truncated mapped range must fail instead
+     * of switching to the stock path after the fused selector was requested. */
+    TEST_ASSERT(ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                    mid_only, weights_raw, weight1_offset,
+                    0, weight1_offset, in_dim, out_dim, x, 0.0f) == 0);
+
+    free(mid_only_host);
+    free(fused_mid_host);
+    free(fused_up_host);
+    free(fused_gate_host);
+    free(ref_mid_host);
+    free(ref_up_host);
+    free(ref_gate_host);
+    free(x_host);
+    ds4_gpu_tensor_free(mid_only);
+    ds4_gpu_tensor_free(fused_mid);
+    ds4_gpu_tensor_free(fused_up);
+    ds4_gpu_tensor_free(fused_gate);
+    ds4_gpu_tensor_free(ref_mid);
+    ds4_gpu_tensor_free(ref_up);
+    ds4_gpu_tensor_free(ref_gate);
+    ds4_gpu_tensor_free(x);
+    free(weights_raw);
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+}
+
 /* The focused selector starts in a fresh process, so use it to prove that a
  * fast-compiled Metal library cannot be certified merely by setting
  * DS4_METAL_MATH_SAFE after initialization.  The ordinary Metal suite does
@@ -1054,6 +1390,8 @@ static void test_metal_laguna_q8_lmhead_screen_gates(void) {
     char *saved_mpp = test_save_env("DS4_METAL_Q8_DECODE_MPP");
     char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
     char *saved_nr4 = test_save_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4");
+    char *saved_dense = test_save_env(
+        "DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU");
     char *saved_v2 = test_save_env(
         "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2");
     char *saved_v2_fallback = test_save_env(
@@ -1098,6 +1436,16 @@ static void test_metal_laguna_q8_lmhead_screen_gates(void) {
     TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
                     dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
+    /* The dense selector and the screen share the same certified NR2
+     * dispatch.  Exact literal 2 is compatible when both are requested. */
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU", "1", 1) == 0);
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "2", 1) == 0);
+    ds4_gpu_laguna_q8_lmhead_screen *combined_screen =
+        ds4_gpu_laguna_q8_lmhead_screen_create(
+            dummy, valid_alloc, 0, 3072u, 100352u);
+    TEST_ASSERT(combined_screen != NULL);
+    ds4_gpu_laguna_q8_lmhead_screen_destroy(combined_screen);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
     TEST_ASSERT(setenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", "1", 1) == 0);
     TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
                     dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
@@ -1128,6 +1476,8 @@ static void test_metal_laguna_q8_lmhead_screen_gates(void) {
     test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
     test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
     test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
+    test_restore_env("DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU",
+                     saved_dense);
     test_restore_env("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2",
                      saved_v2);
     test_restore_env("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK",
@@ -8943,6 +9293,7 @@ static void test_metal_kernel_group(void) {
     test_metal_laguna_q8_lmhead_screen_gates();
     test_metal_laguna_q8_lmhead_screen();
     test_metal_parallel_ffn_terminal_lifecycle();
+    test_metal_laguna_dense_q8_gate_up_swiglu();
     test_metal_laguna_staged_swa_exact();
     test_metal_glm_qmv_r1_exact();
     test_metal_q8_0_output_nr4_exact();
@@ -10893,6 +11244,8 @@ static void test_print_help(const char *prog) {
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK=1  Enable exact finite-domain Laguna router top-k SIMD selector.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE=1  Collect optimized/fallback selector row counters.");
     puts("  DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED=1  Enable ordinary Laguna prefill paired Q/K norm/RoPE.");
+    puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU=1  Enable opt-in Laguna leading-dense Q8 fused gate/up+SwiGLU.");
+    puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE=1  Report each fused/stock route once after a waited graph.");
     puts("  DS4_TEST_LONG_PROMPT=FILE  Rendered long-context story fact prompt.");
     puts("  DS4_TEST_VECTOR_FILE=FILE  Official fixture. Default: flash-0731/official.vec.");
     puts("  DS4_TEST_LOCAL_GOLDEN_FILE=FILE  Local fixture. Default: flash-0731/local-golden.vec.");

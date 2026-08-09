@@ -18763,6 +18763,9 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
         ds4_gpu_laguna_q8_lmhead_screen_v2_fallback_requested();
     if (requested_v2 < 0 || allow_v2_fallback < 0) return NULL;
     int use_v2 = requested_v2 > 0;
+    const int q8_rows_mode =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(
+            getenv("DS4_METAL_Q8_MV_ROWS"));
     const int math_safe = g_metal_math_safe &&
         ds4_gpu_env_bool("DS4_METAL_MATH_SAFE") > 0;
     if (!model_map || model_size == 0 ||
@@ -18770,7 +18773,7 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
         (in_dim & 31u) != 0u ||
         !math_safe ||
         getenv("DS4_METAL_Q8_DECODE_MPP") != NULL ||
-        getenv("DS4_METAL_Q8_MV_ROWS") != NULL ||
+        q8_rows_mode != 2 ||
         getenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") != NULL) {
         if (!g_metal_math_safe ||
             ds4_gpu_env_bool("DS4_METAL_MATH_SAFE") <= 0) {
@@ -18780,6 +18783,14 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
         }
         fprintf(stderr,
                 "ds4: Laguna Q8 lm-head screen requested with incompatible shape or dispatch environment\n");
+        if (q8_rows_mode != 2) {
+            fprintf(stderr,
+                    "ds4: Laguna Q8 lm-head screen requires "
+                    "DS4_METAL_Q8_MV_ROWS unset/empty or literal 2 "
+                    "(got '%s')\n",
+                    getenv("DS4_METAL_Q8_MV_ROWS") ?
+                        getenv("DS4_METAL_Q8_MV_ROWS") : "");
+        }
         return NULL;
     }
 
@@ -20518,8 +20529,12 @@ static int ds4_gpu_shared_gate_up_swiglu_q8_0_impl(
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (!mid || !x || !model_map ||
         (store_gate_up && (!gate || !up)) ||
+        in_dim == 0 || out_dim == 0 ||
         (in_dim & 31u) != 0 ||
         in_dim > UINT32_MAX || out_dim > UINT32_MAX ||
+        (out_dim & 1u) != 0 ||
+        in_dim > UINT64_MAX / sizeof(float) ||
+        out_dim > UINT64_MAX / sizeof(float) ||
         !isfinite(clamp) || clamp < 0.0f) {
         return 0;
     }
@@ -20543,7 +20558,9 @@ static int ds4_gpu_shared_gate_up_swiglu_q8_0_impl(
         }
 
         const uint64_t blocks = in_dim / 32;
+        if (blocks > UINT64_MAX / 34u) return 0;
         const uint64_t row_bytes = blocks * 34;
+        if (row_bytes != 0 && out_dim > UINT64_MAX / row_bytes) return 0;
         const uint64_t weight_bytes = out_dim * row_bytes;
         if (gate_offset > model_size || weight_bytes > model_size - gate_offset ||
             up_offset > model_size || weight_bytes > model_size - up_offset) {
@@ -20824,6 +20841,41 @@ int ds4_gpu_router_project_select_fused_tensor(
     return 1;
 }
 
+static int ds4_gpu_shared_q8_swiglu_pipeline_ready(
+        const char *function_name,
+        int16_t     nsg,
+        NSUInteger  shared_bytes) {
+    if (!function_name || nsg <= 0 || !g_device ||
+        shared_bytes > NSUIntegerMax / 2u) {
+        return 0;
+    }
+    id<MTLComputePipelineState> pipeline =
+        ds4_gpu_get_mul_mv_pipeline(function_name, nsg);
+    if (!pipeline || pipeline.threadExecutionWidth != 32u) return 0;
+    const NSUInteger threads = 32u * (NSUInteger)nsg;
+    if (threads > pipeline.maxTotalThreadsPerThreadgroup ||
+        (NSUInteger)(2u * shared_bytes) > [g_device maxThreadgroupMemoryLength]) {
+        return 0;
+    }
+    return 1;
+}
+
+int ds4_gpu_shared_mid_swiglu_q8_0_available(void) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    @autoreleasepool {
+        const ds4_gpu_mv_dispatch dispatch =
+            ds4_gpu_make_q8_0_mv_dispatch();
+        /* The dense Q8 SwiGLU library currently exposes only the NR2
+         * topology.  Keep this capability probe honest if the generic
+         * dispatch policy changes later; there is no dense NR4 PSO today. */
+        if (dispatch.nr0 != 2) return 0;
+        return ds4_gpu_shared_q8_swiglu_pipeline_ready(
+                   "kernel_dsv4_shared_mid_swiglu_q8_0",
+                   dispatch.nsg,
+                   dispatch.smem);
+    }
+}
+
 int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
         ds4_gpu_tensor       *gate,
         ds4_gpu_tensor       *up,
@@ -20928,9 +20980,12 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_tensor(
     }
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (!gate || !up || !mid || !x || !model_map ||
-        n_tok == 0 ||
+        n_tok == 0 || in_dim == 0 || out_dim == 0 ||
         (in_dim & 31u) != 0 || (in_dim % 128u) != 0 ||
         in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX ||
+        (out_dim & 1u) != 0 ||
+        in_dim > UINT64_MAX / sizeof(float) ||
+        out_dim > UINT64_MAX / sizeof(float) ||
         !isfinite(clamp) || clamp < 0.0f) {
         return 0;
     }
@@ -20944,8 +20999,14 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_tensor(
         id<MTLBuffer> gatebuf = ds4_gpu_tensor_buffer(gate);
         id<MTLBuffer> upbuf = ds4_gpu_tensor_buffer(up);
         id<MTLBuffer> midbuf = ds4_gpu_tensor_buffer(mid);
-        const uint64_t x_bytes = n_tok * in_dim * sizeof(float);
-        const uint64_t out_bytes = n_tok * out_dim * sizeof(float);
+        const uint64_t x_row_bytes = in_dim * sizeof(float);
+        const uint64_t out_row_bytes = out_dim * sizeof(float);
+        if ((x_row_bytes != 0 && n_tok > UINT64_MAX / x_row_bytes) ||
+            (out_row_bytes != 0 && n_tok > UINT64_MAX / out_row_bytes)) {
+            return 0;
+        }
+        const uint64_t x_bytes = n_tok * x_row_bytes;
+        const uint64_t out_bytes = n_tok * out_row_bytes;
         if (!xbuf || !gatebuf || !upbuf || !midbuf ||
             ds4_gpu_tensor_bytes(x) < x_bytes ||
             ds4_gpu_tensor_bytes(gate) < out_bytes ||
@@ -20956,7 +21017,9 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_tensor(
         }
 
         const uint64_t blocks = in_dim / 32;
+        if (blocks > UINT64_MAX / 34u) return 0;
         const uint64_t row_bytes = blocks * 34;
+        if (row_bytes != 0 && out_dim > UINT64_MAX / row_bytes) return 0;
         const uint64_t weight_bytes = out_dim * row_bytes;
         if (gate_offset > model_size || weight_bytes > model_size - gate_offset ||
             up_offset > model_size || weight_bytes > model_size - up_offset) {
@@ -21043,9 +21106,10 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_scalar_tensor(
     }
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (!gate || !up || !mid || !x || !model_map ||
-        n_tok == 0 ||
+        n_tok == 0 || in_dim == 0 || out_dim == 0 ||
         (in_dim & 31u) != 0 ||
         in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX ||
+        (out_dim & 1u) != 0 ||
         in_dim > UINT64_MAX / sizeof(float) ||
         out_dim > UINT64_MAX / sizeof(float) ||
         !isfinite(clamp) || clamp < 0.0f) {

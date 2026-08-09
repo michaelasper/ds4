@@ -886,6 +886,11 @@ DS4_STATIC_ASSERT(ds4_block_iq2_xxs_size, sizeof(block_iq2_xxs) == 66);
 DS4_STATIC_ASSERT(ds4_block_mxfp4_size, sizeof(block_mxfp4) == 17);
 
 typedef struct {
+    uint64_t decode_mid_fused;
+    uint64_t ordinary_prefill_stock;
+} laguna_dense_q8_gate_up_swiglu_counters;
+
+typedef struct {
     uint32_t ctx_size;
     uint32_t comp_cap;
     uint32_t attn_score_cap;
@@ -49586,6 +49591,9 @@ typedef struct {
     ds4_gpu_tensor *key_cache[DS4_MAX_LAYER];
     ds4_gpu_tensor *value_cache[DS4_MAX_LAYER];
     uint32_t cache_cap[DS4_MAX_LAYER];
+    /* Evidence is attached to this graph/command-buffer owner.  It is
+     * promoted to the process report only after the owning work is waited. */
+    laguna_dense_q8_gate_up_swiglu_counters dense_q8_pending;
 } ds4_laguna_gpu_graph;
 
 #ifdef __APPLE__
@@ -50021,6 +50029,257 @@ static bool laguna_graph_matmul_decode_rows(
                    n_rows) != 0;
     }
     return laguna_graph_matmul(out, model, weight, x, n_rows);
+}
+
+/*
+ * Laguna S 2.1 has one leading dense FFN layer. Its Q8_0 gate and up
+ * projections consume the same normalized row, so Metal can derive the
+ * SwiGLU mid row while it is still in the reduction threadgroup. Keep this
+ * arm opt-in until an M5/M3 benchmark certifies it; in particular, do not
+ * let an unrelated environment value change the ordinary decode path.
+ *
+ * The selector is intentionally strict. Unset, empty, and "0" mean off;
+ * only the literal "1" requests the fused route. Any other value is an
+ * error and is rejected before a graph command or KV mutation is opened.
+ */
+#define DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU \
+    "DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU"
+#define DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE \
+    "DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE"
+
+static int laguna_metal_dense_q8_gate_up_swiglu_mode(void) {
+    const char *value =
+        getenv(DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+    const int mode = ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(value);
+    if (mode >= 0) return mode;
+    fprintf(stderr,
+            "ds4: invalid %s='%s'; expected unset, empty, 0, or literal 1\n",
+            DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
+            value ? value : "");
+    return -1;
+}
+
+static bool laguna_dense_q8_gate_up_swiglu_weights_eligible(
+        const ds4_weights *weights) {
+    if (!weights || DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA ||
+        DS4_N_LEADING_DENSE == 0u) {
+        return false;
+    }
+    for (uint32_t il = 0; il < DS4_N_LEADING_DENSE; il++) {
+        const ds4_layer_weights *layer = &weights->layer[il];
+        if (!layer->ffn_gate || !layer->ffn_up ||
+            layer->ffn_gate->type != DS4_TENSOR_Q8_0 ||
+            layer->ffn_up->type != DS4_TENSOR_Q8_0 ||
+            layer->ffn_gate->ndim < 2 || layer->ffn_up->ndim < 2 ||
+            layer->ffn_gate->dim[0] != DS4_N_EMBD ||
+            layer->ffn_gate->dim[1] != DS4_N_FF_DENSE ||
+            layer->ffn_up->dim[0] != DS4_N_EMBD ||
+            layer->ffn_up->dim[1] != DS4_N_FF_DENSE ||
+            layer->ffn_gate->dim[0] != 3072u ||
+            layer->ffn_gate->dim[1] != 12288u ||
+            layer->ffn_up->dim[0] != 3072u ||
+            layer->ffn_up->dim[1] != 12288u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool laguna_dense_q8_gate_up_swiglu_model_ranges_valid(
+        const ds4_model   *model,
+        const ds4_weights *weights) {
+    if (!model || !model->map || model->size == 0 || !weights) return false;
+    if ((DS4_N_EMBD % 32u) != 0u || DS4_N_FF_DENSE == 0u) return false;
+
+    const uint64_t blocks = (uint64_t)DS4_N_EMBD / 32u;
+    if (blocks > UINT64_MAX / 34u) return false;
+    const uint64_t row_bytes = blocks * 34u;
+    if ((uint64_t)DS4_N_FF_DENSE > UINT64_MAX / row_bytes) return false;
+    const uint64_t weight_bytes = (uint64_t)DS4_N_FF_DENSE * row_bytes;
+
+    for (uint32_t il = 0; il < DS4_N_LEADING_DENSE; il++) {
+        const ds4_layer_weights *layer = &weights->layer[il];
+        const ds4_tensor *tensors[] = {layer->ffn_gate, layer->ffn_up};
+        for (size_t ti = 0; ti < sizeof(tensors) / sizeof(tensors[0]); ti++) {
+            const ds4_tensor *tensor = tensors[ti];
+            if (!tensor || tensor->bytes != weight_bytes ||
+                tensor->abs_offset > model->size ||
+                weight_bytes > model->size - tensor->abs_offset) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* Trace is intentionally independent from the broad profiling environment.
+ * Resolve it only after the explicit fused selector has requested a
+ * production route; selector-off inference therefore performs no trace env
+ * lookup, and timed enabled inference pays one literal lookup per process. */
+static bool laguna_dense_q8_gate_up_swiglu_trace_requested(void) {
+    static int initialized = 0;
+    static bool enabled = false;
+    if (!initialized) {
+        const char *value = getenv(
+            DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE);
+        enabled = value && value[0] == '1' && value[1] == '\0';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static bool laguna_dense_q8_gate_up_swiglu_trace_enabled;
+
+static bool laguna_dense_q8_gate_up_swiglu_preflight(
+        const ds4_model   *model,
+        const ds4_weights *weights,
+        bool              *enabled_out) {
+    if (enabled_out) *enabled_out = false;
+    const int mode = laguna_metal_dense_q8_gate_up_swiglu_mode();
+    if (mode < 0) {
+        laguna_dense_q8_gate_up_swiglu_trace_enabled = false;
+        return false;
+    }
+    if (mode == 0) {
+        laguna_dense_q8_gate_up_swiglu_trace_enabled = false;
+        return true;
+    }
+
+    laguna_dense_q8_gate_up_swiglu_trace_enabled =
+        laguna_dense_q8_gate_up_swiglu_trace_requested();
+
+    const bool weights_eligible =
+        laguna_dense_q8_gate_up_swiglu_weights_eligible(weights);
+    if (!weights_eligible) {
+        fprintf(stderr,
+                "ds4: %s requested but Laguna leading dense gate/up "
+                "weights are not Q8_0 [3072,12288]; refusing stock fallback\n",
+                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+        return false;
+    }
+    const char *q8_rows_value = getenv("DS4_METAL_Q8_MV_ROWS");
+    const int q8_rows_mode =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(q8_rows_value);
+    if (q8_rows_mode != 2) {
+        fprintf(stderr,
+                "ds4: %s requires DS4_METAL_Q8_MV_ROWS unset/2 for "
+                "the fused decode topology (got '%s'); refusing stock "
+                "fallback\n",
+                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
+                q8_rows_value ? q8_rows_value : "");
+        return false;
+    }
+    const bool ranges_valid =
+        laguna_dense_q8_gate_up_swiglu_model_ranges_valid(model, weights);
+    if (!ranges_valid) {
+        fprintf(stderr,
+                "ds4: %s requested but a Laguna leading dense Q8_0 mapped "
+                "range is missing or outside the model; refusing stock fallback\n",
+                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+        return false;
+    }
+#ifdef __APPLE__
+    const bool mid_ready =
+        ds4_gpu_shared_mid_swiglu_q8_0_available() != 0;
+#else
+    const bool mid_ready = false;
+#endif
+    const int decision =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+            mode,
+            weights_eligible ? 1 : 0,
+            ranges_valid ? 1 : 0,
+            q8_rows_mode,
+            mid_ready ? 1 : 0);
+#ifdef __APPLE__
+    if (decision != 1) {
+        fprintf(stderr,
+                "ds4: %s requested but the Metal Q8 gate/up+SwiGLU "
+                "decode pipeline is unavailable (mid=%d); "
+                "refusing stock fallback\n",
+                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
+                mid_ready ? 1 : 0);
+        return false;
+    }
+#else
+    (void)decision;
+    fprintf(stderr,
+            "ds4: %s requested but this build has no Metal fused "
+            "gate/up+SwiGLU pipeline\n",
+            DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+    return false;
+#endif
+    if (enabled_out) *enabled_out = true;
+    return true;
+}
+
+static laguna_dense_q8_gate_up_swiglu_counters
+    laguna_dense_q8_gate_up_swiglu_completed;
+static laguna_dense_q8_gate_up_swiglu_counters
+    laguna_dense_q8_gate_up_swiglu_reported;
+
+static void laguna_dense_q8_gate_up_swiglu_pending_clear(
+        ds4_laguna_gpu_graph *g) {
+    if (!g || !laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
+    if (g->dense_q8_pending.decode_mid_fused == 0u &&
+        g->dense_q8_pending.ordinary_prefill_stock == 0u) {
+        return;
+    }
+    memset(&g->dense_q8_pending, 0, sizeof(g->dense_q8_pending));
+}
+
+static void laguna_dense_q8_gate_up_swiglu_note_decode_mid(
+        ds4_laguna_gpu_graph *g) {
+    if (!laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
+    if (!g) return;
+    g->dense_q8_pending.decode_mid_fused++;
+}
+
+static void laguna_dense_q8_gate_up_swiglu_note_prefill_stock(
+        ds4_laguna_gpu_graph *g) {
+    if (!laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
+    if (!g) return;
+    g->dense_q8_pending.ordinary_prefill_stock++;
+}
+
+/* The backend APIs return after encoding into an owned graph command buffer;
+ * the caller may still have an active/pending Metal graph.  Only call this
+ * after a waited graph boundary, and say so explicitly in the diagnostic. */
+static void laguna_dense_q8_gate_up_swiglu_report_waited(
+        ds4_laguna_gpu_graph *g) {
+    if (!laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
+    if (!g) return;
+    const laguna_dense_q8_gate_up_swiglu_counters pending =
+        g->dense_q8_pending;
+    if (pending.decode_mid_fused == 0u &&
+        pending.ordinary_prefill_stock == 0u) {
+        return;
+    }
+    laguna_dense_q8_gate_up_swiglu_pending_clear(g);
+    laguna_dense_q8_gate_up_swiglu_completed.decode_mid_fused +=
+        pending.decode_mid_fused;
+    laguna_dense_q8_gate_up_swiglu_completed.ordinary_prefill_stock +=
+        pending.ordinary_prefill_stock;
+    const laguna_dense_q8_gate_up_swiglu_counters current =
+        laguna_dense_q8_gate_up_swiglu_completed;
+    const laguna_dense_q8_gate_up_swiglu_counters reported =
+        laguna_dense_q8_gate_up_swiglu_reported;
+    const bool new_decode = current.decode_mid_fused != 0u &&
+        reported.decode_mid_fused == 0u;
+    const bool new_prefill = current.ordinary_prefill_stock != 0u &&
+        reported.ordinary_prefill_stock == 0u;
+    if (!new_decode && !new_prefill) {
+        return;
+    }
+    fprintf(stderr,
+            "ds4: Laguna dense Q8 path counters "
+            "decode_mid_fused=%llu ordinary_prefill_stock=%llu route=%s "
+            "completion=waited "
+            "encoded=successful\n",
+            (unsigned long long)current.decode_mid_fused,
+            (unsigned long long)current.ordinary_prefill_stock,
+            new_decode ? "decode_mid_fused" : "ordinary_prefill_stock");
+    laguna_dense_q8_gate_up_swiglu_reported = current;
 }
 
 static bool laguna_graph_routed_moe_decode_rows(
@@ -50906,6 +51165,19 @@ static bool laguna_graph_forward_token(
         token >= (int)DS4_N_VOCAB || pos >= g->ctx_size) {
         return false;
     }
+    /* A new graph call owns a new evidence unit.  This also scrubs any
+     * uncommitted trace state left by a failed caller while remaining a
+     * no-op on the timed trace-off path when the slot is already empty. */
+    laguna_dense_q8_gate_up_swiglu_pending_clear(g);
+
+    bool dense_q8_gate_up_fusion = false;
+    if (!laguna_dense_q8_gate_up_swiglu_preflight(
+                model, weights, &dense_q8_gate_up_fusion)) {
+        return false;
+    }
+    const int dense_q8_route =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+            dense_q8_gate_up_fusion ? 1 : 0, 1, 0);
 
 #ifdef __APPLE__
     const bool router_simd_topk_trace =
@@ -51161,23 +51433,47 @@ static bool laguna_graph_forward_token(
                                                  DS4_RMS_EPS) != 0;
         }
         if (ok && il < DS4_N_LEADING_DENSE) {
-            ok = laguna_graph_matmul(g->ffn_gate,
-                                     model,
-                                     l->ffn_gate,
-                                     g->ffn_norm,
-                                     1) &&
-                 laguna_graph_matmul(g->ffn_up,
-                                     model,
-                                     l->ffn_up,
-                                     g->ffn_norm,
-                                     1);
-            if (ok) {
-                ok = ds4_gpu_swiglu_tensor(g->ffn_mid,
-                                            g->ffn_gate,
-                                            g->ffn_up,
-                                            DS4_N_FF_DENSE,
-                                            0.0f,
-                                            1.0f) != 0;
+            if (dense_q8_route ==
+                    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID) {
+#ifdef __APPLE__
+                ok = ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                         g->ffn_mid,
+                         model->map,
+                         model->size,
+                         l->ffn_gate->abs_offset,
+                         l->ffn_up->abs_offset,
+                         DS4_N_EMBD,
+                         DS4_N_FF_DENSE,
+                         g->ffn_norm,
+                         0.0f) != 0;
+                if (ok) laguna_dense_q8_gate_up_swiglu_note_decode_mid(g);
+                if (!ok) {
+                    fprintf(stderr,
+                            "ds4: Laguna dense Q8 gate/up+SwiGLU fused "
+                            "dispatch failed; stock fallback is disabled\n");
+                }
+#else
+                ok = false;
+#endif
+            } else {
+                ok = laguna_graph_matmul(g->ffn_gate,
+                                         model,
+                                         l->ffn_gate,
+                                         g->ffn_norm,
+                                         1) &&
+                     laguna_graph_matmul(g->ffn_up,
+                                         model,
+                                         l->ffn_up,
+                                         g->ffn_norm,
+                                         1);
+                if (ok) {
+                    ok = ds4_gpu_swiglu_tensor(g->ffn_mid,
+                                                g->ffn_gate,
+                                                g->ffn_up,
+                                                DS4_N_FF_DENSE,
+                                                0.0f,
+                                                1.0f) != 0;
+                }
             }
             if (ok) {
                 ok = laguna_graph_matmul(g->ffn_out,
@@ -51481,8 +51777,13 @@ static bool laguna_graph_forward_token(
     if (ds4_gpu_commands_active()) {
         if (ds4_gpu_end_commands() == 0) {
             ok = false;
-        } else {
+        } else if (ok) {
             decode_residual_norm_completion_waited = true;
+            laguna_dense_q8_gate_up_swiglu_report_waited(g);
+        } else {
+            /* The buffer did finish, but an earlier graph stage already
+             * failed, so this is not a successful route completion. */
+            laguna_dense_q8_gate_up_swiglu_pending_clear(g);
         }
     }
     if (ok && decode_residual_fusion &&
@@ -51543,6 +51844,7 @@ static bool laguna_graph_forward_token(
         laguna_metal_router_simd_topk_trace_report("Laguna decode");
     }
 #endif
+    if (!ok) laguna_dense_q8_gate_up_swiglu_pending_clear(g);
     return ok;
 }
 
@@ -51654,11 +51956,10 @@ static bool laguna_graph_capture_final_feature(
     return ok;
 }
 
-/* Keep the ordinary Laguna prefill Q/K norm+RoPE dispatch choice opt-in.  The
- * paired kernel is already used by the exact verifier, but ordinary prefill
- * remains on the historical split path unless this explicit experiment flag
- * is set.  A literal "1" is required so an unrelated exported value cannot
- * silently change inference behavior. */
+/* Keep the ordinary Laguna prefill Q/K norm+RoPE dispatch choice opt-in.
+ * Ordinary prefill and the exact verifier remain on their historical stock
+ * paths unless this explicit experiment flag is set.  A literal "1" is
+ * required so an unrelated exported value cannot silently change inference. */
 static bool laguna_graph_prefill_qk_norm_rope_paired_requested(void) {
     const char *env = getenv("DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED");
     return env && strcmp(env, "1") == 0;
@@ -51686,11 +51987,17 @@ static bool laguna_graph_forward_batch(
         n_tokens > g->prefill_cap || pos0 > g->ctx_size - n_tokens) {
         return false;
     }
+    laguna_dense_q8_gate_up_swiglu_pending_clear(g);
 #ifdef __APPLE__
     const bool router_simd_topk_trace =
         laguna_metal_router_simd_topk_trace_enabled();
     laguna_metal_router_simd_topk_trace_reset();
 #endif
+    bool dense_q8_gate_up_fusion = false;
+    if (!laguna_dense_q8_gate_up_swiglu_preflight(
+                model, weights, &dense_q8_gate_up_fusion)) {
+        return false;
+    }
     if (row_argmax_out &&
         (n_tokens > DS4_DFLASH_BLOCK_SIZE ||
          !laguna_graph_ensure_spec_scratch(g))) {
@@ -51698,6 +52005,7 @@ static bool laguna_graph_forward_batch(
     }
 
     bool ok = true;
+    bool dense_q8_completion_waited = false;
 #ifdef DS4_ROCM_BUILD
     const bool gpu_draft_pipeline_ready = true;
 #else
@@ -51766,6 +52074,11 @@ static bool laguna_graph_forward_batch(
      * lower-overhead single-command path. */
     const bool live_progress = display_progress != NULL && n_tokens >= 32u;
     const bool exact_q8_rows = row_argmax_out != NULL;
+    const int dense_q8_route =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+            dense_q8_gate_up_fusion ? 1 : 0,
+            0,
+            exact_q8_rows ? 1 : 0);
     /* DFlash feature capture and GPU draft-token verification have their own
      * cache/injection sequencing. Keep them on the established split path;
      * only an ordinary, host-token prefill may opt into the paired dispatch. */
@@ -51975,6 +52288,9 @@ static bool laguna_graph_forward_batch(
                     DS4_RMS_EPS) != 0;
         }
         if (ok && il < DS4_N_LEADING_DENSE) {
+            /* Exact verifier rows stay on the stock row-wise matmuls.  The
+             * opt-in fused route is intentionally decode-only because the
+             * scalar batch kernel rereads both dense matrices per row. */
             failed_stage = "dense FFN gate/up";
             ok = laguna_graph_matmul_decode_rows(g->ffn_gate,
                                                  model,
@@ -51997,6 +52313,10 @@ static bool laguna_graph_forward_batch(
                         (uint64_t)n_tokens * DS4_N_FF_DENSE,
                         0.0f,
                         1.0f) != 0;
+            }
+            if (ok && dense_q8_route ==
+                           DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK) {
+                laguna_dense_q8_gate_up_swiglu_note_prefill_stock(g);
             }
             if (ok) {
                 failed_stage = "dense FFN down";
@@ -52106,26 +52426,7 @@ static bool laguna_graph_forward_batch(
                             true) != 0;
                 }
             }
-            const bool exact_q8_shared =
-                exact_q8_rows &&
-                l->ffn_gate_shexp->type == DS4_TENSOR_Q8_0 &&
-                l->ffn_up_shexp->type == DS4_TENSOR_Q8_0;
-            if (ok && exact_q8_shared) {
-                failed_stage = "shared expert fused gate/up";
-                ok = ds4_gpu_shared_gate_up_swiglu_q8_0_rows_scalar_tensor(
-                         g->ffn_gate,
-                         g->ffn_up,
-                         g->ffn_mid,
-                         model->map,
-                         model->size,
-                         l->ffn_gate_shexp->abs_offset,
-                         l->ffn_up_shexp->abs_offset,
-                         DS4_N_EMBD,
-                         DS4_N_FF_SHARED,
-                         g->ffn_norm,
-                         n_tokens,
-                         0.0f) != 0;
-            } else if (ok) {
+            if (ok) {
                 failed_stage = "shared expert gate/up";
                 ok = laguna_graph_matmul_decode_rows(
                          g->ffn_gate,
@@ -52315,9 +52616,15 @@ static bool laguna_graph_forward_batch(
     /* A speculative cycle appends support-cache injection before completing
      * the shared snapshot/draft/verify command stream. */
     const bool defer_completion = ok && gpu_draft_tokens != NULL;
-    if (!defer_completion &&
-        ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) {
-        ok = false;
+    if (!defer_completion && ds4_gpu_commands_active()) {
+        if (ds4_gpu_end_commands() == 0) {
+            ok = false;
+        } else {
+            dense_q8_completion_waited = true;
+        }
+    }
+    if (ok && dense_q8_completion_waited) {
+        laguna_dense_q8_gate_up_swiglu_report_waited(g);
     }
     ds4_gpu_tensor_free(last);
     if (ok && g->gpu_argmax_enabled && !defer_completion) {
@@ -52361,6 +52668,7 @@ static bool laguna_graph_forward_batch(
             "Laguna prefill/speculative batch");
     }
 #endif
+    if (!ok) laguna_dense_q8_gate_up_swiglu_pending_clear(g);
     return ok;
 }
 
@@ -52429,6 +52737,32 @@ static bool laguna_metal_q8_lmhead_screen_requested(void) {
     return metal_graph_tp_env_flag(
                "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN", false) ||
            v2_mode > 0;
+}
+
+/* The lm-head screen shares the dense Q8 matvec dispatch environment.  An
+ * explicit alternate row topology is a real cross-feature conflict, so
+ * reject it alongside the other generation preflights before allocating the
+ * raw Laguna graph. */
+static bool laguna_metal_q8_lmhead_screen_dispatch_env_preflight(void) {
+    const char *rows_value = getenv("DS4_METAL_Q8_MV_ROWS");
+    const int rows_mode =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(rows_value);
+    if (rows_mode != 2) {
+        fprintf(stderr,
+                "ds4: Laguna Q8 lm-head screen requires "
+                "DS4_METAL_Q8_MV_ROWS unset/empty or literal 2 "
+                "(got '%s'); refusing graph allocation\n",
+                rows_value ? rows_value : "");
+        return false;
+    }
+    if (getenv("DS4_METAL_Q8_DECODE_MPP") != NULL ||
+        getenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") != NULL) {
+        fprintf(stderr,
+                "ds4: Laguna Q8 lm-head screen has an incompatible "
+                "Q8 dispatch environment; refusing graph allocation\n");
+        return false;
+    }
+    return true;
 }
 
 /* The decode residual fusion is deliberately stricter than the other
@@ -52627,6 +52961,7 @@ static int generate_laguna_metal_argmax(
         fprintf(stderr, "ds4: Laguna prompt is empty or leaves no context room\n");
         return 1;
     }
+    if (!laguna_dense_q8_gate_up_swiglu_preflight(model, weights, NULL)) return 1;
 #if defined(__APPLE__)
     if (!laguna_metal_router_simd_topk_preflight(
             NULL, "Laguna generation", NULL, 0)) return 1;
@@ -52635,6 +52970,8 @@ static int generate_laguna_metal_argmax(
     const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
     const bool lmhead_screen_requested =
         laguna_metal_q8_lmhead_screen_requested();
+    if (lmhead_screen_requested &&
+        !laguna_metal_q8_lmhead_screen_dispatch_env_preflight()) return 1;
     if (lmhead_screen_requested && !gpu_argmax_requested) {
         fprintf(stderr,
                 "ds4: Laguna Q8 lm-head screen requires "
@@ -63515,6 +63852,16 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
 #else
     if (!ds4_backend_uses_graph(e->backend) || !e->metal_ready) return 1;
 
+    /* Reject an explicit dense-Q8 request before allocating the session graph
+     * or any KV/scratch state.  Later entrypoints repeat this cheap preflight
+     * so an environment change after session creation cannot silently switch
+     * to stock fallback. */
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA &&
+        !laguna_dense_q8_gate_up_swiglu_preflight(
+            &e->model, &e->weights, NULL)) {
+        return 1;
+    }
+
     ds4_session *s = xcalloc(1, sizeof(*s));
     s->engine = e;
     s->ctx_size = ctx_size;
@@ -65052,6 +65399,13 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
     const char *backend_name = ds4_backend_name(e->backend);
     (void)backend_name; (void)e;
     if (ds4_session_is_laguna(s)) {
+        if (!laguna_dense_q8_gate_up_swiglu_preflight(
+                    &e->model, &e->weights, NULL)) {
+            snprintf(err, errlen,
+                     "%s Laguna dense Q8 gate/up+SwiGLU preflight failed",
+                     backend_name);
+            return 1;
+        }
 #ifdef __APPLE__
         if (!laguna_metal_decode_residual_norm_preflight()) {
             snprintf(err, errlen,
@@ -66808,6 +67162,14 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
 #else
     ds4_engine *e = s->engine;
     if (ds4_session_is_laguna(s)) {
+        if (!laguna_dense_q8_gate_up_swiglu_preflight(
+                    &e->model, &e->weights, NULL)) {
+            if (errlen) snprintf(err, errlen,
+                                 "%s Laguna dense Q8 gate/up+SwiGLU "
+                                 "preflight failed",
+                                 ds4_backend_name(e->backend));
+            return 1;
+        }
 #ifdef __APPLE__
         if (!laguna_metal_decode_residual_norm_preflight()) {
             if (errlen) snprintf(err, errlen,
@@ -71614,7 +71976,6 @@ static int ds4_session_eval_dflash_speculative_argmax(
                              "DFlash verifier rollback failed");
         return -1;
     }
-
     for (int i = 0; i < n_accept; i++) {
         token_vec_push(&s->checkpoint, accepted[i]);
     }
@@ -71864,6 +72225,15 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
     ds4_engine *e = s->engine;
     if (ds4_session_is_laguna(s) &&
         e->support_kind == DS4_SUPPORT_DFLASH) {
+        if (!laguna_dense_q8_gate_up_swiglu_preflight(
+                    &e->model, &e->weights, NULL)) {
+            if (err && errlen) {
+                snprintf(err, errlen,
+                         "%s Laguna dense Q8 gate/up+SwiGLU preflight failed",
+                         ds4_backend_name(e->backend));
+            }
+            return -1;
+        }
 #ifdef __APPLE__
         /* DFlash's first action is a speculative graph snapshot.  Reject a
          * malformed/unsupported residual-fusion request before that snapshot

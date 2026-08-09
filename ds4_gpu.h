@@ -4,6 +4,66 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Strict parser shared by the Laguna production selector and focused tests.
+ * It is backend-independent so malformed requests can be rejected before a
+ * graph is allocated even in a non-Metal build. */
+static inline int ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(
+        const char *value) {
+    if (!value || value[0] == '\0' ||
+        (value[0] == '0' && value[1] == '\0')) return 0;
+    if (value[0] == '1' && value[1] == '\0') return 1;
+    return -1;
+}
+
+/* The production one-token dense decode is certified against the NR2
+ * topology.  An unset/empty Q8 row selector has that default; an explicit
+ * legacy/alternate value is retained as a named conflict so preflight can
+ * reject it before graph mutation, and malformed values are rejected rather
+ * than normalized. */
+static inline int ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(
+        const char *value) {
+    if (!value || value[0] == '\0') return 2;
+    if (value[0] == '2' && value[1] == '\0') return 2;
+    if (value[0] == '4' && value[1] == '\0') return 4;
+    return -1;
+}
+
+/* Pure production-route decisions shared by the graph and focused tests.
+ * The one-token fused decode is certified only for the NR2 topology; the
+ * ordinary prefill and exact verifier stay on stock matmul paths.  A negative
+ * result means an explicit request must fail before graph/KV mutation, zero
+ * means the selector is disabled, and one means the decode certificate passed. */
+static inline int ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+        int selector_mode,
+        int weights_eligible,
+        int ranges_valid,
+        int rows_mode,
+        int mid_pipeline_ready) {
+    if (selector_mode < 0 || selector_mode > 1) return -1;
+    if (selector_mode == 0) return 0;
+    if (!weights_eligible || !ranges_valid || rows_mode != 2 ||
+        !mid_pipeline_ready) {
+        return -1;
+    }
+    return 1;
+}
+
+enum ds4_gpu_laguna_dense_q8_gate_up_swiglu_route {
+    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK = 0,
+    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID = 1,
+    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK = 2,
+};
+
+/* Select the route after preflight.  Exact verifier rows map to generic stock;
+ * only one-token decode uses the fused route. */
+static inline int ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+        int enabled, int decode, int exact_rows) {
+    if (!enabled) return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK;
+    if (exact_rows) return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK;
+    if (decode) return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID;
+    return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -580,6 +640,9 @@ static inline int ds4_gpu_laguna_decode_residual_norm_env_mode(
     return -1;
 }
 int ds4_gpu_laguna_decode_residual_norm_available(void);
+/* Returns whether the Metal Q8_0 gate/up+SwiGLU kernel family used by the
+ * opt-in Laguna leading-dense route can be compiled on this device. */
+int ds4_gpu_shared_mid_swiglu_q8_0_available(void);
 int ds4_gpu_add3_rms_norm_weight_rows_tensor(
         ds4_gpu_tensor       *norm_out,
         ds4_gpu_tensor       *sum_out,
