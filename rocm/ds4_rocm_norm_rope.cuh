@@ -448,6 +448,78 @@ extern "C" int ds4_gpu_rms_norm_weight_rows_tensor(ds4_gpu_tensor *out, const ds
     return cuda_ok(cudaGetLastError(), "rms_norm_weight launch");
 }
 
+__global__ static void add_rms_norm_weight_kernel(
+        float *norm_out,
+        float *sum_out,
+        const float *a,
+        const float *b,
+        const float *w,
+        uint32_t n,
+        uint32_t rows,
+        float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= rows) return;
+    const float *arow = a + (uint64_t)row * n;
+    const float *brow = b + (uint64_t)row * n;
+    float *sumrow = sum_out + (uint64_t)row * n;
+    float *normrow = norm_out + (uint64_t)row * n;
+    float sum = 0.0f;
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+        const float v = arow[i] + brow[i];
+        sumrow[i] = v;
+        sum += v * v;
+    }
+    __shared__ float partial[256];
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    const float scale = rsqrtf(partial[0] / (float)n + eps);
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+        normrow[i] = (sumrow[i] * scale) * w[i];
+    }
+}
+
+extern "C" int ds4_gpu_add_rms_norm_weight_rows_tensor(
+        ds4_gpu_tensor       *norm_out,
+        ds4_gpu_tensor       *sum_out,
+        const ds4_gpu_tensor *a,
+        const ds4_gpu_tensor *b,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint32_t                n,
+        uint32_t                rows,
+        float                   eps) {
+    uint64_t weight_bytes = 0;
+    if (!model_map || n == 0u || rows == 0u ||
+        !cuda_u64_mul_checked(n, sizeof(float), &weight_bytes) ||
+        !cuda_model_range_fits(model_size, weight_offset, weight_bytes) ||
+        !cuda_tensor_has_elems2(norm_out, n, rows, sizeof(float)) ||
+        !cuda_tensor_has_elems2(sum_out, n, rows, sizeof(float)) ||
+        !cuda_tensor_has_elems2(a, n, rows, sizeof(float)) ||
+        !cuda_tensor_has_elems2(b, n, rows, sizeof(float))) {
+        return 0;
+    }
+    const char *wptr = cuda_model_range_ptr(
+            model_map, weight_offset, weight_bytes, "rms_weight");
+    if (!wptr) return 0;
+    add_rms_norm_weight_kernel<<<rows, 256>>>(
+            (float *)norm_out->ptr,
+            (float *)sum_out->ptr,
+            (const float *)a->ptr,
+            (const float *)b->ptr,
+            (const float *)wptr,
+            n,
+            rows,
+            eps);
+    return cuda_ok(cudaGetLastError(), "add rms norm weight launch");
+}
+
 extern "C" int ds4_gpu_add_rms_norm_weight_tensor(
         ds4_gpu_tensor       *norm_out,
         ds4_gpu_tensor       *sum_out,

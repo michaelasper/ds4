@@ -4437,6 +4437,137 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
 #endif
 
 #if defined(__APPLE__)
+static void test_metal_add_rms_norm_weight_rows_exact_case(
+        uint32_t n,
+        uint32_t n_rows,
+        uint32_t seed) {
+    const float eps = 1.0e-6f;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t weight_offset = page;
+    const uint64_t row_bytes = (uint64_t)n * sizeof(float);
+    const uint64_t activation_bytes = (uint64_t)n_rows * row_bytes;
+    const uint64_t model_alloc = test_round_up_u64(
+        weight_offset + row_bytes, page);
+
+    void *model_raw = NULL;
+    TEST_ASSERT(posix_memalign(
+                    &model_raw, (size_t)page, (size_t)model_alloc) == 0);
+    ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *b = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *ref_sum = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *fused_sum = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *ref_norm = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *fused_norm = ds4_gpu_tensor_alloc(activation_bytes);
+    float *a_host = malloc((size_t)activation_bytes);
+    float *b_host = malloc((size_t)activation_bytes);
+    float *ref_sum_host = malloc((size_t)activation_bytes);
+    float *fused_sum_host = malloc((size_t)activation_bytes);
+    float *ref_norm_host = malloc((size_t)activation_bytes);
+    float *fused_norm_host = malloc((size_t)activation_bytes);
+
+    TEST_ASSERT(model_raw != NULL);
+    TEST_ASSERT(a != NULL);
+    TEST_ASSERT(b != NULL);
+    TEST_ASSERT(ref_sum != NULL);
+    TEST_ASSERT(fused_sum != NULL);
+    TEST_ASSERT(ref_norm != NULL);
+    TEST_ASSERT(fused_norm != NULL);
+    TEST_ASSERT(a_host != NULL);
+    TEST_ASSERT(b_host != NULL);
+    TEST_ASSERT(ref_sum_host != NULL);
+    TEST_ASSERT(fused_sum_host != NULL);
+    TEST_ASSERT(ref_norm_host != NULL);
+    TEST_ASSERT(fused_norm_host != NULL);
+
+    const bool allocated = model_raw && a && b && ref_sum && fused_sum &&
+        ref_norm && fused_norm && a_host && b_host && ref_sum_host &&
+        fused_sum_host && ref_norm_host && fused_norm_host;
+    test_float_compare_stats sum_stats = {0};
+    test_float_compare_stats norm_stats = {0};
+    if (allocated) {
+        memset(model_raw, 0, (size_t)model_alloc);
+        float *weight = (float *)((uint8_t *)model_raw + weight_offset);
+        for (uint32_t d = 0; d < n; d++) {
+            weight[d] = 0.25f +
+                (float)((d * 29u + seed * 17u) % 113u) / 64.0f;
+        }
+        for (uint32_t row = 0; row < n_rows; row++) {
+            for (uint32_t d = 0; d < n; d++) {
+                const uint32_t key = d * 73u + row * 1009u + seed * 131u;
+                const int av = (int)(key % 4093u) - 2046;
+                const int bv = (int)((key * 7u + 19u) % 4093u) - 2046;
+                const uint64_t i = (uint64_t)row * n + d;
+                a_host[i] = (float)av / 1024.0f;
+                b_host[i] = (float)bv / 2048.0f;
+            }
+        }
+
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        a, 0, a_host, activation_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        b, 0, b_host, activation_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, model_alloc) != 0);
+        TEST_ASSERT(ds4_gpu_add_tensor(
+                        ref_sum, a, b, (uint32_t)((uint64_t)n * n_rows)) != 0);
+        TEST_ASSERT(ds4_gpu_rms_norm_weight_rows_tensor(
+                        ref_norm, ref_sum, model_raw, model_alloc,
+                        weight_offset, n, n_rows, eps) != 0);
+        TEST_ASSERT(ds4_gpu_add_rms_norm_weight_rows_tensor(
+                        fused_norm, fused_sum, a, b, model_raw, model_alloc,
+                        weight_offset, n, n_rows, eps) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        ref_sum, 0, ref_sum_host, activation_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fused_sum, 0, fused_sum_host, activation_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        ref_norm, 0, ref_norm_host, activation_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fused_norm, 0, fused_norm_host, activation_bytes) != 0);
+        sum_stats = test_compare_float_bits(
+            ref_sum_host, fused_sum_host, (size_t)n * n_rows);
+        norm_stats = test_compare_float_bits(
+            ref_norm_host, fused_norm_host, (size_t)n * n_rows);
+    }
+
+    fprintf(stderr,
+            "ds4-test: add+RMSNorm rows exact n=%u rows=%u "
+            "sum=%zu/%llu max_ulp=%u max_abs=%g "
+            "norm=%zu/%llu max_ulp=%u max_abs=%g\n",
+            n, n_rows,
+            sum_stats.mismatch_count,
+            (unsigned long long)((uint64_t)n * n_rows),
+            sum_stats.max_ulp,
+            sum_stats.max_abs,
+            norm_stats.mismatch_count,
+            (unsigned long long)((uint64_t)n * n_rows),
+            norm_stats.max_ulp,
+            norm_stats.max_abs);
+    TEST_ASSERT(sum_stats.mismatch_count == 0);
+    TEST_ASSERT(norm_stats.mismatch_count == 0);
+
+    free(fused_norm_host);
+    free(ref_norm_host);
+    free(fused_sum_host);
+    free(ref_sum_host);
+    free(b_host);
+    free(a_host);
+    ds4_gpu_tensor_free(fused_norm);
+    ds4_gpu_tensor_free(ref_norm);
+    ds4_gpu_tensor_free(fused_sum);
+    ds4_gpu_tensor_free(ref_sum);
+    ds4_gpu_tensor_free(b);
+    ds4_gpu_tensor_free(a);
+    free(model_raw);
+}
+
+static void test_metal_add_rms_norm_weight_rows_exact(void) {
+    test_metal_add_rms_norm_weight_rows_exact_case(4096, 1, 71);
+    test_metal_add_rms_norm_weight_rows_exact_case(4096, 3, 83);
+    test_metal_add_rms_norm_weight_rows_exact_case(3072, 1, 86);
+    test_metal_add_rms_norm_weight_rows_exact_case(3072, 4, 87);
+    test_metal_add_rms_norm_weight_rows_exact_case(7168, 5, 89);
+}
+
 static void test_metal_hc_split_weighted_sum_norm_batch_exact(void) {
     /* Compare the batched HC+RMSNorm fusion against the exact two-dispatch
      * sequence used by the reference path at DS4's production dimensions. */
@@ -5811,6 +5942,7 @@ static void test_metal_kernel_group(void) {
     test_metal_zero_prefix_prefill_mask_cache_exact();
     test_laguna_gqa3_decode_numeric();
     test_metal_laguna_qk_norm_rope_pair_exact();
+    test_metal_add_rms_norm_weight_rows_exact();
     test_metal_hc_split_weighted_sum_norm_batch_exact();
     test_metal_output_hc_weights4_exact();
     test_metal_output_hc_sum_norm_exact();
