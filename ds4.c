@@ -51543,6 +51543,9 @@ static int generate_laguna_metal_argmax(
     const double prefill_t1 = now_sec();
 
     int generated = 0;
+    int successful_decode_evals = 0;
+    const char *bench_stats_env = getenv("DS4_LAGUNA_BENCH_STATS");
+    const bool bench_stats = bench_stats_env && !strcmp(bench_stats_env, "1");
     uint32_t pos = (uint32_t)prompt->len;
     const double decode_t0 = now_sec();
     for (int i = 0; ok && i < n_predict && pos < (uint32_t)ctx_size; i++) {
@@ -51568,6 +51571,7 @@ static int generate_laguna_metal_argmax(
         ok = laguna_graph_forward_token(
             &g, model, weights, token, pos, NULL,
             gpu_argmax ? NULL : logits);
+        if (bench_stats && ok) successful_decode_evals++;
         pos++;
     }
     const double decode_t1 = now_sec();
@@ -51579,6 +51583,13 @@ static int generate_laguna_metal_argmax(
                 (double)prompt->len / (prefill_t1 - prefill_t0) : 0.0,
             decode_t1 > decode_t0 ?
                 (double)generated / (decode_t1 - decode_t0) : 0.0);
+    if (bench_stats) {
+        fprintf(stderr,
+                "ds4: Laguna decode stats generated=%d requested=%d evals=%d\n",
+                generated,
+                n_predict,
+                successful_decode_evals);
+    }
     free(logits);
     laguna_graph_free(&g);
     return ok ? 0 : 1;
