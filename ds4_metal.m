@@ -3445,6 +3445,68 @@ int ds4_gpu_decode_attn_rope_fuse_available(void) {
     return 1;
 }
 
+/* The staged Laguna SWA verifier uses a separate qF32/F16 Flash-vector
+ * specialization with an extended argument struct.  Keep this pipeline out
+ * of the mandatory init set: older devices/libraries can use the row loop. */
+static id<MTLComputePipelineState>
+ds4_gpu_get_laguna_staged_flash_attn_vec_pipeline(
+        const char *function_name,
+        int32_t     ns10,
+        int32_t     ns20,
+        int32_t     nsg,
+        int32_t     nwg) {
+    NSString *key = [NSString stringWithFormat:
+        @"%s_virtual=1_ns10=%d_ns20=%d_nsg=%d_nwg=%d",
+        function_name, (int)ns10, (int)ns20, (int)nsg, (int)nwg];
+    id<MTLComputePipelineState> cached = [g_pipeline_cache objectForKey:key];
+    if (cached) return cached;
+
+    const bool has_mask = false;
+    const bool has_sinks = false;
+    const bool has_bias = false;
+    const bool has_scap = false;
+    const bool has_kvpad = false;
+    const bool shared_kvpad = false;
+    MTLFunctionConstantValues *constants =
+        [[MTLFunctionConstantValues alloc] init];
+    [constants setConstantValue:&has_mask
+                           type:MTLDataTypeBool atIndex:400];
+    [constants setConstantValue:&has_sinks
+                           type:MTLDataTypeBool atIndex:401];
+    [constants setConstantValue:&has_bias
+                           type:MTLDataTypeBool atIndex:402];
+    [constants setConstantValue:&has_scap
+                           type:MTLDataTypeBool atIndex:403];
+    [constants setConstantValue:&has_kvpad
+                           type:MTLDataTypeBool atIndex:404];
+    [constants setConstantValue:&shared_kvpad
+                           type:MTLDataTypeBool atIndex:405];
+    [constants setConstantValue:&ns10 type:MTLDataTypeInt atIndex:420];
+    [constants setConstantValue:&ns20 type:MTLDataTypeInt atIndex:421];
+    [constants setConstantValue:&nsg  type:MTLDataTypeInt atIndex:422];
+    [constants setConstantValue:&nwg  type:MTLDataTypeInt atIndex:423];
+
+    NSError *error = nil;
+    NSString *name = [NSString stringWithUTF8String:function_name];
+    id<MTLFunction> fn = [g_library newFunctionWithName:name
+                                         constantValues:constants
+                                                  error:&error];
+    if (!fn) {
+        fprintf(stderr, "ds4: Metal %s staged function not found: %s\n",
+                function_name, [[error localizedDescription] UTF8String]);
+        return nil;
+    }
+    id<MTLComputePipelineState> pipeline =
+        [g_device newComputePipelineStateWithFunction:fn error:&error];
+    if (!pipeline) {
+        fprintf(stderr, "ds4: Metal %s staged pipeline failed: %s\n",
+                function_name, [[error localizedDescription] UTF8String]);
+        return nil;
+    }
+    [g_pipeline_cache setObject:pipeline forKey:key];
+    return pipeline;
+}
+
 static id<MTLComputePipelineState> ds4_gpu_get_flash_attn_reduce_pipeline(
         int32_t dv,
         int32_t nwg) {
@@ -5633,7 +5695,59 @@ typedef struct {
     float    m1;
     int32_t  n_head_log2;
     float    logit_softcap;
+    uint32_t laguna_stage_pos_mod;
+    uint32_t laguna_stage_n_tokens;
+    uint32_t laguna_stage_cache_cap;
+    uint32_t laguna_stage_pad0;
+    uint64_t laguna_stage_nb11;
+    uint64_t laguna_stage_nb12;
 } ds4_gpu_flash_attn_vec_args;
+
+/* Keep the ordinary host argument size aligned with the default Metal source;
+ * older DS4_METAL_FLASH_ATTN_SOURCE overrides may use the shorter historical
+ * struct and tolerate these trailing bytes.  The virtual specialization uses
+ * a distinct Metal argument type so the staged path never changes the generic
+ * function-constant ABI. */
+typedef struct {
+    int32_t  ne01;
+    int32_t  ne02;
+    int32_t  ne03;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne11;
+    int32_t  ne_12_2;
+    int32_t  ne_12_3;
+    int32_t  ns10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    int32_t  ns20;
+    uint64_t nb21;
+    uint64_t nb22;
+    uint64_t nb23;
+    int32_t  ne31;
+    int32_t  ne32;
+    int32_t  ne33;
+    uint64_t nb31;
+    uint64_t nb32;
+    uint64_t nb33;
+    int32_t  ne1;
+    int32_t  ne2;
+    int32_t  ne3;
+    float    scale;
+    float    max_bias;
+    float    m0;
+    float    m1;
+    int32_t  n_head_log2;
+    float    logit_softcap;
+    uint32_t laguna_stage_pos_mod;
+    uint32_t laguna_stage_n_tokens;
+    uint32_t laguna_stage_cache_cap;
+    uint32_t laguna_stage_pad0;
+    uint64_t laguna_stage_nb11;
+    uint64_t laguna_stage_nb12;
+} ds4_gpu_flash_attn_vec_virtual_args;
 
 typedef struct {
     int32_t nrows;
@@ -35107,6 +35221,184 @@ static int ds4_gpu_encode_laguna_flash_attention_decode_rows(
     return 1;
 }
 
+/* Stage a short post-wrap SWA verifier block, then run one ordinary qF32/F16
+ * Flash-vector dispatch over all physical ring slots.  The virtual-cache
+ * function constant makes buffer 4/5 the staged K/V rows; the reducer remains
+ * the established Laguna reducer/gate path and uses row*n_head+head layout. */
+static int ds4_gpu_encode_laguna_flash_attention_staged_swa_rows(
+        id<MTLCommandBuffer> cb,
+        id<MTLComputePipelineState> stage_pipeline,
+        id<MTLBuffer>        headsbuf,
+        NSUInteger           heads_offset,
+        id<MTLBuffer>        qbuf,
+        NSUInteger           q_offset,
+        id<MTLBuffer>        kbuf,
+        NSUInteger           k_offset,
+        id<MTLBuffer>        vbuf,
+        NSUInteger           v_offset,
+        id<MTLBuffer>        gatebuf,
+        NSUInteger           gate_offset,
+        id<MTLBuffer>        keybuf,
+        NSUInteger           key_offset,
+        id<MTLBuffer>        valuebuf,
+        NSUInteger           value_offset,
+        id<MTLBuffer>        stagedkeybuf,
+        NSUInteger           stagedkey_offset,
+        id<MTLBuffer>        stagedvaluebuf,
+        NSUInteger           stagedvalue_offset,
+        uint32_t              pos0,
+        uint32_t              n_tokens,
+        uint32_t              cache_cap,
+        uint32_t              n_head,
+        uint32_t              n_head_kv,
+        uint32_t              head_dim,
+        float                 scale) {
+    if (!cb || !stage_pipeline || !headsbuf || !qbuf || !kbuf || !vbuf ||
+        !gatebuf || !keybuf || !valuebuf ||
+        !stagedkeybuf || !stagedvaluebuf || n_tokens < 2u ||
+        n_tokens > 16u || cache_cap != 512u || pos0 < cache_cap ||
+        n_head == 0u || n_head_kv == 0u || n_head % n_head_kv != 0u ||
+        head_dim != 128u || !isfinite(scale) || scale <= 0.0f) {
+        return 0;
+    }
+
+    const uint32_t nwg = 32u;
+    const uint32_t ncpsg = 32u;
+    const uint32_t nsg =
+        ds4_gpu_flash_attn_vec_nsg(cache_cap, nwg, ncpsg);
+    const NSUInteger nrows = (NSUInteger)n_tokens * n_head;
+    const NSUInteger head_bytes = (NSUInteger)head_dim * sizeof(uint16_t);
+    const NSUInteger cache_row_bytes =
+        (NSUInteger)n_head_kv * head_bytes;
+    const NSUInteger q_row_bytes =
+        (NSUInteger)n_head * head_dim * sizeof(float);
+    const NSUInteger kv_values =
+        (NSUInteger)n_tokens * n_head_kv * head_dim;
+    const NSUInteger tmp_bytes =
+        nrows * head_dim * nwg * sizeof(float) +
+        nrows * 2u * nwg * sizeof(float);
+    if (!ds4_gpu_ensure_scratch_buffer(&g_flash_attn_tmp_buffer,
+                                       &g_flash_attn_tmp_bytes,
+                                       tmp_bytes,
+                                       "ds4_laguna_staged_flash_attn_tmp")) {
+        return 0;
+    }
+
+    id<MTLComputePipelineState> vec_pipeline =
+        ds4_gpu_get_laguna_staged_flash_attn_vec_pipeline(
+            "kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128_virtual",
+            (int32_t)head_dim,
+            (int32_t)head_dim,
+            (int32_t)nsg,
+            (int32_t)nwg);
+    id<MTLComputePipelineState> reduce_pipeline =
+        ds4_gpu_get_laguna_flash_attn_reduce_gate_pipeline(
+            (int32_t)head_dim, (int32_t)nwg);
+    if (!vec_pipeline || !reduce_pipeline) return 0;
+
+    /* Keep the persistent ring untouched until the staged Flash reduction has
+     * completed.  This is the same F16 conversion used by ordinary prefill. */
+    const ds4_gpu_laguna_prefill_attention_args stage_args = {
+        .n_tokens = n_tokens,
+        .pos0 = pos0,
+        .cache_cap = cache_cap,
+        .n_head = n_head,
+        .n_head_kv = n_head_kv,
+        .head_dim = head_dim,
+        .scale = scale,
+        .pad0 = 0u,
+    };
+    id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+    if (!enc) return 0;
+    [enc setComputePipelineState:stage_pipeline];
+    [enc setBytes:&stage_args length:sizeof(stage_args) atIndex:0];
+    [enc setBuffer:kbuf offset:k_offset atIndex:1];
+    [enc setBuffer:vbuf offset:v_offset atIndex:2];
+    [enc setBuffer:stagedkeybuf offset:stagedkey_offset atIndex:3];
+    [enc setBuffer:stagedvaluebuf offset:stagedvalue_offset atIndex:4];
+    [enc dispatchThreads:MTLSizeMake(kv_values, 1u, 1u)
+        threadsPerThreadgroup:MTLSizeMake(256u, 1u, 1u)];
+    ds4_gpu_end_compute_encoder(cb, enc);
+
+    ds4_gpu_flash_attn_vec_virtual_args args = {
+        .ne01 = (int32_t)n_tokens,
+        .ne02 = (int32_t)n_head,
+        .ne03 = 1,
+        .nb01 = q_row_bytes,
+        .nb02 = (uint64_t)head_dim * sizeof(float),
+        .nb03 = q_row_bytes,
+        .ne11 = (int32_t)cache_cap,
+        .ne_12_2 = (int32_t)n_head_kv,
+        .ne_12_3 = 1,
+        .ns10 = (int32_t)head_dim,
+        .nb11 = cache_row_bytes,
+        .nb12 = head_bytes,
+        .nb13 = (uint64_t)cache_cap * cache_row_bytes,
+        .ns20 = (int32_t)head_dim,
+        .nb21 = cache_row_bytes,
+        .nb22 = head_bytes,
+        .nb23 = (uint64_t)cache_cap * cache_row_bytes,
+        .ne31 = 1,
+        .ne32 = 1,
+        .ne33 = 1,
+        .nb31 = 0,
+        .nb32 = 0,
+        .nb33 = 0,
+        .ne1 = (int32_t)n_head,
+        .ne2 = (int32_t)n_tokens,
+        .ne3 = 1,
+        .scale = scale,
+        .max_bias = 0.0f,
+        .m0 = 0.0f,
+        .m1 = 0.0f,
+        .n_head_log2 = 0,
+        .logit_softcap = 0.0f,
+        .laguna_stage_pos_mod = pos0 % cache_cap,
+        .laguna_stage_n_tokens = n_tokens,
+        .laguna_stage_cache_cap = cache_cap,
+        .laguna_stage_pad0 = 0,
+        .laguna_stage_nb11 = cache_row_bytes,
+        .laguna_stage_nb12 = head_bytes,
+    };
+    enc = ds4_gpu_compute_encoder(cb);
+    if (!enc) return 0;
+    [enc setComputePipelineState:vec_pipeline];
+    [enc setBytes:&args length:sizeof(args) atIndex:0];
+    [enc setBuffer:qbuf offset:q_offset atIndex:1];
+    [enc setBuffer:keybuf offset:key_offset atIndex:2];
+    [enc setBuffer:valuebuf offset:value_offset atIndex:3];
+    [enc setBuffer:stagedkeybuf offset:stagedkey_offset atIndex:4];
+    [enc setBuffer:stagedvaluebuf offset:stagedvalue_offset atIndex:5];
+    /* The virtual specialization does not read buffer 6, but keep the
+     * established vector argument slots fully bound for validation. */
+    [enc setBuffer:keybuf offset:key_offset atIndex:6];
+    [enc setBuffer:g_flash_attn_tmp_buffer offset:0 atIndex:7];
+    const NSUInteger shared_elems =
+        (2u * ds4_gpu_align_up_ns(head_dim, 128u) + 4u * ncpsg +
+         2u * ds4_gpu_align_up_ns(head_dim, 128u)) * nsg;
+    const NSUInteger shared_bytes =
+        ds4_gpu_align_up_ns(shared_elems * (sizeof(float) / 2u), 16u);
+    [enc setThreadgroupMemoryLength:shared_bytes atIndex:0];
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)n_tokens, n_head, nwg)
+         threadsPerThreadgroup:MTLSizeMake(32u, nsg, 1u)];
+    ds4_gpu_end_compute_encoder(cb, enc);
+
+    const ds4_gpu_flash_attn_reduce_args reduce_args = {
+        .nrows = (int32_t)nrows,
+    };
+    enc = ds4_gpu_compute_encoder(cb);
+    if (!enc) return 0;
+    [enc setComputePipelineState:reduce_pipeline];
+    [enc setBytes:&reduce_args length:sizeof(reduce_args) atIndex:0];
+    [enc setBuffer:g_flash_attn_tmp_buffer offset:0 atIndex:1];
+    [enc setBuffer:headsbuf offset:heads_offset atIndex:2];
+    [enc setBuffer:gatebuf offset:gate_offset atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(nrows, 1u, 1u)
+         threadsPerThreadgroup:MTLSizeMake(32u * nwg, 1u, 1u)];
+    ds4_gpu_end_compute_encoder(cb, enc);
+    return 1;
+}
+
 int ds4_gpu_laguna_attention_prefill_tensor(
         ds4_gpu_tensor       *heads,
         ds4_gpu_tensor       *key_cache,
@@ -35210,6 +35502,89 @@ int ds4_gpu_laguna_attention_prefill_tensor(
             int owned = 0;
             id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
             if (!cb) return 0;
+
+            const bool use_staged_swa_rows =
+                split_decode_rows != 0 &&
+                ds4_gpu_env_bool("DS4_METAL_LAGUNA_STAGED_SWA") > 0 &&
+                n_tokens >= 2u && n_tokens <= 16u &&
+                cache_cap == 512u && pos0 >= cache_cap;
+            const bool require_staged_swa_rows =
+                ds4_gpu_env_bool("DS4_METAL_LAGUNA_REQUIRE_STAGED_SWA") > 0;
+            int staged_swa_rows = 0;
+            if (use_staged_swa_rows) {
+                staged_swa_rows =
+                    ds4_gpu_encode_laguna_flash_attention_staged_swa_rows(
+                    cb,
+                    stage_pipeline,
+                    headsbuf,
+                    ds4_gpu_tensor_offset(heads),
+                    qbuf,
+                    ds4_gpu_tensor_offset(q),
+                    kbuf,
+                    ds4_gpu_tensor_offset(k),
+                    vbuf,
+                    ds4_gpu_tensor_offset(v),
+                    gatebuf,
+                    ds4_gpu_tensor_offset(gate),
+                    keybuf,
+                    ds4_gpu_tensor_offset(key_cache),
+                    valuebuf,
+                    ds4_gpu_tensor_offset(value_cache),
+                    stagedkeybuf,
+                    ds4_gpu_tensor_offset(staged_key),
+                    stagedvaluebuf,
+                    ds4_gpu_tensor_offset(staged_value),
+                    pos0,
+                    n_tokens,
+                    cache_cap,
+                    n_head,
+                    n_head_kv,
+                    head_dim,
+                    scale);
+            }
+            if (staged_swa_rows) {
+                id<MTLComputeCommandEncoder> enc =
+                    ds4_gpu_compute_encoder(cb);
+                if (!enc) return 0;
+                const ds4_gpu_laguna_prefill_attention_args args = {
+                    .n_tokens = n_tokens,
+                    .pos0 = pos0,
+                    .cache_cap = cache_cap,
+                    .n_head = n_head,
+                    .n_head_kv = n_head_kv,
+                    .head_dim = head_dim,
+                    .scale = scale,
+                    .pad0 = 0u,
+                };
+                [enc setComputePipelineState:commit_pipeline];
+                [enc setBytes:&args length:sizeof(args) atIndex:0];
+                [enc setBuffer:stagedkeybuf
+                        offset:ds4_gpu_tensor_offset(staged_key)
+                       atIndex:1];
+                [enc setBuffer:stagedvaluebuf
+                        offset:ds4_gpu_tensor_offset(staged_value)
+                       atIndex:2];
+                [enc setBuffer:keybuf
+                        offset:ds4_gpu_tensor_offset(key_cache)
+                       atIndex:3];
+                [enc setBuffer:valuebuf
+                        offset:ds4_gpu_tensor_offset(value_cache)
+                       atIndex:4];
+                [enc dispatchThreads:
+                        MTLSizeMake((NSUInteger)kv_values, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                ds4_gpu_end_compute_encoder(cb, enc);
+                if (!ds4_gpu_finish_command_buffer(
+                        cb, owned, "Laguna staged SWA attention")) {
+                    return 0;
+                }
+                return 1;
+            }
+            if (use_staged_swa_rows && require_staged_swa_rows) {
+                fprintf(stderr,
+                        "ds4: required Metal Laguna staged SWA pipeline unavailable; refusing row-loop fallback\n");
+                return 0;
+            }
 
             const uint32_t first_key_count =
                 MIN(pos0 + 1u, cache_cap);

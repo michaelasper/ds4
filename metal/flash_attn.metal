@@ -125,7 +125,113 @@ struct ds4_metal_args_flash_attn_ext_vec {
     float    m1;
     int32_t  n_head_log2;
     float    logit_softcap;
+    /* Kept in the ordinary struct for compatibility with the current default
+     * library.  Ordinary callers leave these fields zero; only the virtual
+     * specialization reads them through the overloads below. */
+    uint32_t laguna_stage_pos_mod;
+    uint32_t laguna_stage_n_tokens;
+    uint32_t laguna_stage_cache_cap;
+    uint32_t laguna_stage_pad0;
+    uint64_t laguna_stage_nb11;
+    uint64_t laguna_stage_nb12;
 };
+
+struct ds4_metal_args_flash_attn_ext_vec_virtual {
+    int32_t  ne01;
+    int32_t  ne02;
+    int32_t  ne03;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne11;
+    int32_t  ne_12_2;
+    int32_t  ne_12_3;
+    int32_t  ns10;
+    uint64_t nb11;
+    uint64_t nb12;
+    uint64_t nb13;
+    int32_t  ns20;
+    uint64_t nb21;
+    uint64_t nb22;
+    uint64_t nb23;
+    int32_t  ne31;
+    int32_t  ne32;
+    int32_t  ne33;
+    uint64_t nb31;
+    uint64_t nb32;
+    uint64_t nb33;
+    int32_t  ne1;
+    int32_t  ne2;
+    int32_t  ne3;
+    float    scale;
+    float    max_bias;
+    float    m0;
+    float    m1;
+    int32_t  n_head_log2;
+    float    logit_softcap;
+    /* Optional Laguna SWA verifier mode.  The regular Flash vectors leave
+     * these zero; the virtual-cache variant substitutes staged rows while
+     * traversing the physical full ring. */
+    uint32_t laguna_stage_pos_mod;
+    uint32_t laguna_stage_n_tokens;
+    uint32_t laguna_stage_cache_cap;
+    uint32_t laguna_stage_pad0;
+    uint64_t laguna_stage_nb11;
+    uint64_t laguna_stage_nb12;
+};
+
+/* Keep stage metadata out of the ordinary vector arithmetic.  The ordinary
+ * struct retains the trailing fields for ABI compatibility, but its accessor
+ * overloads never read them; only the virtual specialization consumes them. */
+inline uint ds4_flash_attn_stage_pos_mod(
+        constant ds4_metal_args_flash_attn_ext_vec &) {
+    return 1u;
+}
+
+inline uint ds4_flash_attn_stage_pos_mod(
+        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+    return args.laguna_stage_pos_mod;
+}
+
+inline uint ds4_flash_attn_stage_n_tokens(
+        constant ds4_metal_args_flash_attn_ext_vec &) {
+    return 0u;
+}
+
+inline uint ds4_flash_attn_stage_n_tokens(
+        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+    return args.laguna_stage_n_tokens;
+}
+
+inline uint ds4_flash_attn_stage_cache_cap(
+        constant ds4_metal_args_flash_attn_ext_vec &) {
+    return 1u;
+}
+
+inline uint ds4_flash_attn_stage_cache_cap(
+        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+    return args.laguna_stage_cache_cap;
+}
+
+inline uint64_t ds4_flash_attn_stage_nb11(
+        constant ds4_metal_args_flash_attn_ext_vec &) {
+    return 0u;
+}
+
+inline uint64_t ds4_flash_attn_stage_nb11(
+        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+    return args.laguna_stage_nb11;
+}
+
+inline uint64_t ds4_flash_attn_stage_nb12(
+        constant ds4_metal_args_flash_attn_ext_vec &) {
+    return 0u;
+}
+
+inline uint64_t ds4_flash_attn_stage_nb12(
+        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+    return args.laguna_stage_nb12;
+}
 
 struct ds4_metal_args_flash_attn_ext_vec_reduce {
     int32_t nrows;
@@ -949,6 +1055,8 @@ constant int32_t FC_flash_attn_ext_vec_nwg  [[function_constant(FC_FLASH_ATTN_EX
 // raw and compressed KV cache chunks, optionally splitting long contexts across
 // workgroups and writing partial softmax state for a later reduction.
 template<
+    typename args_t,
+    bool VIRTUAL_CACHE,
     typename q4_t,
     typename k4_t,
     typename v4_t,
@@ -968,7 +1076,7 @@ template<
     short Q  = OP_FLASH_ATTN_EXT_VEC_NQPSG,
     short C  = OP_FLASH_ATTN_EXT_VEC_NCPSG>
 kernel void kernel_flash_attn_ext_vec(
-        constant ds4_metal_args_flash_attn_ext_vec & args,
+        constant args_t & args,
         device const char * q,
         device const char * k,
         device const char * v,
@@ -1016,11 +1124,11 @@ kernel void kernel_flash_attn_ext_vec(
 
     so4 += tiisg;
 
+    const short ikv2 = iq2/(args.ne02/args.ne_12_2);
+    const short ikv3 = iq3/(args.ne03/args.ne_12_3);
+
     {
         q += iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03;
-
-        const short ikv2 = iq2/(args.ne02/args.ne_12_2);
-        const short ikv3 = iq3/(args.ne03/args.ne_12_3);
 
         k += ikv2*args.nb12 + ikv3*args.nb13;
         v += ikv2*args.nb22 + ikv3*args.nb23;
@@ -1074,7 +1182,8 @@ kernel void kernel_flash_attn_ext_vec(
                 break;
             }
 
-            if (FC_flash_attn_ext_vec_has_kvpad && ic + C > args.ne11) {
+            if (!VIRTUAL_CACHE &&
+                FC_flash_attn_ext_vec_has_kvpad && ic + C > args.ne11) {
                 k    = pad;
                 if (FC_flash_attn_ext_vec_shared_kvpad) {
                     v = k;
@@ -1084,9 +1193,6 @@ kernel void kernel_flash_attn_ext_vec(
                     v = k + args.nb11*C*args.ne_12_2*args.ne_12_3;
                     mask = v + args.nb21*C*args.ne_12_2*args.ne_12_3;
                 }
-
-                const short ikv2 = iq2/(args.ne02/args.ne_12_2);
-                const short ikv3 = iq3/(args.ne03/args.ne_12_3);
 
                 k += (ikv2 + ikv3*args.ne_12_2)*args.nb11*C;
                 v += (ikv2 + ikv3*args.ne_12_2)*args.nb21*C;
@@ -1105,11 +1211,13 @@ kernel void kernel_flash_attn_ext_vec(
                 ic = 0;
             }
 
-            if (FC_flash_attn_ext_vec_has_mask) {
+            if (!VIRTUAL_CACHE &&
+                FC_flash_attn_ext_vec_has_mask) {
                 sm[tiisg] = pm[ic + tiisg];
             }
 
-            if (simd_max(sm[tiisg]) <= -MAXHALF) {
+            if (!VIRTUAL_CACHE &&
+                simd_max(sm[tiisg]) <= -MAXHALF) {
                 continue;
             }
 
@@ -1123,7 +1231,39 @@ kernel void kernel_flash_attn_ext_vec(
                 qk_t mqk[C/NE] = { [ 0 ... C/NE - 1] = 0.0f };
 
                 FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
-                    if (is_same<kd4_t, k4_t>::value) {
+                    if (VIRTUAL_CACHE) {
+                        /* Traverse physical ring slots.  u is the staged
+                         * virtual position for this slot; a staged row is
+                         * visible only to its own and later query rows. */
+                        const uint slot = ic + NE*cc + ty;
+                        const uint cap = ds4_flash_attn_stage_cache_cap(args);
+                        const uint pos_mod = ds4_flash_attn_stage_pos_mod(args);
+                        const uint u = (slot + cap - pos_mod) % cap;
+                        const bool use_stage =
+                            u < ds4_flash_attn_stage_n_tokens(args) && u <= iq1;
+                        device const char *src = use_stage ?
+                            mask + (uint64_t)u * ds4_flash_attn_stage_nb11(args) +
+                                (uint64_t)ikv2 * ds4_flash_attn_stage_nb12(args) :
+                            k + (uint64_t)slot * args.nb11;
+                        device const k4_t *pk4_row =
+                            (device const k4_t *)src;
+                        pk4_row += tx;
+                        if (is_same<kd4_t, k4_t>::value) {
+                            FOR_UNROLL (short ii = 0; ii < DK4/NL; ++ii) {
+                                mqk[cc] += dot((float4) pk4_row[ii*NL],
+                                               (float4) pq4[ii*NL]);
+                            }
+                        } else {
+                            device const kd4_t *pk =
+                                (device const kd4_t *)src;
+                            k4_t mk;
+                            FOR_UNROLL (short ii = 0; ii < DK4/NL; ++ii) {
+                                const short i = ii*NL + tx;
+                                deq_k_t4(pk + i/nl_k, i%nl_k, mk);
+                                mqk[cc] += dot((float4) mk, (float4) sq4[i]);
+                            }
+                        }
+                    } else if (is_same<kd4_t, k4_t>::value) {
                         FOR_UNROLL (short ii = 0; ii < DK4/NL; ++ii) {
                             mqk[cc] += dot((float4) pk4[cc*NE*NS10/4 +  ii*NL], (float4) pq4[ii*NL]);
                         }
@@ -1164,10 +1304,14 @@ kernel void kernel_flash_attn_ext_vec(
                     }
                 }
 
-                if (FC_flash_attn_ext_vec_has_mask &&
-                   !FC_flash_attn_ext_vec_has_scap &&
-                   !FC_flash_attn_ext_vec_has_bias) {
-                    ss[NE*tx + ty] = fma(mqk[tx], args.scale, (qk_t) sm[NE*tx + ty]);
+                if (VIRTUAL_CACHE ||
+                    (FC_flash_attn_ext_vec_has_mask &&
+                     !FC_flash_attn_ext_vec_has_scap &&
+                     !FC_flash_attn_ext_vec_has_bias)) {
+                    ss[NE*tx + ty] = fma(
+                        mqk[tx], args.scale,
+                        VIRTUAL_CACHE ?
+                            (qk_t)0.0f : (qk_t)sm[NE*tx + ty]);
                 } else {
                     mqk[tx] *= args.scale;
 
@@ -1177,7 +1321,7 @@ kernel void kernel_flash_attn_ext_vec(
 
                     if (FC_flash_attn_ext_vec_has_bias) {
                         mqk[tx] += (qk_t) sm[NE*tx + ty]*slope;
-                    } else {
+                    } else if (FC_flash_attn_ext_vec_has_mask) {
                         mqk[tx] += (qk_t) sm[NE*tx + ty];
                     }
 
@@ -1216,28 +1360,81 @@ kernel void kernel_flash_attn_ext_vec(
                 }
 
                 if (is_same<vd4_t, v4_t>::value) {
-                    device const v4_t * pv4 = (device const v4_t *) (v + ic*args.nb21);
-
-                    pv4 += ty*NS20/4 + tx;
-
                     const auto sst = ss + ty;
 
-                    FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
-                        FOR_UNROLL (short ii = 0; ii < DV4/NL; ++ii) {
-                            lo[ii] += o4_t(float4(pv4[cc*NE*NS20/4 + ii*NL])*float4(sst[cc*NE]));
+                    if (VIRTUAL_CACHE) {
+                        FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
+                            const uint slot = ic + NE*cc + ty;
+                            const uint cap = ds4_flash_attn_stage_cache_cap(args);
+                            const uint pos_mod = ds4_flash_attn_stage_pos_mod(args);
+                            const uint u = (slot + cap - pos_mod) % cap;
+                            const bool use_stage =
+                                u < ds4_flash_attn_stage_n_tokens(args) && u <= iq1;
+                            device const char *src = use_stage ?
+                                sinks + (uint64_t)u * ds4_flash_attn_stage_nb11(args) +
+                                    (uint64_t)ikv2 * ds4_flash_attn_stage_nb12(args) :
+                                v + (uint64_t)slot * args.nb21;
+                            device const v4_t *pv4_row =
+                                (device const v4_t *)src;
+                            pv4_row += tx;
+                            FOR_UNROLL (short ii = 0; ii < DV4/NL; ++ii) {
+                                lo[ii] += o4_t(
+                                    float4(pv4_row[ii*NL]) *
+                                    float4(sst[cc*NE]));
+                            }
+                        }
+                    } else {
+                        device const v4_t * pv4 = (device const v4_t *) (v + ic*args.nb21);
+
+                        pv4 += ty*NS20/4 + tx;
+
+                        FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
+                            FOR_UNROLL (short ii = 0; ii < DV4/NL; ++ii) {
+                                lo[ii] += o4_t(float4(pv4[cc*NE*NS20/4 + ii*NL])*float4(sst[cc*NE]));
+                            }
                         }
                     }
                 } else {
-                    FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
-                        device const vd4_t * pv4 = (device const vd4_t *) (v + ((ic + NE*cc + ty)*args.nb21));
+                    if (VIRTUAL_CACHE) {
+                        FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
+                            const uint slot = ic + NE*cc + ty;
+                            const uint cap = ds4_flash_attn_stage_cache_cap(args);
+                            const uint pos_mod = ds4_flash_attn_stage_pos_mod(args);
+                            const uint u = (slot + cap - pos_mod) % cap;
+                            const bool use_stage =
+                                u < ds4_flash_attn_stage_n_tokens(args) && u <= iq1;
+                            device const char *src = use_stage ?
+                                sinks + (uint64_t)u * ds4_flash_attn_stage_nb11(args) +
+                                    (uint64_t)ikv2 * ds4_flash_attn_stage_nb12(args) :
+                                v + (uint64_t)slot * args.nb21;
+                            device const vd4_t * pv4 =
+                                (device const vd4_t *)src;
 
-                        FOR_UNROLL (short ii = 0; ii < DV4/NL; ++ii) {
-                            const short i = ii*NL + tx;
+                            FOR_UNROLL (short ii = 0; ii < DV4/NL; ++ii) {
+                                const short i = ii*NL + tx;
 
-                            v4_t mv;
-                            deq_v_t4(pv4 + i/nl_v, i%nl_v, mv);
+                                v4_t mv;
+                                deq_v_t4(pv4 + i/nl_v, i%nl_v, mv);
 
-                            lo[ii] += o4_t(float4(mv)*float4(ss[NE*cc + ty]));
+                                lo[ii] += o4_t(
+                                    float4(mv)*float4(ss[NE*cc + ty]));
+                            }
+                        }
+                    } else {
+                        FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
+                            device const vd4_t * pv4 =
+                                (device const vd4_t *)
+                                (v + ((ic + NE*cc + ty)*args.nb21));
+
+                            FOR_UNROLL (short ii = 0; ii < DV4/NL; ++ii) {
+                                const short i = ii*NL + tx;
+
+                                v4_t mv;
+                                deq_v_t4(pv4 + i/nl_v, i%nl_v, mv);
+
+                                lo[ii] += o4_t(
+                                    float4(mv)*float4(ss[NE*cc + ty]));
+                            }
                         }
                     }
                 }
@@ -1394,14 +1591,30 @@ kernel void kernel_flash_attn_ext_vec(
     float, float4, \
            float4
 
-typedef decltype(kernel_flash_attn_ext_vec<FA_TYPES, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 4>) flash_attn_ext_vec_t;
+typedef decltype(kernel_flash_attn_ext_vec<
+    ds4_metal_args_flash_attn_ext_vec, false,
+    FA_TYPES, half4, 1, dequantize_f16_t4,
+    half4, 1, dequantize_f16_t4, 128, 128, 4>) flash_attn_ext_vec_t;
+typedef decltype(kernel_flash_attn_ext_vec<
+    ds4_metal_args_flash_attn_ext_vec, false,
+    FA_TYPES, half4, 1, dequantize_f16_t4,
+    half4, 1, dequantize_f16_t4, 512, 512, 1>) flash_attn_ext_vec_f16_t;
+typedef decltype(kernel_flash_attn_ext_vec<
+    ds4_metal_args_flash_attn_ext_vec, false,
+    FA_TYPES_QF32, half4, 1, dequantize_f16_t4,
+    half4, 1, dequantize_f16_t4, 128, 128, 1>) flash_attn_ext_vec_qf32_t;
+typedef decltype(kernel_flash_attn_ext_vec<
+    ds4_metal_args_flash_attn_ext_vec_virtual, true,
+    FA_TYPES_QF32, half4, 1, dequantize_f16_t4,
+    half4, 1, dequantize_f16_t4, 128, 128, 1>) flash_attn_ext_vec_virtual_t;
 
 // Host-visible decode FlashAttention variant for DS4's 512-wide F16 K/V rows.
-template [[host_name("kernel_flash_attn_ext_vec_f16_dk512_dv512")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES,     half4,  1, dequantize_f16_t4, half4,  1, dequantize_f16_t4, 512, 512, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_f16_dk512_dv512")]]  kernel flash_attn_ext_vec_f16_t kernel_flash_attn_ext_vec<ds4_metal_args_flash_attn_ext_vec, false, FA_TYPES,     half4,  1, dequantize_f16_t4, half4,  1, dequantize_f16_t4, 512, 512, 1>;
 
 // Laguna keeps the query in F32 to preserve decode-path numerical behavior;
 // its cached keys and values remain F16.
-template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128")]]  kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<FA_TYPES_QF32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128")]]  kernel flash_attn_ext_vec_qf32_t kernel_flash_attn_ext_vec<ds4_metal_args_flash_attn_ext_vec, false, FA_TYPES_QF32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128_virtual")]]  kernel flash_attn_ext_vec_virtual_t kernel_flash_attn_ext_vec<ds4_metal_args_flash_attn_ext_vec_virtual, true, FA_TYPES_QF32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
 
 #undef FA_TYPES
 #undef FA_TYPES_F32
