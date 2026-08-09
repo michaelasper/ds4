@@ -37969,6 +37969,12 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
             return 0;
         }
 
+        /* The row-loop form remains available as a diagnostic A/B oracle.
+         * The default path uses the token dimension already implemented by
+         * the Q2_K/Q3_K kernels, so verifier rows share each pair/down
+         * encoder without changing any per-token reduction. */
+        const bool legacy_rows =
+            getenv("DS4_METAL_DISABLE_Q23_EXACT_MULTIROW") != NULL;
         ds4_gpu_glm_routed_moe_args args = {
             .tp_rank = g_tp_split_rank,
             .tp_world = g_tp_split_world,
@@ -37978,8 +37984,9 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
             .out_dim = out_dim,
             .n_total_expert = n_total_expert,
             .n_expert_used = n_expert,
-            .n_tokens = 1u,
-            .mid_token_stride = (uint32_t)per_token_mid,
+            .n_tokens = legacy_rows ? 1u : n_tokens,
+            .mid_token_stride = legacy_rows ?
+                (uint32_t)per_token_mid : mid_token_stride,
             .down_type = down_type,
             .gate_expert_bytes = gate_expert_bytes,
             .gate_row_bytes = gate_row_bytes,
@@ -38018,26 +38025,43 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
                 offset:(NSUInteger)gate_inner atIndex:1];
         [enc setBuffer:upbuf
                 offset:(NSUInteger)up_inner atIndex:2];
-        for (uint32_t row = 0; row < n_tokens; row++) {
+        if (legacy_rows) {
+            for (uint32_t row = 0; row < n_tokens; row++) {
+                [enc setBuffer:xbuf
+                        offset:ds4_gpu_tensor_offset(x) +
+                               (NSUInteger)(row * x_row_bytes)
+                       atIndex:3];
+                [enc setBuffer:selectedbuf
+                        offset:ds4_gpu_tensor_offset(selected) +
+                               (NSUInteger)(row * selected_row_bytes)
+                       atIndex:4];
+                [enc setBuffer:weightsbuf
+                        offset:ds4_gpu_tensor_offset(weights) +
+                               (NSUInteger)(row * weights_row_bytes)
+                       atIndex:5];
+                [enc setBuffer:midbuf
+                        offset:ds4_gpu_tensor_offset(mid) +
+                               (NSUInteger)(row * mid_row_bytes)
+                       atIndex:6];
+                [enc dispatchThreadgroups:
+                        MTLSizeMake(pair_groups,
+                                    (NSUInteger)n_expert, 1u)
+                     threadsPerThreadgroup:
+                        MTLSizeMake(64u, 1u, 1u)];
+            }
+        } else {
             [enc setBuffer:xbuf
-                    offset:ds4_gpu_tensor_offset(x) +
-                           (NSUInteger)(row * x_row_bytes)
-                   atIndex:3];
+                    offset:ds4_gpu_tensor_offset(x) atIndex:3];
             [enc setBuffer:selectedbuf
-                    offset:ds4_gpu_tensor_offset(selected) +
-                           (NSUInteger)(row * selected_row_bytes)
-                   atIndex:4];
+                    offset:ds4_gpu_tensor_offset(selected) atIndex:4];
             [enc setBuffer:weightsbuf
-                    offset:ds4_gpu_tensor_offset(weights) +
-                           (NSUInteger)(row * weights_row_bytes)
-                   atIndex:5];
+                    offset:ds4_gpu_tensor_offset(weights) atIndex:5];
             [enc setBuffer:midbuf
-                    offset:ds4_gpu_tensor_offset(mid) +
-                           (NSUInteger)(row * mid_row_bytes)
-                   atIndex:6];
+                    offset:ds4_gpu_tensor_offset(mid) atIndex:6];
             [enc dispatchThreadgroups:
                     MTLSizeMake(pair_groups,
-                                (NSUInteger)n_expert, 1u)
+                                (NSUInteger)n_expert,
+                                (NSUInteger)n_tokens)
                  threadsPerThreadgroup:
                     MTLSizeMake(64u, 1u, 1u)];
         }
@@ -38048,21 +38072,34 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         [enc setBytes:&args length:sizeof(args) atIndex:0];
         [enc setBuffer:downbuf
                 offset:(NSUInteger)down_inner atIndex:1];
-        for (uint32_t row = 0; row < n_tokens; row++) {
+        if (legacy_rows) {
+            for (uint32_t row = 0; row < n_tokens; row++) {
+                [enc setBuffer:selectedbuf
+                        offset:ds4_gpu_tensor_offset(selected) +
+                               (NSUInteger)(row * selected_row_bytes)
+                       atIndex:2];
+                [enc setBuffer:midbuf
+                        offset:ds4_gpu_tensor_offset(mid) +
+                               (NSUInteger)(row * mid_row_bytes)
+                       atIndex:3];
+                [enc setBuffer:outbuf
+                        offset:ds4_gpu_tensor_offset(out) +
+                               (NSUInteger)(row * out_row_bytes)
+                       atIndex:4];
+                [enc dispatchThreadgroups:
+                        MTLSizeMake(down_groups, 1u, 1u)
+                     threadsPerThreadgroup:
+                        MTLSizeMake(64u, 1u, 1u)];
+            }
+        } else {
             [enc setBuffer:selectedbuf
-                    offset:ds4_gpu_tensor_offset(selected) +
-                           (NSUInteger)(row * selected_row_bytes)
-                   atIndex:2];
+                    offset:ds4_gpu_tensor_offset(selected) atIndex:2];
             [enc setBuffer:midbuf
-                    offset:ds4_gpu_tensor_offset(mid) +
-                           (NSUInteger)(row * mid_row_bytes)
-                   atIndex:3];
+                    offset:ds4_gpu_tensor_offset(mid) atIndex:3];
             [enc setBuffer:outbuf
-                    offset:ds4_gpu_tensor_offset(out) +
-                           (NSUInteger)(row * out_row_bytes)
-                   atIndex:4];
+                    offset:ds4_gpu_tensor_offset(out) atIndex:4];
             [enc dispatchThreadgroups:
-                    MTLSizeMake(down_groups, 1u, 1u)
+                    MTLSizeMake(down_groups, (NSUInteger)n_tokens, 1u)
                  threadsPerThreadgroup:
                     MTLSizeMake(64u, 1u, 1u)];
         }
