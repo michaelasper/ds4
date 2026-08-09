@@ -517,6 +517,55 @@ int ds4_gpu_laguna_argmax_tensor(
         ds4_gpu_tensor       *out_idx,
         const ds4_gpu_tensor *logits,
         uint32_t              n_vocab);
+
+/* Optional Laguna S2.1 Q8_0 lm-head top-1 screen.  The plan owns a packed
+ * high-nibble sidecopy and small per-row scratch; it never exposes an
+ * approximate logits row.  Creation performs the sidecopy build, so callers
+ * can reject missing pipelines before mutating graph/KV state. */
+typedef struct ds4_gpu_laguna_q8_lmhead_screen
+    ds4_gpu_laguna_q8_lmhead_screen;
+
+ds4_gpu_laguna_q8_lmhead_screen *
+ds4_gpu_laguna_q8_lmhead_screen_create(
+        const void *model_map,
+        uint64_t    model_size,
+        uint64_t    weight_offset,
+        uint64_t    in_dim,
+        uint64_t    out_dim);
+void ds4_gpu_laguna_q8_lmhead_screen_destroy(
+        ds4_gpu_laguna_q8_lmhead_screen *screen);
+int ds4_gpu_laguna_q8_lmhead_screen_tensor(
+        ds4_gpu_laguna_q8_lmhead_screen *screen,
+        ds4_gpu_tensor       *out_idx,
+        ds4_gpu_tensor       *out_value,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        const ds4_gpu_tensor *x);
+/* Read only after the command containing screen_tensor has completed.  Stats
+ * collection is captured at plan creation using ds4_gpu_env_bool (the
+ * DS4_METAL_LAGUNA_Q8_LMHEAD_TRACE or focused-test flag); this function
+ * returns 0 without reading GPU memory when collection was disabled, even if
+ * the environment is changed later.  While an explicit command batch is
+ * active, at most one stats-enabled screen_tensor call is accepted; standalone
+ * completed calls remain repeatable.
+ * Tests can use this to prove candidate reduction and positive dispatch.
+ * candidate_row_blocks is the logical admitted-row traffic; exact_row_blocks
+ * is the trace-only pair-expanded traffic actually evaluated by NR0=2,
+ * including the mandatory seed pair.  sidecopy_init_ms excludes lazy
+ * pipeline compilation and model wrapping; use an external wall timer for
+ * total plan creation. */
+int ds4_gpu_laguna_q8_lmhead_screen_stats(
+        const ds4_gpu_laguna_q8_lmhead_screen *screen,
+        uint32_t *candidate_rows,
+        uint32_t *candidate_row_blocks,
+        uint32_t *coarse_nonfinite,
+        uint64_t *dispatch_count,
+        uint64_t *packed_bytes,
+        double   *sidecopy_init_ms,
+        uint32_t *exact_row_blocks,
+        int32_t  *winner_index,
+        float    *winner_value);
 #endif
 
 #ifdef DS4_ROCM_BUILD

@@ -48524,6 +48524,10 @@ typedef struct {
     ds4_gpu_tensor *argmax;
     bool gpu_argmax_enabled;
     int32_t gpu_argmax_result;
+#ifdef __APPLE__
+    ds4_gpu_laguna_q8_lmhead_screen *lmhead_screen;
+    bool q8_lmhead_screen_dispatched;
+#endif
     ds4_gpu_tensor *spec_output_norm;
     ds4_gpu_tensor *spec_logits;
     ds4_gpu_tensor *spec_argmax;
@@ -48533,6 +48537,11 @@ typedef struct {
     ds4_gpu_tensor *value_cache[DS4_MAX_LAYER];
     uint32_t cache_cap[DS4_MAX_LAYER];
 } ds4_laguna_gpu_graph;
+
+#ifdef __APPLE__
+static void laguna_graph_report_q8_lmhead_screen(
+        const ds4_laguna_gpu_graph *g);
+#endif
 
 static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     if (!g) return;
@@ -48569,6 +48578,10 @@ static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     DS4_LAGUNA_FREE(output_norm);
     DS4_LAGUNA_FREE(logits);
     DS4_LAGUNA_FREE(argmax);
+#ifdef __APPLE__
+    ds4_gpu_laguna_q8_lmhead_screen_destroy(g->lmhead_screen);
+    g->lmhead_screen = NULL;
+#endif
     DS4_LAGUNA_FREE(spec_output_norm);
     DS4_LAGUNA_FREE(spec_logits);
     DS4_LAGUNA_FREE(spec_argmax);
@@ -49835,6 +49848,14 @@ static bool laguna_graph_forward_token(
         return false;
     }
 
+#ifdef __APPLE__
+    const bool q8_lmhead_screen =
+        g->lmhead_screen != NULL && logits_out == NULL;
+    g->q8_lmhead_screen_dispatched = false;
+#else
+    const bool q8_lmhead_screen = false;
+#endif
+
     bool ok = ds4_gpu_begin_commands() != 0;
     if (ok) {
         ok = ds4_gpu_embed_token_quant_tensor(g->cur,
@@ -50234,15 +50255,29 @@ static bool laguna_graph_forward_token(
                                              DS4_N_EMBD,
                                              DS4_RMS_EPS) != 0;
         if (ok) {
-            ok = laguna_graph_matmul(g->logits,
-                                     model,
-                                     weights->output,
-                                     g->output_norm,
-                                     1);
+            if (q8_lmhead_screen) {
+#ifdef __APPLE__
+                ok = ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    g->lmhead_screen,
+                    g->argmax,
+                    NULL,
+                    model->map,
+                    model->size,
+                    weights->output->abs_offset,
+                    g->output_norm) != 0;
+                if (ok) g->q8_lmhead_screen_dispatched = true;
+#endif
+            } else {
+                ok = laguna_graph_matmul(g->logits,
+                                         model,
+                                         weights->output,
+                                         g->output_norm,
+                                         1);
+            }
         }
     }
 #ifdef __APPLE__
-    if (ok && g->gpu_argmax_enabled) {
+    if (ok && g->gpu_argmax_enabled && !q8_lmhead_screen) {
         ok = ds4_gpu_laguna_argmax_tensor(g->argmax,
                                           g->logits,
                                           DS4_N_VOCAB) != 0;
@@ -50255,6 +50290,11 @@ static bool laguna_graph_forward_token(
                                  &g->gpu_argmax_result,
                                  sizeof(g->gpu_argmax_result)) != 0;
     }
+#ifdef __APPLE__
+    if (ok && g->q8_lmhead_screen_dispatched) {
+        laguna_graph_report_q8_lmhead_screen(g);
+    }
+#endif
     if (ok && logits_out) {
         ok = ds4_gpu_tensor_read(g->logits,
                                  0,
@@ -50967,6 +51007,13 @@ static bool laguna_graph_forward_batch(
     }
 
     ds4_gpu_tensor *last = NULL;
+#ifdef __APPLE__
+    const bool q8_lmhead_screen =
+        g->lmhead_screen != NULL && logits_out == NULL;
+    g->q8_lmhead_screen_dispatched = false;
+#else
+    const bool q8_lmhead_screen = false;
+#endif
     if (ok && (logits_out || g->gpu_argmax_enabled)) {
         last = ds4_gpu_tensor_view(
                 g->cur,
@@ -50984,15 +51031,30 @@ static bool laguna_graph_forward_batch(
                     DS4_RMS_EPS) != 0;
         }
         if (ok) {
-            ok = laguna_graph_matmul(g->logits,
-                                     model,
-                                     weights->output,
-                                     g->output_norm,
-                                     1);
+            if (q8_lmhead_screen) {
+#ifdef __APPLE__
+                failed_stage = "Q8 lm-head screen";
+                ok = ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    g->lmhead_screen,
+                    g->argmax,
+                    NULL,
+                    model->map,
+                    model->size,
+                    weights->output->abs_offset,
+                    g->output_norm) != 0;
+                if (ok) g->q8_lmhead_screen_dispatched = true;
+#endif
+            } else {
+                ok = laguna_graph_matmul(g->logits,
+                                         model,
+                                         weights->output,
+                                         g->output_norm,
+                                         1);
+            }
         }
     }
 #ifdef __APPLE__
-    if (ok && g->gpu_argmax_enabled) {
+    if (ok && g->gpu_argmax_enabled && !q8_lmhead_screen) {
         failed_stage = "GPU argmax";
         ok = ds4_gpu_laguna_argmax_tensor(g->argmax,
                                           g->logits,
@@ -51013,6 +51075,11 @@ static bool laguna_graph_forward_batch(
                                  &g->gpu_argmax_result,
                                  sizeof(g->gpu_argmax_result)) != 0;
     }
+#ifdef __APPLE__
+    if (ok && g->q8_lmhead_screen_dispatched && !defer_completion) {
+        laguna_graph_report_q8_lmhead_screen(g);
+    }
+#endif
     if (ok && row_argmax_out && !defer_completion) {
         ok = ds4_gpu_tensor_read(g->spec_argmax,
                                  0,
@@ -51083,6 +51150,12 @@ static bool laguna_metal_gpu_argmax_debug_forces_full_logits(void) {
     }
     return false;
 }
+
+static bool laguna_metal_q8_lmhead_screen_requested(void) {
+    return metal_graph_tp_env_flag(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN", false);
+}
+
 #endif
 
 static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
@@ -51093,6 +51166,53 @@ static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
     g->gpu_argmax_enabled = true;
     return true;
 }
+
+#ifdef __APPLE__
+static void laguna_graph_report_q8_lmhead_screen(
+        const ds4_laguna_gpu_graph *g) {
+    if (!g || !g->lmhead_screen) {
+        return;
+    }
+    uint32_t candidate_rows = 0;
+    uint32_t candidate_row_blocks = 0;
+    uint32_t coarse_nonfinite = 0;
+    uint64_t screen_calls = 0;
+    uint64_t packed_bytes = 0;
+    double sidecopy_init_ms = 0.0;
+    uint32_t exact_row_blocks = 0;
+    int32_t winner_index = -1;
+    float winner_value = 0.0f;
+    if (ds4_gpu_laguna_q8_lmhead_screen_stats(
+            g->lmhead_screen,
+            &candidate_rows,
+            &candidate_row_blocks,
+            &coarse_nonfinite,
+            &screen_calls,
+            &packed_bytes,
+            &sidecopy_init_ms,
+            &exact_row_blocks,
+            &winner_index,
+            &winner_value)) {
+        uint32_t winner_bits = 0;
+        memcpy(&winner_bits, &winner_value, sizeof(winner_bits));
+        fprintf(stderr,
+                "ds4: Laguna Q8 lm-head screen stats screen_calls=%llu "
+                "candidates=%u row_blocks=%u exact_row_blocks=%u "
+                "nonfinite=%u packed_bytes=%llu sidecopy_init_ms=%.3f "
+                "winner=%d value=%g winner_bits=0x%08x\n",
+                (unsigned long long)screen_calls,
+                candidate_rows,
+                candidate_row_blocks,
+                exact_row_blocks,
+                coarse_nonfinite,
+                (unsigned long long)packed_bytes,
+                sidecopy_init_ms,
+                winner_index,
+                winner_value,
+                winner_bits);
+    }
+}
+#endif
 
 static int generate_laguna_metal_argmax(
         const ds4_model   *model,
@@ -51112,9 +51232,35 @@ static int generate_laguna_metal_argmax(
     }
 #if defined(__APPLE__)
     const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
+    const bool lmhead_screen_requested =
+        laguna_metal_q8_lmhead_screen_requested();
+    if (lmhead_screen_requested && !gpu_argmax_requested) {
+        fprintf(stderr,
+                "ds4: Laguna Q8 lm-head screen requires "
+                "DS4_METAL_LAGUNA_GPU_ARGMAX=1\n");
+        return 1;
+    }
+    const bool debug_forces_full_logits =
+        laguna_metal_gpu_argmax_debug_forces_full_logits();
     const bool gpu_argmax =
-        gpu_argmax_requested &&
-        !laguna_metal_gpu_argmax_debug_forces_full_logits();
+        gpu_argmax_requested && !debug_forces_full_logits;
+    if (lmhead_screen_requested && gpu_argmax &&
+        (!weights || !weights->output ||
+         weights->output->type != DS4_TENSOR_Q8_0 ||
+         weights->output->ndim < 2 ||
+         weights->output->dim[0] != 3072u ||
+         weights->output->dim[1] != 100352u)) {
+        fprintf(stderr,
+                "ds4: Laguna Q8 lm-head screen requires untied Q8_0 "
+                "output[100352,3072]\n");
+        return 1;
+    }
+    if (lmhead_screen_requested && !gpu_argmax &&
+        debug_forces_full_logits) {
+        fprintf(stderr,
+                "ds4: Laguna Q8 lm-head screen suppressed because full-logit "
+                "debug precedence is active\n");
+    }
     if (gpu_argmax && !ds4_gpu_laguna_argmax_available()) {
         /* This check runs before the first graph dispatch/KV mutation. A
          * missing prerequisite is an explicit failure; later kernel failures
@@ -51135,6 +51281,24 @@ static int generate_laguna_metal_argmax(
             return 1;
         }
         fprintf(stderr, "ds4: Laguna GPU argmax enabled (single-dispatch)\n");
+#ifdef __APPLE__
+        if (lmhead_screen_requested) {
+            g.lmhead_screen = ds4_gpu_laguna_q8_lmhead_screen_create(
+                model->map,
+                model->size,
+                weights->output->abs_offset,
+                weights->output->dim[0],
+                weights->output->dim[1]);
+            if (!g.lmhead_screen) {
+                fprintf(stderr,
+                        "ds4: Laguna Q8 lm-head screen requested but could not be prepared\n");
+                laguna_graph_free(&g);
+                return 1;
+            }
+            fprintf(stderr,
+                    "ds4: Laguna Q8 lm-head screen enabled (exact top-1 only)\n");
+        }
+#endif
     }
     float *logits = gpu_argmax ? NULL :
         xmalloc((size_t)DS4_N_VOCAB * sizeof(float));

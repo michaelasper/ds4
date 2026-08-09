@@ -53,6 +53,364 @@ kernel void kernel_laguna_argmax_f32(
     if (tid == 0u) out_idx[0] = (int32_t)best_indices[0];
 }
 
+/*
+ * Optional Q8_0 Laguna lm-head screen.
+ *
+ * The screen is deliberately kept separate from the ordinary logits path:
+ * it is only useful for the raw top-1 route, and its scratch values must
+ * never be mistaken for a complete logits row.  The packed block keeps the
+ * original half scale and the high nibble of each signed Q8 value.  For a
+ * raw byte q, u = (high_nibble(q) xor 8), and q0 = 16*u - 120.5.  Therefore
+ * |q-q0| <= 7.5 for every possible int8 q.
+ */
+struct ds4_metal_args_laguna_q8_lmhead_pack {
+    uint32_t n_blocks;
+    uint32_t packed_block_bytes;
+};
+
+struct ds4_metal_args_laguna_q8_lmhead_coarse {
+    uint32_t n_blocks;
+    uint32_t n_rows;
+    uint32_t packed_block_bytes;
+    uint32_t pad0;
+};
+
+struct ds4_metal_laguna_q8_lmhead_screen_stats {
+    atomic_uint candidate_rows;
+    atomic_uint candidate_row_blocks;
+    atomic_uint coarse_nonfinite;
+    atomic_uint exact_row_blocks;
+    float      winner_value;
+    int32_t    winner_index;
+    uint32_t   pad1;
+};
+
+static inline bool laguna_q8_screen_nonfinite(float value) {
+    const uint bits = as_type<uint>(value);
+    return (bits & 0x7f800000u) == 0x7f800000u;
+}
+
+static inline bool laguna_q8_screen_is_nan(float value) {
+    const uint bits = as_type<uint>(value);
+    return (bits & 0x7f800000u) == 0x7f800000u &&
+        (bits & 0x007fffffu) != 0u;
+}
+
+static inline bool laguna_q8_screen_x_safe(float value) {
+    const uint bits = as_type<uint>(value);
+    const uint abs_bits = bits & 0x7fffffffu;
+    if ((abs_bits & 0x7f800000u) == 0x7f800000u) return false;
+    if (abs_bits == 0u) return true;
+    /* 2^-78 <= |x| <= 2^90.  Outside this interval the coarse A path can
+     * lose a nonzero product to FTZ/fast-math; admit the whole row instead. */
+    return abs_bits >= 0x18800000u && abs_bits <= 0x6c800000u;
+}
+
+static inline float laguna_q8_screen_next_up(float value) {
+    const uint bits = as_type<uint>(value);
+    const uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits == 0u) return as_type<float>(0x00000001u);
+    if ((bits & 0x80000000u) != 0u) {
+        return as_type<float>(bits - 1u);
+    }
+    return as_type<float>(bits + 1u);
+}
+
+static inline uchar laguna_q8_screen_nibble(uchar raw) {
+    return (uchar)(((raw >> 4u) ^ 8u) & 0x0fu);
+}
+
+kernel void kernel_laguna_q8_lmhead_pack(
+        device const block_q8_0 *src [[buffer(1)]],
+        device uchar            *dst [[buffer(2)]],
+        constant ds4_metal_args_laguna_q8_lmhead_pack &args [[buffer(0)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n_blocks) return;
+
+    const device uchar *raw = (device const uchar *)(src + gid);
+    device uchar *packed = dst + (uint64_t)gid * args.packed_block_bytes;
+    packed[0] = raw[0];
+    packed[1] = raw[1];
+    for (uint i = 0u; i < 16u; i++) {
+        const uchar lo = laguna_q8_screen_nibble(raw[2u + i * 2u]);
+        const uchar hi = laguna_q8_screen_nibble(raw[3u + i * 2u]);
+        packed[2u + i] = (uchar)(lo | (uchar)(hi << 4u));
+    }
+}
+
+kernel void kernel_laguna_q8_lmhead_coarse(
+        constant ds4_metal_args_laguna_q8_lmhead_coarse &args [[buffer(0)]],
+        device const uchar *packed [[buffer(1)]],
+        device const float *x [[buffer(2)]],
+        device float *coarse [[buffer(3)]],
+        device float *delta [[buffer(4)]],
+        threadgroup char *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    constexpr short NR0 = 2;
+    constexpr short NW = N_SIMDWIDTH;
+    const short nsg = FC_mul_mv_nsg;
+    const uint r0 = tgpig.x * NR0;
+    const uint lane = (uint)sgitg * (uint)NW + (uint)tiisg;
+    const uint stride = (uint)nsg * (uint)NW;
+
+    float sum_c[NR0] = { 0.0f, 0.0f };
+    float sum_a[NR0] = { 0.0f, 0.0f };
+    bool unsafe[NR0] = { false, false };
+    for (uint block = lane; block < args.n_blocks; block += stride) {
+        const uint x0 = block * 32u;
+        const bool have0 = r0 < args.n_rows;
+        const bool have1 = r0 + 1u < args.n_rows;
+        const device uchar *src0 = have0 ? packed +
+            ((uint64_t)r0 * args.n_blocks + block) *
+                args.packed_block_bytes : nullptr;
+        const device uchar *src1 = have1 ? packed +
+            ((uint64_t)(r0 + 1u) * args.n_blocks + block) *
+                args.packed_block_bytes : nullptr;
+        const float d0 = have0 ? (float)*((device const half *)src0) : 0.0f;
+        const float d1 = have1 ? (float)*((device const half *)src1) : 0.0f;
+        if (have0 && laguna_q8_screen_nonfinite(d0)) unsafe[0] = true;
+        if (have1 && laguna_q8_screen_nonfinite(d1)) unsafe[1] = true;
+        float block_abs_x = 0.0f;
+        for (uint i = 0u; i < 16u; i++) {
+            const float x0v = x[x0 + i * 2u];
+            const float x1v = x[x0 + i * 2u + 1u];
+            if (!laguna_q8_screen_x_safe(x0v) ||
+                !laguna_q8_screen_x_safe(x1v)) {
+                if (have0) unsafe[0] = true;
+                if (have1) unsafe[1] = true;
+            }
+            block_abs_x += fabs(x0v) + fabs(x1v);
+            if (have0) {
+                const uchar packed_q = src0[2u + i];
+                const uint u0 = (uint)(packed_q & 0x0fu);
+                const uint u1 = (uint)(packed_q >> 4u);
+                const float q0 = 16.0f * (float)u0 - 120.5f;
+                const float q1 = 16.0f * (float)u1 - 120.5f;
+                sum_c[0] += d0 * q0 * x0v;
+                sum_c[0] += d0 * q1 * x1v;
+            }
+            if (have1) {
+                const uchar packed_q = src1[2u + i];
+                const uint u0 = (uint)(packed_q & 0x0fu);
+                const uint u1 = (uint)(packed_q >> 4u);
+                const float q0 = 16.0f * (float)u0 - 120.5f;
+                const float q1 = 16.0f * (float)u1 - 120.5f;
+                sum_c[1] += d1 * q0 * x0v;
+                sum_c[1] += d1 * q1 * x1v;
+            }
+        }
+        if (have0) sum_a[0] += fabs(d0) * block_abs_x;
+        if (have1) sum_a[1] += fabs(d1) * block_abs_x;
+    }
+
+    for (short row = 0; row < NR0; row++) {
+        if (unsafe[row]) {
+            sum_c[row] = as_type<float>(0x7fc00000u);
+            sum_a[row] = as_type<float>(0x7fc00000u);
+        }
+    }
+
+    threadgroup float *sh_c = (threadgroup float *)shmem;
+    threadgroup float *sh_a = sh_c + NR0 * NW;
+    for (short row = 0; row < NR0; row++) {
+        if (sgitg == 0) {
+            sh_c[row * NW + tiisg] = 0.0f;
+            sh_a[row * NW + tiisg] = 0.0f;
+        }
+        sum_c[row] = simd_sum(sum_c[row]);
+        sum_a[row] = simd_sum(sum_a[row]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (short row = 0; row < NR0; row++) {
+        if (tiisg == 0) {
+            sh_c[row * NW + sgitg] = sum_c[row];
+            sh_a[row * NW + sgitg] = sum_a[row];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (short row = 0; row < NR0; row++) {
+        const float c = simd_sum(sh_c[row * NW + tiisg]);
+        const float a = simd_sum(sh_a[row * NW + tiisg]);
+        if (tiisg == 0 && sgitg == 0 && r0 + row < args.n_rows) {
+            coarse[r0 + row] = c;
+            /* The factor eight includes the 0.5*A rounding surplus.  Any
+             * nonfinite operand/result is admitted by the candidate pass. */
+            delta[r0 + row] = 8.0f * a;
+        }
+    }
+}
+
+/* The stock Q8 helper writes one contiguous NR0=2 pair.  This seed kernel
+ * selects the coarse winner dynamically, then calls that helper verbatim so
+ * the exact seed follows the production reduction tree. */
+kernel void kernel_laguna_q8_lmhead_seed_exact(
+        constant ds4_metal_args_mul_mv &args [[buffer(0)]],
+        device const char *src0 [[buffer(1)]],
+        device const char *src1 [[buffer(2)]],
+        device char *dst [[buffer(3)]],
+        device const int32_t *seed_idx [[buffer(4)]],
+        threadgroup char *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const int row = seed_idx[0];
+    if (row < 0 || row >= args.ne01) return;
+    kernel_mul_mv_q8_0_f32_impl<2, constant ds4_metal_args_mul_mv &>(
+        args, src0, src1, dst, shmem,
+        uint3((uint)row / 2u, 0u, 0u), tiisg, sgitg);
+}
+
+kernel void kernel_laguna_q8_lmhead_candidates(
+        constant uint &n_rows [[buffer(0)]],
+        constant uint &n_blocks [[buffer(1)]],
+        device const float *coarse [[buffer(2)]],
+        device const float *delta [[buffer(3)]],
+        device const float *exact_values [[buffer(4)]],
+        device const int32_t *seed_idx [[buffer(5)]],
+        device uchar *candidate [[buffer(6)]],
+        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(7)]],
+        constant uint &collect_stats [[buffer(8)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= n_rows) return;
+    const int32_t seed = seed_idx[0];
+    float threshold = -1.0e30f;
+    bool seed_nonfinite = false;
+    if (seed >= 0 && (uint)seed < n_rows) {
+        const float seed_value = exact_values[(uint)seed];
+        seed_nonfinite = laguna_q8_screen_nonfinite(seed_value);
+        if (!seed_nonfinite && seed_value > threshold) {
+            threshold = seed_value;
+        }
+    }
+    const float c = coarse[gid];
+    const float d = delta[gid];
+    const bool nonfinite = laguna_q8_screen_nonfinite(c) ||
+        laguna_q8_screen_nonfinite(d) ||
+        laguna_q8_screen_nonfinite(threshold);
+    const float upper = c + d;
+    const float outward_upper = laguna_q8_screen_nonfinite(upper) ?
+        upper : laguna_q8_screen_next_up(upper);
+    /* A nonfinite exact seed invalidates the threshold for every row.  This
+     * is deliberately broader than the per-row coarse check: the seed is
+     * the only value available before screening, and +/-Inf are valid stock
+     * argmax values (only NaNs are ignored). */
+    const bool admit = gid == 0u || seed_nonfinite || (int32_t)gid == seed ||
+        nonfinite ||
+        laguna_q8_screen_nonfinite(outward_upper) ||
+        outward_upper >= threshold;
+    candidate[gid] = admit ? (uchar)1 : (uchar)0;
+    if (collect_stats && nonfinite) {
+        atomic_fetch_add_explicit(&stats->coarse_nonfinite, 1u,
+                                  memory_order_relaxed);
+    }
+    if (collect_stats && admit) {
+        atomic_fetch_add_explicit(&stats->candidate_rows, 1u,
+                                  memory_order_relaxed);
+        atomic_fetch_add_explicit(&stats->candidate_row_blocks, n_blocks,
+                                  memory_order_relaxed);
+    }
+}
+
+/* Exact values are only written for admitted rows.  Non-admitted rows may
+ * retain arbitrary scratch bytes; the final reducer consults candidate first.
+ * Calling the shared helper is intentional: it preserves the stock Q8
+ * accumulation and simd/workgroup reduction order. */
+kernel void kernel_laguna_q8_lmhead_exact_candidates(
+        constant ds4_metal_args_mul_mv &args [[buffer(0)]],
+        device const char *src0 [[buffer(1)]],
+        device const char *src1 [[buffer(2)]],
+        device char *dst [[buffer(3)]],
+        device const uchar *candidate [[buffer(4)]],
+        device const int32_t *seed_idx [[buffer(5)]],
+        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(6)]],
+        constant uint &collect_stats [[buffer(7)]],
+        threadgroup char *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const uint r0 = tgpig.x * 2u;
+    if (r0 >= (uint)args.ne01) return;
+    /* seed_exact already evaluated this complete NR0=2 pair.  Reuse those
+     * values instead of issuing duplicate exact traffic; the host initializes
+     * exact_row_blocks with this mandatory pair when trace collection is on. */
+    const uint seed_pair = ((uint)seed_idx[0] / 2u) * 2u;
+    if (r0 == seed_pair) return;
+    if (candidate[r0] == 0u &&
+        (r0 + 1u >= (uint)args.ne01 || candidate[r0 + 1u] == 0u)) {
+        return;
+    }
+    if (collect_stats && tiisg == 0u && sgitg == 0u) {
+        const uint rows = r0 + 1u < (uint)args.ne01 ? 2u : 1u;
+        atomic_fetch_add_explicit(&stats->exact_row_blocks,
+                                  rows * ((uint)args.ne00 / 32u),
+                                  memory_order_relaxed);
+    }
+    kernel_mul_mv_q8_0_f32_impl<2, constant ds4_metal_args_mul_mv &>(
+        args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+}
+
+kernel void kernel_laguna_q8_lmhead_argmax_candidates(
+        device const float *values [[buffer(0)]],
+        device const uchar *candidate [[buffer(1)]],
+        device int32_t *out_idx [[buffer(2)]],
+        device float *out_value [[buffer(3)]],
+        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(4)]],
+        constant uint &n_rows [[buffer(5)]],
+        constant uint &collect_stats [[buffer(6)]],
+        threadgroup float *best_values [[threadgroup(0)]],
+        threadgroup uint *best_indices [[threadgroup(1)]],
+        uint tid [[thread_index_in_threadgroup]],
+        ushort3 ntg_u [[threads_per_threadgroup]]) {
+    const uint nth = (uint)ntg_u.x;
+    float best_value = -1.0e30f;
+    uint best_index = 0u;
+    for (uint i = tid; i < n_rows; i += nth) {
+        if (candidate[i] == 0u) continue;
+        const float raw_value = values[i];
+        const float value = raw_value == 0.0f ? 0.0f : raw_value;
+        /* sample_argmax ignores NaN, but accepts +/-Inf as ordinary ordered
+         * values.  Do not use the broader nonfinite predicate here. */
+        if (laguna_q8_screen_is_nan(value)) continue;
+        if (value > best_value ||
+            (value == best_value && i < best_index)) {
+            best_value = value;
+            best_index = i;
+        }
+    }
+    best_values[tid] = best_value;
+    best_indices[tid] = best_index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint step = nth >> 1u; step != 0u; step >>= 1u) {
+        if (tid < step) {
+            const float other_value = best_values[tid + step];
+            const uint other_index = best_indices[tid + step];
+            if (other_value > best_values[tid] ||
+                (other_value == best_values[tid] &&
+                 other_index < best_indices[tid])) {
+                best_values[tid] = other_value;
+                best_indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) {
+        const uint winner = best_indices[0];
+        const float raw_winner = values[winner];
+        out_idx[0] = (int32_t)winner;
+        /* Return the exact selected row's bits, including a stock -0 or a
+         * value below the sentinel when index zero remains selected.  The
+         * normalized value above is used only for ordering. */
+        out_value[0] = raw_winner;
+        if (collect_stats) {
+            stats->winner_index = (int32_t)winner;
+            stats->winner_value = raw_winner;
+        }
+    }
+}
+
 struct ds4_metal_args_laguna_norm_rope {
     uint32_t n_tokens;
     uint32_t n_head;
