@@ -4286,6 +4286,241 @@ static void test_cuda_laguna_moe_decode_prefill(void) {
 
 #if defined(__APPLE__)
 
+static void test_fill_metal_glm_qmv_weights(
+        uint8_t *weights,
+        uint32_t type,
+        uint32_t n_expert,
+        uint32_t n_rows,
+        uint32_t blocks,
+        uint32_t seed) {
+    const uint32_t row_bytes =
+        type == 10u ? 84u * blocks :
+        type == 11u ? 110u * blocks : 144u * blocks;
+    for (uint32_t expert = 0; expert < n_expert; expert++) {
+        for (uint32_t row = 0; row < n_rows; row++) {
+            uint8_t *dst = weights +
+                ((uint64_t)expert * n_rows + row) * row_bytes;
+            for (uint32_t block = 0; block < blocks; block++) {
+                uint8_t *b = dst + (uint64_t)block * (row_bytes / blocks);
+                const uint32_t block_bytes = row_bytes / blocks;
+                for (uint32_t i = 0; i < block_bytes; i++) {
+                    b[i] = (uint8_t)(seed * 17u + expert * 29u +
+                                     row * 7u + block * 11u + i * 13u);
+                }
+                if (type == 10u) {
+                    const uint16_t d = 0x3c00u;
+                    const uint16_t dmin = 0x3800u;
+                    memcpy(b + 80u, &d, sizeof(d));
+                    memcpy(b + 82u, &dmin, sizeof(dmin));
+                } else if (type == 11u) {
+                    const uint16_t d = 0x3c00u;
+                    memcpy(b + 108u, &d, sizeof(d));
+                } else {
+                    const uint16_t d = 0x3c00u;
+                    const uint16_t dmin = 0x3800u;
+                    memcpy(b + 0u, &d, sizeof(d));
+                    memcpy(b + 2u, &dmin, sizeof(dmin));
+                }
+            }
+        }
+    }
+}
+
+static void test_metal_glm_qmv_r1_case(uint32_t type) {
+    const uint32_t n_total_expert = 2u;
+    const uint32_t n_expert = 2u;
+    const uint32_t in_dim = 512u;
+    const uint32_t mid_dim = 256u;
+    const uint32_t out_dim = 257u;
+    const uint32_t blocks = in_dim / 256u;
+    const uint32_t block_bytes =
+        type == 10u ? 84u : type == 11u ? 110u : 144u;
+    const uint64_t row_bytes = (uint64_t)blocks * block_bytes;
+    const uint64_t gate_expert_bytes = (uint64_t)mid_dim * row_bytes;
+    const uint64_t down_expert_bytes = (uint64_t)out_dim * row_bytes;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t gate_offset = 0u;
+    const uint64_t up_offset = test_round_up_u64(
+        (uint64_t)n_total_expert * gate_expert_bytes, page);
+    const uint64_t down_offset = test_round_up_u64(
+        up_offset + (uint64_t)n_total_expert * gate_expert_bytes, page);
+    const uint64_t model_size = test_round_up_u64(
+        down_offset + (uint64_t)n_total_expert * down_expert_bytes, page);
+
+    void *model = NULL;
+    ds4_gpu_tensor *x = NULL;
+    ds4_gpu_tensor *selected = NULL;
+    ds4_gpu_tensor *weights = NULL;
+    ds4_gpu_tensor *mid = NULL;
+    ds4_gpu_tensor *out = NULL;
+    float *x_host = NULL;
+    int32_t *selected_host = NULL;
+    float *weights_host = NULL;
+    float *mid_init = NULL;
+    float *out_init = NULL;
+    float *mid_baseline = NULL;
+    float *mid_r1 = NULL;
+    float *out_baseline = NULL;
+    float *out_r1 = NULL;
+    char *saved_r1 = NULL;
+    bool env_saved = false;
+
+    TEST_ASSERT(posix_memalign(&model, (size_t)page, (size_t)model_size) == 0);
+    if (!model) goto cleanup;
+    memset(model, 0, (size_t)model_size);
+    test_fill_metal_glm_qmv_weights(
+        (uint8_t *)model + gate_offset, type, n_total_expert, mid_dim,
+        blocks, 1u);
+    test_fill_metal_glm_qmv_weights(
+        (uint8_t *)model + up_offset, type, n_total_expert, mid_dim,
+        blocks, 3u);
+    test_fill_metal_glm_qmv_weights(
+        (uint8_t *)model + down_offset, type, n_total_expert, out_dim,
+        blocks, 5u);
+
+    x = ds4_gpu_tensor_alloc((uint64_t)in_dim * sizeof(float));
+    selected = ds4_gpu_tensor_alloc((uint64_t)n_expert * sizeof(int32_t));
+    weights = ds4_gpu_tensor_alloc((uint64_t)n_expert * sizeof(float));
+    mid = ds4_gpu_tensor_alloc(
+        (uint64_t)n_expert * mid_dim * sizeof(float));
+    out = ds4_gpu_tensor_alloc((uint64_t)out_dim * sizeof(float));
+    x_host = malloc((size_t)in_dim * sizeof(float));
+    selected_host = malloc((size_t)n_expert * sizeof(int32_t));
+    weights_host = malloc((size_t)n_expert * sizeof(float));
+    mid_init = malloc((size_t)n_expert * mid_dim * sizeof(float));
+    out_init = malloc((size_t)out_dim * sizeof(float));
+    mid_baseline = malloc((size_t)n_expert * mid_dim * sizeof(float));
+    mid_r1 = malloc((size_t)n_expert * mid_dim * sizeof(float));
+    out_baseline = malloc((size_t)out_dim * sizeof(float));
+    out_r1 = malloc((size_t)out_dim * sizeof(float));
+    TEST_ASSERT(x && selected && weights && mid && out && x_host &&
+                selected_host && weights_host && mid_init && out_init &&
+                mid_baseline && mid_r1 && out_baseline && out_r1);
+    if (!x || !selected || !weights || !mid || !out || !x_host ||
+        !selected_host || !weights_host || !mid_init || !out_init ||
+        !mid_baseline || !mid_r1 || !out_baseline || !out_r1) {
+        goto cleanup;
+    }
+
+    for (uint32_t k = 0; k < in_dim; k++) {
+        x_host[k] = 0.125f + (float)((k * 19u + (k >> 3u) * 7u) % 97u) /
+                   128.0f;
+    }
+    selected_host[0] = 0;
+    selected_host[1] = -1;
+    weights_host[0] = 0.625f;
+    weights_host[1] = 0.375f;
+    for (uint32_t i = 0; i < n_expert * mid_dim; i++) {
+        mid_init[i] = 0.0f;
+    }
+    for (uint32_t i = 0; i < out_dim; i++) out_init[i] = 0.0f;
+
+    TEST_ASSERT(ds4_gpu_set_model_map(model, model_size) != 0);
+    saved_r1 = test_save_env("DS4_METAL_GLM_QMV_R1");
+    env_saved = true;
+    TEST_ASSERT(unsetenv("DS4_METAL_GLM_QMV_R1") == 0);
+
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    x, 0, x_host, (uint64_t)in_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    selected, 0, selected_host,
+                    (uint64_t)n_expert * sizeof(int32_t)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    weights, 0, weights_host,
+                    (uint64_t)n_expert * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    mid, 0, mid_init,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    out, 0, out_init, (uint64_t)out_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_glm_routed_moe_one_tensor(
+                    out, mid, model, model_size,
+                    gate_offset, up_offset, down_offset,
+                    type, type, type,
+                    gate_expert_bytes, row_bytes,
+                    gate_expert_bytes, row_bytes,
+                    down_expert_bytes, row_bytes,
+                    in_dim, mid_dim, out_dim,
+                    selected, weights,
+                    n_total_expert, n_expert, 0u, x, true) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    mid, 0, mid_baseline,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    out, 0, out_baseline,
+                    (uint64_t)out_dim * sizeof(float)) != 0);
+
+    TEST_ASSERT(setenv("DS4_METAL_GLM_QMV_R1", "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    mid, 0, mid_init,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    out, 0, out_init, (uint64_t)out_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_glm_routed_moe_one_tensor(
+                    out, mid, model, model_size,
+                    gate_offset, up_offset, down_offset,
+                    type, type, type,
+                    gate_expert_bytes, row_bytes,
+                    gate_expert_bytes, row_bytes,
+                    down_expert_bytes, row_bytes,
+                    in_dim, mid_dim, out_dim,
+                    selected, weights,
+                    n_total_expert, n_expert, 0u, x, true) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    mid, 0, mid_r1,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    out, 0, out_r1,
+                    (uint64_t)out_dim * sizeof(float)) != 0);
+
+    if (env_saved) {
+        test_restore_env("DS4_METAL_GLM_QMV_R1", saved_r1);
+        saved_r1 = NULL;
+        env_saved = false;
+    }
+    {
+        const test_float_compare_stats mid_stats = test_compare_float_bits(
+            mid_baseline, mid_r1, (size_t)n_expert * mid_dim);
+        const test_float_compare_stats out_stats = test_compare_float_bits(
+            out_baseline, out_r1, out_dim);
+        fprintf(stderr,
+                "ds4-test: GLM QMV R1 Q%u exact mid=%zu/%u out=%zu/%u "
+                "max_ulp=%u/%u max_abs=%g/%g\n",
+                type == 10u ? 2u : type == 11u ? 3u : 4u,
+                mid_stats.mismatch_count, n_expert * mid_dim,
+                out_stats.mismatch_count, out_dim,
+                mid_stats.max_ulp, out_stats.max_ulp,
+                mid_stats.max_abs, out_stats.max_abs);
+        TEST_ASSERT(mid_stats.mismatch_count == 0);
+        TEST_ASSERT(out_stats.mismatch_count == 0);
+    }
+
+cleanup:
+    if (env_saved) test_restore_env("DS4_METAL_GLM_QMV_R1", saved_r1);
+    free(out_r1);
+    free(out_baseline);
+    free(mid_r1);
+    free(mid_baseline);
+    free(out_init);
+    free(mid_init);
+    free(weights_host);
+    free(selected_host);
+    free(x_host);
+    ds4_gpu_tensor_free(out);
+    ds4_gpu_tensor_free(mid);
+    ds4_gpu_tensor_free(weights);
+    ds4_gpu_tensor_free(selected);
+    ds4_gpu_tensor_free(x);
+    free(model);
+}
+
+static void test_metal_glm_qmv_r1_exact(void) {
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    test_metal_glm_qmv_r1_case(10u);
+    test_metal_glm_qmv_r1_case(11u);
+    test_metal_glm_qmv_r1_case(12u);
+}
+
 static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
     typedef struct {
         uint32_t n_tokens;
@@ -5928,6 +6163,7 @@ static void test_metal_kernel_group(void) {
     test_dspark_cache_window_crop();
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
+    test_metal_glm_qmv_r1_exact();
     test_metal_q8_0_output_nr4_exact();
     test_metal_f16_compressor_pair_state_store_exact();
     test_metal_compressor_ape_add_exact();
@@ -7651,6 +7887,11 @@ static const ds4_test_entry test_entries[] = {
     {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors},
     {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4},
     {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group},
+#if defined(__APPLE__)
+    {"--metal-glm-qmv-r1", "metal-glm-qmv-r1",
+     "resident decode-only GLM QMV one-row-per-SIMD exactness",
+     test_metal_glm_qmv_r1_exact},
+#endif
     {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence},
     {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness},
     {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth},
@@ -7682,6 +7923,7 @@ static void test_print_help(const char *prog) {
     puts("  DS4_TEST_SSD_STREAMING_CACHE_EXPERTS=N  Streaming routed expert cache count.");
     puts("  DS4_TEST_SSD_STREAMING_COLD=1  Skip streaming hot expert preload.");
     puts("  DS4_METAL_DISABLE_STREAMING_COLD_DECODE_PREFILL=1  Force canonical streamed cold prefill.");
+    puts("  DS4_METAL_GLM_QMV_R1=1  Enable resident decode-only one-row-per-SIMD GLM QMV.");
     puts("  DS4_TEST_LONG_PROMPT=FILE  Rendered long-context story fact prompt.");
     puts("  DS4_TEST_VECTOR_FILE=FILE  Official fixture. Default: flash-0731/official.vec.");
     puts("  DS4_TEST_LOCAL_GOLDEN_FILE=FILE  Local fixture. Default: flash-0731/local-golden.vec.");

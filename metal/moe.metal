@@ -735,10 +735,40 @@ kernel void kernel_glm_q2_K_pair_swiglu_f32(
         tiisg, sgitg);
 }
 
+/* Decode-only R1 mapping: keep two SIMD groups per 64-thread threadgroup,
+ * but assign one output row to each SIMD group. The arithmetic helper is the
+ * same implementation as the baseline; only the independent row tile and
+ * its host grid are changed. */
+kernel void kernel_glm_q2_K_pair_swiglu_r1_f32(
+        constant ds4_metal_glm_routed_moe_args &args,
+        device const char *gate,
+        device const char *up,
+        device const float *x,
+        device const int32_t *selected,
+        device const float *weights,
+        device float *mid,
+        threadgroup float *scratch [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const uint slot = tgpig.y;
+    const uint token = tgpig.z;
+    if (slot >= args.n_expert_used || token >= args.n_tokens) return;
+    const uint64_t selected_off = (uint64_t)token * args.n_expert_used + slot;
+    const int expert = selected[selected_off];
+    if (!ds4_tp_owns_expert(expert, args.n_total_expert,
+                            args.tp_rank, args.tp_world)) return;
+    glm_q2_K_pair_swiglu_simd_f32_impl<1>(
+        args, gate, up, x, weights, mid, scratch,
+        tgpig, slot, token, selected_off, expert - args.tp_expert_base,
+        tiisg, sgitg);
+}
+
 /* Two adjacent Q3_K rows share one activation read. Each SIMD lane follows
  * one quarter of the GGML Q3_K block layout, then the caller reduces the
  * partial dot products across the SIMD group. */
-static inline float2 ds4_glm_q3_K_dot2(
+template <short N_R0>
+static inline float2 ds4_glm_q3_K_dotN(
         device const char *rows,
         uint64_t row_bytes,
         uint in_dim,
@@ -784,7 +814,7 @@ static inline float2 ds4_glm_q3_K_dot2(
             yl[l + 24] = y1[l + 48];
         }
 
-        for (short row = 0; row < N_R0_Q3_K; row++) {
+        for (short row = 0; row < N_R0; row++) {
             device const block_q3_K *x =
                 (device const block_q3_K *)(rows + (uint64_t)row * row_bytes);
             device const ushort *q =
@@ -859,6 +889,16 @@ static inline float2 ds4_glm_q3_K_dot2(
     return (sum1 + 0.25f * sum2) / (float)(1 << shift);
 }
 
+static inline float2 ds4_glm_q3_K_dot2(
+        device const char *rows,
+        uint64_t row_bytes,
+        uint in_dim,
+        device const float *y,
+        ushort tiisg) {
+    return ds4_glm_q3_K_dotN<N_R0_Q3_K>(
+        rows, row_bytes, in_dim, y, tiisg);
+}
+
 kernel void kernel_glm_q3_K_pair_swiglu_f32(
         constant ds4_metal_glm_routed_moe_args &args,
         device const char *gate,
@@ -917,6 +957,64 @@ kernel void kernel_glm_q3_K_pair_swiglu_f32(
             mid[mid_base + row0 + (uint)row] =
                 sw * u * weights[selected_off];
         }
+    }
+
+    (void)scratch;
+}
+
+kernel void kernel_glm_q3_K_pair_swiglu_r1_f32(
+        constant ds4_metal_glm_routed_moe_args &args,
+        device const char *gate,
+        device const char *up,
+        device const float *x,
+        device const int32_t *selected,
+        device const float *weights,
+        device float *mid,
+        threadgroup float *scratch [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NSG = 2;
+    const uint row0 =
+        ((uint)tgpig.x * (uint)NSG + (uint)sgitg);
+    const uint slot = tgpig.y;
+    const uint token = tgpig.z;
+    if (row0 >= args.mid_dim ||
+        slot >= args.n_expert_used ||
+        token >= args.n_tokens) {
+        return;
+    }
+
+    const uint64_t selected_off =
+        (uint64_t)token * args.n_expert_used + slot;
+    const uint64_t mid_base =
+        (uint64_t)token * args.mid_token_stride +
+        (uint64_t)slot * args.mid_dim;
+    const int expert = selected[selected_off];
+    if (!ds4_tp_owns_expert(expert, args.n_total_expert,
+                            args.tp_rank, args.tp_world)) {
+        return;
+    }
+
+    const uint owned_expert = (uint)(expert - args.tp_expert_base);
+    const uint64_t gate_base =
+        (uint64_t)owned_expert * args.gate_expert_bytes +
+        (uint64_t)row0 * args.gate_row_bytes;
+    const uint64_t up_base =
+        (uint64_t)owned_expert * args.up_expert_bytes +
+        (uint64_t)row0 * args.up_row_bytes;
+    device const float *token_x =
+        x + (uint64_t)token * args.in_dim;
+    const float2 gate_dot = ds4_glm_q3_K_dotN<1>(
+        gate + gate_base, args.gate_row_bytes, args.in_dim, token_x, tiisg);
+    const float2 up_dot = ds4_glm_q3_K_dotN<1>(
+        up + up_base, args.up_row_bytes, args.in_dim, token_x, tiisg);
+
+    const float g = simd_sum(gate_dot[0]);
+    const float u = simd_sum(up_dot[0]);
+    if (tiisg == 0u) {
+        const float sw = g / (1.0f + exp(-g));
+        mid[mid_base + row0] = sw * u * weights[selected_off];
     }
 
     (void)scratch;
@@ -2158,7 +2256,7 @@ kernel void kernel_glm_q3_K_down_f32(
     (void)scratch;
 }
 
-kernel void kernel_glm_q2_K_down_f32(
+kernel void kernel_glm_q3_K_down_r1_f32(
         constant ds4_metal_glm_routed_moe_args &args,
         device const char *down,
         device const int32_t *selected,
@@ -2169,7 +2267,57 @@ kernel void kernel_glm_q2_K_down_f32(
         ushort tiisg [[thread_index_in_simdgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
     const short NSG = 2;
-    const uint row0 = ((uint)tgpig.x * (uint)NSG + (uint)sgitg) * N_R0_Q2_K;
+    const uint row0 =
+        ((uint)tgpig.x * (uint)NSG + (uint)sgitg);
+    const uint token = tgpig.y;
+    if (row0 >= args.out_dim || token >= args.n_tokens) return;
+
+    const uint64_t selected_base =
+        (uint64_t)token * args.n_expert_used;
+    const uint64_t mid_base =
+        (uint64_t)token * args.mid_token_stride;
+    float2 sum = {0.0f, 0.0f};
+    for (uint slot = 0; slot < args.n_expert_used; slot++) {
+        const int expert = selected[selected_base + slot];
+        if (!ds4_tp_owns_expert(expert, args.n_total_expert,
+                                args.tp_rank, args.tp_world)) {
+            continue;
+        }
+        const uint owned_expert = (uint)(expert - args.tp_expert_base);
+        const uint64_t down_base =
+            (uint64_t)owned_expert * args.down_expert_bytes +
+            (uint64_t)row0 * args.down_row_bytes;
+        device const float *slot_mid =
+            mid + mid_base + (uint64_t)slot * args.mid_dim;
+        sum += ds4_glm_q3_K_dotN<1>(
+            down + down_base,
+            args.down_row_bytes,
+            args.mid_dim,
+            slot_mid,
+            tiisg);
+    }
+
+    const float value = simd_sum(sum[0]);
+    if (tiisg == 0u) {
+        out[(uint64_t)token * args.out_dim + row0] = value;
+    }
+
+    (void)scratch;
+}
+
+template <short N_R0>
+static inline void glm_q2_K_down_simd_f32_impl(
+        constant ds4_metal_glm_routed_moe_args &args,
+        device const char *down,
+        device const int32_t *selected,
+        device const float *mid,
+        device float *out,
+        threadgroup float *scratch,
+        uint3 tgpig,
+        ushort tiisg,
+        ushort sgitg) {
+    const short NSG = 2;
+    const uint row0 = ((uint)tgpig.x * (uint)NSG + (uint)sgitg) * N_R0;
     const uint token = tgpig.y;
     if (row0 >= args.out_dim || token >= args.n_tokens) return;
 
@@ -2179,7 +2327,7 @@ kernel void kernel_glm_q2_K_down_f32(
     const short ir = it % 4;
     const short is = (8 * ir) / 16;
     const int nb = args.mid_dim / QK_K;
-    float sumf[N_R0_Q2_K] = {0.f};
+    float sumf[N_R0] = {0.f};
     const uint64_t selected_base = (uint64_t)token * args.n_expert_used;
     const uint64_t mid_base = (uint64_t)token * args.mid_token_stride;
     for (uint slot = 0; slot < args.n_expert_used; slot++) {
@@ -2207,7 +2355,7 @@ kernel void kernel_glm_q2_K_down_f32(
             device const uint8_t *sc = (device const uint8_t *)x[ib].scales + 8 * iq + is;
             device const uint16_t *qs = (device const uint16_t *)x[ib].qs + 16 * iq + 4 * ir;
             device const half *dh = &x[ib].d;
-            for (short row = 0; row < N_R0_Q2_K && row0 + (uint)row < args.out_dim; row++) {
+            for (short row = 0; row < N_R0 && row0 + (uint)row < args.out_dim; row++) {
                 float4 acc1 = {0.f, 0.f, 0.f, 0.f};
                 float4 acc2 = {0.f, 0.f, 0.f, 0.f};
 
@@ -2240,7 +2388,7 @@ kernel void kernel_glm_q2_K_down_f32(
         }
     }
 
-    for (short row = 0; row < N_R0_Q2_K && row0 + (uint)row < args.out_dim; row++) {
+    for (short row = 0; row < N_R0 && row0 + (uint)row < args.out_dim; row++) {
         const float sum_all = simd_sum(sumf[row]);
         if (tiisg == 0u) {
             out[(uint64_t)token * args.out_dim + row0 + (uint)row] = sum_all;
@@ -2248,6 +2396,34 @@ kernel void kernel_glm_q2_K_down_f32(
     }
 
     (void)scratch;
+}
+
+kernel void kernel_glm_q2_K_down_f32(
+        constant ds4_metal_glm_routed_moe_args &args,
+        device const char *down,
+        device const int32_t *selected,
+        device const float *mid,
+        device float *out,
+        threadgroup float *scratch [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    glm_q2_K_down_simd_f32_impl<N_R0_Q2_K>(
+        args, down, selected, mid, out, scratch, tgpig, tiisg, sgitg);
+}
+
+kernel void kernel_glm_q2_K_down_r1_f32(
+        constant ds4_metal_glm_routed_moe_args &args,
+        device const char *down,
+        device const int32_t *selected,
+        device const float *mid,
+        device float *out,
+        threadgroup float *scratch [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    glm_q2_K_down_simd_f32_impl<1>(
+        args, down, selected, mid, out, scratch, tgpig, tiisg, sgitg);
 }
 
 kernel void kernel_glm_q2_K_addr_down_f32(
@@ -2424,6 +2600,7 @@ kernel void kernel_glm_q4_K_addr_down_f32(
     }
 }
 
+template <short N_R0>
 static inline void glm_q4_K_down_simd_f32_impl(
         constant ds4_metal_glm_routed_moe_args &args,
         device const char *down,
@@ -2434,7 +2611,7 @@ static inline void glm_q4_K_down_simd_f32_impl(
         ushort tiisg,
         ushort sgitg) {
     const short NSG = 2;
-    const short nr0 = N_R0_Q4_K;
+    const short nr0 = N_R0;
     const int nb = args.mid_dim / QK_K;
     const uint row0 = ((uint)tgpig.x * (uint)NSG + (uint)sgitg) * (uint)nr0;
     const uint token = tgpig.y;
@@ -2449,7 +2626,7 @@ static inline void glm_q4_K_down_simd_f32_impl(
     const short iq = it / 4;
     const short ir = it % 4;
 
-    float sumf[N_R0_Q4_K] = {0.f};
+    float sumf[N_R0] = {0.f};
     uint16_t sc16[4];
     thread const uint8_t *sc8 = (thread const uint8_t *)sc16;
 
@@ -2536,7 +2713,20 @@ kernel void kernel_glm_q4_K_down_simd_f32(
         uint3 tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    glm_q4_K_down_simd_f32_impl(
+    glm_q4_K_down_simd_f32_impl<N_R0_Q4_K>(
+        args, down, selected, mid, out, tgpig, tiisg, sgitg);
+}
+
+kernel void kernel_glm_q4_K_down_r1_simd_f32(
+        constant ds4_metal_glm_routed_moe_args &args,
+        device const char *down,
+        device const int32_t *selected,
+        device const float *mid,
+        device float *out,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    glm_q4_K_down_simd_f32_impl<1>(
         args, down, selected, mid, out, tgpig, tiisg, sgitg);
 }
 
@@ -2766,11 +2956,11 @@ kernel void kernel_laguna_q4_K_routed_shared_down_f32(
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
     const uint3 local_grid = uint3(tgpig.x, 0u, 0u);
     if (tgpig.y == 0u) {
-        glm_q4_K_down_simd_f32_impl(
+        glm_q4_K_down_simd_f32_impl<N_R0_Q4_K>(
             routed_args, routed_down, selected, routed_mid, routed_out,
             local_grid, tiisg, sgitg);
     } else if (tgpig.y == 1u) {
-        glm_q4_K_down_simd_f32_impl(
+        glm_q4_K_down_simd_f32_impl<N_R0_Q4_K>(
             shared_args, shared_down, shared_selected, shared_mid, shared_out,
             local_grid, tiisg, sgitg);
     }
