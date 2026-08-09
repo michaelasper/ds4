@@ -27016,9 +27016,8 @@ extern "C" int ds4_gpu_add3_tensor(
     return cuda_ok(cudaGetLastError(), "add3 launch");
 }
 
-/* Fused decode residual: sum_out = a + b; norm_out = rmsnorm(sum) * w.
- * Single row, one block (two-pass over n with a shared reduction). */
-__global__ static void glm_add_rms_norm_weight_kernel(
+/* Preserve the legacy single-row GLM fused reduction for the existing API. */
+__global__ static void glm_add_rms_norm_weight_kernel_single(
         float *norm_out,
         float *sum_out,
         const float *a,
@@ -27054,6 +27053,90 @@ __global__ static void glm_add_rms_norm_weight_kernel(
     }
 }
 
+/* Fused residual for verifier rows: sum_out = a + b;
+ * norm_out = rmsnorm(sum) * w.  The reduction and final multiply match
+ * rms_norm_weight_kernel so exact rows see the same values as the
+ * two-dispatch sequence. */
+__global__ static void glm_add_rms_norm_weight_kernel_rows(
+        float *norm_out,
+        float *sum_out,
+        const float *a,
+        const float *b,
+        const float *w,
+        uint32_t n,
+        uint32_t rows,
+        float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= rows) return;
+    const uint32_t tid = threadIdx.x;
+    const float *arow = a + (uint64_t)row * n;
+    const float *brow = b + (uint64_t)row * n;
+    float *sumrow = sum_out + (uint64_t)row * n;
+    float *normrow = norm_out + (uint64_t)row * n;
+    __shared__ float partial[256];
+    float sumsq = 0.0f;
+    for (uint32_t i = tid; i < n; i += blockDim.x) {
+        const float v = arow[i] + brow[i];
+        sumrow[i] = v;
+        sumsq += v * v;
+    }
+    partial[tid] = sumsq;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        __syncthreads();
+    }
+    const float scale = rsqrtf(partial[0] / (float)n + eps);
+    for (uint32_t i = tid; i < n; i += blockDim.x) {
+        normrow[i] = (sumrow[i] * scale) * w[i];
+    }
+}
+
+extern "C" int ds4_gpu_add_rms_norm_weight_rows_tensor(
+        ds4_gpu_tensor       *norm_out,
+        ds4_gpu_tensor       *sum_out,
+        const ds4_gpu_tensor *a,
+        const ds4_gpu_tensor *b,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint32_t                n,
+        uint32_t                rows,
+        float                   eps) {
+    if (!norm_out || !sum_out || !a || !b || !model_map || n == 0 ||
+        rows == 0 || (uint64_t)n > UINT64_MAX / sizeof(float)) {
+        return 0;
+    }
+    const uint64_t row_bytes = (uint64_t)n * sizeof(float);
+    if ((uint64_t)rows > UINT64_MAX / row_bytes) {
+        return 0;
+    }
+    const uint64_t activation_bytes = row_bytes * rows;
+    if (norm_out->bytes < activation_bytes ||
+        sum_out->bytes < activation_bytes ||
+        a->bytes < activation_bytes ||
+        b->bytes < activation_bytes ||
+        weight_offset > model_size ||
+        row_bytes > model_size - weight_offset) {
+        return 0;
+    }
+    const int logical_tier = ds4_tensor_device_idx(norm_out);
+    if (logical_tier < 0 || logical_tier >= g_n_gpus ||
+        ds4_tensor_device_idx(sum_out) != logical_tier ||
+        ds4_tensor_device_idx(a) != logical_tier ||
+        ds4_tensor_device_idx(b) != logical_tier) {
+        return 0;
+    }
+    const float *w = (const float *)cuda_resolve_weight_ptr(
+            model_map, weight_offset, row_bytes,
+            logical_tier, "rms_weight");
+    if (!w) return 0;
+    glm_add_rms_norm_weight_kernel_rows<<<rows, 256, 0, cuda_decode_stream()>>>(
+            (float *)norm_out->ptr, (float *)sum_out->ptr,
+            (const float *)a->ptr, (const float *)b->ptr, w, n, rows, eps);
+    return cuda_ok(cudaGetLastError(), "add rms norm weight");
+}
+
 extern "C" int ds4_gpu_add_rms_norm_weight_tensor(
         ds4_gpu_tensor       *norm_out,
         ds4_gpu_tensor       *sum_out,
@@ -27078,7 +27161,7 @@ extern "C" int ds4_gpu_add_rms_norm_weight_tensor(
             model_map, weight_offset, (uint64_t)n * sizeof(float),
             logical_tier, "rms_weight");
     if (!w) return 0;
-    glm_add_rms_norm_weight_kernel<<<1, 1024>>>(
+    glm_add_rms_norm_weight_kernel_single<<<1, 1024>>>(
             (float *)norm_out->ptr, (float *)sum_out->ptr,
             (const float *)a->ptr, (const float *)b->ptr, w, n, eps);
     return cuda_ok(cudaGetLastError(), "add rms norm weight");

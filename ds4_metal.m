@@ -21390,7 +21390,7 @@ int ds4_gpu_rms_norm_weight_rows_tensor(
     return 1;
 }
 
-int ds4_gpu_add_rms_norm_weight_tensor(
+int ds4_gpu_add_rms_norm_weight_rows_tensor(
         ds4_gpu_tensor       *norm_out,
         ds4_gpu_tensor       *sum_out,
         const ds4_gpu_tensor *a,
@@ -21399,9 +21399,11 @@ int ds4_gpu_add_rms_norm_weight_tensor(
         uint64_t                model_size,
         uint64_t                weight_offset,
         uint32_t                n,
+        uint32_t                rows,
         float                   eps) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
-    if (!norm_out || !sum_out || !a || !b || n == 0 || (n & 3u) != 0) return 0;
+    if (!norm_out || !sum_out || !a || !b || n == 0 || rows == 0 ||
+        (n & 3u) != 0) return 0;
 
     @autoreleasepool {
         id<MTLBuffer> abuf = ds4_gpu_tensor_buffer(a);
@@ -21409,11 +21411,16 @@ int ds4_gpu_add_rms_norm_weight_tensor(
         id<MTLBuffer> sumbuf = ds4_gpu_tensor_buffer(sum_out);
         id<MTLBuffer> normbuf = ds4_gpu_tensor_buffer(norm_out);
         const uint64_t row_bytes = (uint64_t)n * sizeof(float);
+        if ((uint64_t)rows > UINT64_MAX / row_bytes) {
+            fprintf(stderr, "ds4: Metal add+RMS norm row count overflows activation size\n");
+            return 0;
+        }
+        const uint64_t bytes = row_bytes * rows;
         if (!abuf || !bbuf || !sumbuf || !normbuf ||
-            ds4_gpu_tensor_bytes(a) < row_bytes ||
-            ds4_gpu_tensor_bytes(b) < row_bytes ||
-            ds4_gpu_tensor_bytes(sum_out) < row_bytes ||
-            ds4_gpu_tensor_bytes(norm_out) < row_bytes) {
+            ds4_gpu_tensor_bytes(a) < bytes ||
+            ds4_gpu_tensor_bytes(b) < bytes ||
+            ds4_gpu_tensor_bytes(sum_out) < bytes ||
+            ds4_gpu_tensor_bytes(norm_out) < bytes) {
             fprintf(stderr, "ds4: Metal add+RMS norm received undersized activation buffers\n");
             return 0;
         }
@@ -21422,6 +21429,11 @@ int ds4_gpu_add_rms_norm_weight_tensor(
             return 0;
         }
 
+        const bool exact_decode_weight_view =
+            rows == 1u &&
+            row_bytes <= (1ull << 20) &&
+            getenv("DS4_METAL_ENABLE_DECODE_NORM_EXACT_VIEWS") != NULL &&
+            getenv("DS4_METAL_DISABLE_DECODE_NORM_EXACT_VIEWS") == NULL;
         uint64_t inner_offset = 0;
         id<MTLBuffer> wbuf = ds4_gpu_wrap_model_range(model_map,
                                                        model_size,
@@ -21430,7 +21442,7 @@ int ds4_gpu_add_rms_norm_weight_tensor(
                                                        &inner_offset);
         if (!wbuf) return 0;
 
-        ds4_gpu_rms_norm_args args = ds4_gpu_make_rms_norm_args(n, 1, eps);
+        ds4_gpu_rms_norm_args args = ds4_gpu_make_rms_norm_args(n, rows, eps);
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
@@ -21444,7 +21456,7 @@ int ds4_gpu_add_rms_norm_weight_tensor(
         [enc setBuffer:sumbuf offset:ds4_gpu_tensor_offset(sum_out) atIndex:4];
         [enc setBuffer:normbuf offset:ds4_gpu_tensor_offset(norm_out) atIndex:5];
         [enc setThreadgroupMemoryLength:32u * sizeof(float) atIndex:0];
-        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+        [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_threads(n), 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
@@ -21452,6 +21464,21 @@ int ds4_gpu_add_rms_norm_weight_tensor(
     }
 
     return 1;
+}
+
+int ds4_gpu_add_rms_norm_weight_tensor(
+        ds4_gpu_tensor       *norm_out,
+        ds4_gpu_tensor       *sum_out,
+        const ds4_gpu_tensor *a,
+        const ds4_gpu_tensor *b,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                weight_offset,
+        uint32_t                n,
+        float                   eps) {
+    return ds4_gpu_add_rms_norm_weight_rows_tensor(
+            norm_out, sum_out, a, b, model_map, model_size,
+            weight_offset, n, 1, eps);
 }
 
 int ds4_gpu_dsv4_qkv_rms_norm_rows_tensor(

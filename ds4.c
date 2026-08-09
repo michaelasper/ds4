@@ -50742,15 +50742,11 @@ static bool dflash_graph_draft_block(
                                      l->attn_output,
                                      g->heads,
                                      n_rows) &&
-                 ds4_gpu_add_tensor(g->after_attn,
-                                    g->cur,
-                                    g->attn_out,
-                                    (uint64_t)n_rows * embd) != 0;
-        }
-        if (ok) {
-            ok = ds4_gpu_rms_norm_weight_rows_tensor(
+                 ds4_gpu_add_rms_norm_weight_rows_tensor(
                      g->ffn_norm,
                      g->after_attn,
+                     g->cur,
+                     g->attn_out,
                      weight_map,
                      weight_map_size,
                      l->ffn_norm->abs_offset,
@@ -50902,6 +50898,7 @@ static bool laguna_graph_forward_token(
         const float beta_slow = is_swa ? 0.0f : DS4_ROPE_YARN_BETA_SLOW;
         const uint32_t rope_ctx = is_swa ?
             (uint32_t)DS4_CONTEXT_LENGTH : (uint32_t)DS4_ROPE_ORIG_CTX;
+        bool ffn_norm_ready = false;
 
         ok = laguna_graph_capture_feature(capture, g->cur, il);
         if (!ok) break;
@@ -51043,13 +51040,21 @@ static bool laguna_graph_forward_token(
                                          l->attn_output,
                                          g->heads,
                                          1) &&
-                     ds4_gpu_add_tensor(g->after_attn,
-                                        g->cur,
-                                        g->attn_out,
-                                        DS4_N_EMBD) != 0;
+                     ds4_gpu_add_rms_norm_weight_rows_tensor(
+                             g->ffn_norm,
+                             g->after_attn,
+                             g->cur,
+                             g->attn_out,
+                             model->map,
+                             model->size,
+                             l->ffn_norm->abs_offset,
+                             DS4_N_EMBD,
+                             1,
+                             DS4_RMS_EPS) != 0;
+                ffn_norm_ready = ok;
             }
         }
-        if (ok) {
+        if (ok && !ffn_norm_ready) {
             ok = ds4_gpu_rms_norm_weight_tensor(g->ffn_norm,
                                                  g->after_attn,
                                                  model->map,
@@ -51668,17 +51673,12 @@ static bool laguna_graph_forward_batch(
                                                  exact_q8_rows);
         }
         if (ok) {
-            failed_stage = "attention residual";
-            ok = ds4_gpu_add_tensor(g->after_attn,
-                                    g->cur,
-                                    g->attn_out,
-                                    (uint64_t)n_tokens * DS4_N_EMBD) != 0;
-        }
-        if (ok) {
-            failed_stage = "FFN norm";
-            ok = ds4_gpu_rms_norm_weight_rows_tensor(
+            failed_stage = "attention residual + FFN norm";
+            ok = ds4_gpu_add_rms_norm_weight_rows_tensor(
                     g->ffn_norm,
                     g->after_attn,
+                    g->cur,
+                    g->attn_out,
                     model->map,
                     model->size,
                     l->ffn_norm->abs_offset,
