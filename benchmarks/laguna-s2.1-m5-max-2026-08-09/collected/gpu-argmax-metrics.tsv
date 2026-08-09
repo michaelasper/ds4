@@ -1,0 +1,7 @@
+run	timing_line
+gpu-argmax/01-off-A	ds4: Laguna prefill: 429.44 t/s, generation: 59.75 t/s
+gpu-argmax/02-on-B	ds4: Laguna prefill: 430.64 t/s, generation: 59.18 t/s
+gpu-argmax/03-on-B	ds4: Laguna prefill: 433.18 t/s, generation: 59.39 t/s
+gpu-argmax/04-off-A	ds4: Laguna prefill: 433.68 t/s, generation: 59.64 t/s
+warmup/gpu-argmax-A	ds4: Laguna prefill: 427.73 t/s, generation: 59.54 t/s
+warmup/gpu-argmax-B	ds4: Laguna prefill: 428.56 t/s, generation: 58.90 t/s

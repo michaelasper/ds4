@@ -1,0 +1,40 @@
+utc=2026-08-09T06:30:12Z
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+The system has 137438953472 (8388608 pages with a page size of 16384).
+System-wide memory free percentage: 94%
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    21767.
+Pages active:                                 475656.
+Pages inactive:                              7345805.
+Pages speculative:                              2555.
+Pages throttled:                                   0.
+Pages wired down:                             296759.
+Pages purgeable:                               11363.
+"Translation faults":                    13608478218.
+Pages copy-on-write:                      2007288384.
+Pages zero filled:                       11913396134.
+Pages reactivated:                         849964702.
+Pages purged:                              114953224.
+File-backed pages:                           7334430.
+Anonymous pages:                              489586.
+Pages stored in compressor:                   795246.
+Pages occupied by compressor:                  88258.
+Decompressions:                            488313542.
+Compressions:                              510781711.
+Pageins:                                   413029448.
+Pageouts:                                    2836966.
+Swapins:                                     5704573.
+Swapouts:                                   13206760.
+Pages tagged:                                 127860.
+Pages tagged resident:                        110399.
+Pages tagged compressed:                       17461.
+Pages tag-storage:                            262144.
+Pages tag-storage holding tags:                 8241.
+Pages tag-storage free:                        95661.
+Pages tag-storage non-tag pageable:           157974.
+Pages tag-storage non-tag wired:                 268.
+Bytes of compressed tags:                    2518016.
+Tagged compressions:                         7368533.
+Tagged decompressions:                       6821318.
