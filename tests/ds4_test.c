@@ -1,6 +1,7 @@
 #define DS4_SERVER_TEST
 #define DS4_SERVER_TEST_NO_MAIN
 #include "../ds4_server.c"
+#include "../ds4_laguna_ladder.h"
 #ifndef DS4_NO_GPU
 #include "../ds4_gpu.h"
 #include <math.h>
@@ -683,6 +684,61 @@ static void test_metal_store_raw_kv_batch_wrap(void) {
 
 static void test_dspark_cache_window_crop(void) {
     TEST_ASSERT(ds4_test_dspark_cache_window_crop());
+}
+
+static void test_laguna_decode_ladder_parser(void) {
+    const uint64_t all_expected =
+        (UINT64_C(1) << 0) |
+        (UINT64_C(1) << 1) |
+        (UINT64_C(1) << 7) |
+        (UINT64_C(1) << 15) |
+        (UINT64_C(1) << 23) |
+        (UINT64_C(1) << 31) |
+        (UINT64_C(1) << 39) |
+        (UINT64_C(1) << 47);
+    uint64_t mask = UINT64_MAX;
+
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse(NULL, 48, &mask));
+    TEST_ASSERT(mask == 0);
+    mask = UINT64_MAX;
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse("", 48, &mask));
+    TEST_ASSERT(mask == 0);
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse(
+                    "7,15,23,31,39,47", 48, &mask));
+    TEST_ASSERT(mask == (all_expected & ~UINT64_C(0x3)));
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse(
+                    "0,1,7,15,23,31,39,47", 48, &mask));
+    TEST_ASSERT(mask == all_expected);
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse(
+                    "1,7,15,23,31,39", 48, &mask));
+    TEST_ASSERT(mask == (all_expected & ~UINT64_C(0x800000000001)));
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse("47", 48, &mask));
+    TEST_ASSERT(mask == (UINT64_C(1) << 47));
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse("0,63", 64, &mask));
+    TEST_ASSERT(mask == ((UINT64_C(1) << 0) | (UINT64_C(1) << 63)));
+
+    mask = UINT64_MAX;
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse(NULL, 65, &mask));
+    TEST_ASSERT(mask == 0);
+    mask = UINT64_MAX;
+    TEST_ASSERT(ds4_laguna_decode_ladder_parse("", 79, &mask));
+    TEST_ASSERT(mask == 0);
+
+    static const char *invalid[] = {
+        "7,7", "15,7", "48", "-1", "1, 7", "1,,7", "1,7,",
+        "1,x", "1,7\n", "18446744073709551616",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        mask = UINT64_MAX;
+        TEST_ASSERT(!ds4_laguna_decode_ladder_parse(invalid[i], 48, &mask));
+        TEST_ASSERT(mask == 0);
+    }
+    mask = UINT64_MAX;
+    TEST_ASSERT(!ds4_laguna_decode_ladder_parse("0", 0, &mask));
+    TEST_ASSERT(mask == 0);
+    mask = UINT64_MAX;
+    TEST_ASSERT(!ds4_laguna_decode_ladder_parse("0", 65, &mask));
+    TEST_ASSERT(mask == 0);
 }
 
 static void test_metal_q8_0_decode_pair_exact_case(
@@ -7959,9 +8015,141 @@ static void test_metal_laguna_gpu_argmax(void) {
         }
     }
 }
+
+static void test_metal_laguna_decode_ladder_ordering_exact(void) {
+    const uint32_t n = 257u;
+    const uint64_t bytes = (uint64_t)n * sizeof(float);
+    TEST_ASSERT(ds4_gpu_diagnostic_pending_command_buffer_count() == 0);
+    ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *b = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *c = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *d = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *e = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *out = ds4_gpu_tensor_alloc(bytes);
+    float *a_host = malloc((size_t)bytes);
+    float *b_host = malloc((size_t)bytes);
+    float *poison = malloc((size_t)bytes);
+    float *expected_c = malloc((size_t)bytes);
+    float *expected_d = malloc((size_t)bytes);
+    float *expected_e = malloc((size_t)bytes);
+    float *expected_out = malloc((size_t)bytes);
+    float *ref_c = malloc((size_t)bytes);
+    float *ref_d = malloc((size_t)bytes);
+    float *ref_e = malloc((size_t)bytes);
+    float *ref_out = malloc((size_t)bytes);
+    float *actual = malloc((size_t)bytes);
+    TEST_ASSERT(a && b && c && d && e && out);
+    TEST_ASSERT(a_host && b_host && poison && expected_c && expected_d &&
+                expected_e && expected_out && ref_c && ref_d && ref_e &&
+                ref_out && actual);
+    if (!a || !b || !c || !d || !e || !out ||
+        !a_host || !b_host || !poison || !expected_c || !expected_d ||
+        !expected_e || !expected_out || !ref_c || !ref_d || !ref_e ||
+        !ref_out || !actual) {
+        goto cleanup;
+    }
+
+    for (uint32_t i = 0; i < n; i++) {
+        a_host[i] = ((float)((int)(i % 29u) - 14) * 0.125f) +
+                    (float)(i % 7u) * 0.015625f;
+        b_host[i] = ((float)((int)(i % 17u) - 8) * 0.0625f) -
+                    (float)(i % 5u) * 0.03125f;
+        const uint32_t poison_bits = 0x7fc10001u + (i & 0x3ffu);
+        memcpy(&poison[i], &poison_bits, sizeof(poison_bits));
+
+        /* Each input is dyadic.  Keep every dependent add as its own stored
+         * stage so the baseline is checked against an independent host
+         * reference before it is used to validate command-buffer splitting. */
+        expected_c[i] = a_host[i] + b_host[i];
+        expected_d[i] = expected_c[i] + a_host[i];
+        expected_e[i] = expected_d[i] + b_host[i];
+        expected_out[i] = expected_e[i] + expected_c[i];
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(a, 0, a_host, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(b, 0, b_host, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(c, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(d, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(e, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(out, 0, poison, bytes) != 0);
+
+    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+    if (!ds4_gpu_commands_active()) goto cleanup;
+    TEST_ASSERT(ds4_gpu_add_tensor(c, a, b, n) != 0);
+    TEST_ASSERT(ds4_gpu_add_tensor(d, c, a, n) != 0);
+    TEST_ASSERT(ds4_gpu_add_tensor(e, d, b, n) != 0);
+    TEST_ASSERT(ds4_gpu_add_tensor(out, e, c, n) != 0);
+    TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    TEST_ASSERT(ds4_gpu_diagnostic_pending_command_buffer_count() == 0);
+    if (ds4_gpu_commands_active()) goto cleanup;
+    TEST_ASSERT(ds4_gpu_tensor_read(c, 0, ref_c, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(d, 0, ref_d, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(e, 0, ref_e, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(out, 0, ref_out, bytes) != 0);
+    TEST_ASSERT(memcmp(ref_c, expected_c, (size_t)bytes) == 0);
+    TEST_ASSERT(memcmp(ref_d, expected_d, (size_t)bytes) == 0);
+    TEST_ASSERT(memcmp(ref_e, expected_e, (size_t)bytes) == 0);
+    TEST_ASSERT(memcmp(ref_out, expected_out, (size_t)bytes) == 0);
+
+    TEST_ASSERT(ds4_gpu_tensor_write(c, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(d, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(e, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(out, 0, poison, bytes) != 0);
+
+    TEST_ASSERT(ds4_gpu_diagnostic_pending_command_buffer_count() == 0);
+    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+    if (!ds4_gpu_commands_active()) goto cleanup;
+    TEST_ASSERT(ds4_gpu_add_tensor(c, a, b, n) != 0);
+    TEST_ASSERT(ds4_gpu_flush_commands() != 0);
+    TEST_ASSERT(ds4_gpu_diagnostic_pending_command_buffer_count() == 1);
+    TEST_ASSERT(ds4_gpu_add_tensor(d, c, a, n) != 0);
+    TEST_ASSERT(ds4_gpu_flush_commands() != 0);
+    TEST_ASSERT(ds4_gpu_diagnostic_pending_command_buffer_count() == 2);
+    TEST_ASSERT(ds4_gpu_add_tensor(e, d, b, n) != 0);
+    TEST_ASSERT(ds4_gpu_flush_commands() != 0);
+    TEST_ASSERT(ds4_gpu_diagnostic_pending_command_buffer_count() == 3);
+    TEST_ASSERT(ds4_gpu_add_tensor(out, e, c, n) != 0);
+    TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    TEST_ASSERT(ds4_gpu_diagnostic_pending_command_buffer_count() == 0);
+    if (ds4_gpu_commands_active()) goto cleanup;
+
+    TEST_ASSERT(ds4_gpu_tensor_read(c, 0, actual, bytes) != 0);
+    TEST_ASSERT(memcmp(actual, ref_c, (size_t)bytes) == 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(d, 0, actual, bytes) != 0);
+    TEST_ASSERT(memcmp(actual, ref_d, (size_t)bytes) == 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(e, 0, actual, bytes) != 0);
+    TEST_ASSERT(memcmp(actual, ref_e, (size_t)bytes) == 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(out, 0, actual, bytes) != 0);
+    TEST_ASSERT(memcmp(actual, ref_out, (size_t)bytes) == 0);
+
+cleanup:
+    if (ds4_gpu_commands_active()) {
+        (void)ds4_gpu_discard_commands();
+    } else {
+        (void)ds4_gpu_wait_submitted_commands();
+    }
+    free(actual);
+    free(ref_out);
+    free(ref_e);
+    free(ref_d);
+    free(ref_c);
+    free(expected_out);
+    free(expected_e);
+    free(expected_d);
+    free(expected_c);
+    free(poison);
+    free(b_host);
+    free(a_host);
+    ds4_gpu_tensor_free(out);
+    ds4_gpu_tensor_free(e);
+    ds4_gpu_tensor_free(d);
+    ds4_gpu_tensor_free(c);
+    ds4_gpu_tensor_free(b);
+    ds4_gpu_tensor_free(a);
+}
 #endif
 
 static void test_metal_kernel_group(void) {
+    test_laguna_decode_ladder_parser();
     test_dflash_capture_nonfinite_sanitize();
     test_metal_f16_matvec_fast_nr0_4();
     test_metal_f16_prefill_matmul();
@@ -7972,6 +8160,7 @@ static void test_metal_kernel_group(void) {
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
     test_metal_laguna_gpu_argmax();
+    test_metal_laguna_decode_ladder_ordering_exact();
     test_metal_laguna_q8_lmhead_screen_gates();
     test_metal_laguna_q8_lmhead_screen();
     test_metal_laguna_staged_swa_exact();

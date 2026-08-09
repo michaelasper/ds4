@@ -8638,6 +8638,14 @@ int ds4_gpu_commands_active(void) {
     return g_batch_cb != nil;
 }
 
+/* Diagnostics/tests only.  Read the existing pending-command array directly;
+ * do not add hot-path bookkeeping merely to support this getter. */
+uint32_t ds4_gpu_diagnostic_pending_command_buffer_count(void) {
+    if (!g_initialized || !g_pending_cbs) return 0;
+    const NSUInteger count = [g_pending_cbs count];
+    return count > (NSUInteger)UINT32_MAX ? UINT32_MAX : (uint32_t)count;
+}
+
 static int ds4_gpu_stream_expert_cache_wait_inflight(const char *label) {
     const char *what = label ? label : "streaming expert cache in-flight";
     if (g_batch_cb && ds4_gpu_flush_commands() == 0) return 0;
