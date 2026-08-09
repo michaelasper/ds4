@@ -298,6 +298,16 @@ static id<MTLComputePipelineState> g_laguna_argmax_f32_pipeline;
 static id<MTLComputePipelineState> g_dsv4_router_weights_batch_pipeline;
 static id<MTLComputePipelineState> g_dsv4_hc_expand4_pipeline;
 static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *g_pipeline_cache;
+/* Optional pair-compressor PSOs are probed from a hot decode path.  The
+ * generic positive cache cannot remember a missing Metal function, so keep a
+ * tiny per-nsg negative cache until cleanup/reinitialization (including source
+ * override reinitialization). */
+enum {
+    DS4_METAL_PAIR_COMPRESSOR_NEGATIVE_CACHE_SLOTS = 4,
+};
+static int16_t g_pair_compressor_store_missing_nsg[
+    DS4_METAL_PAIR_COMPRESSOR_NEGATIVE_CACHE_SLOTS];
+static uint8_t g_pair_compressor_store_missing_count;
 
 enum {
     DS4_METAL_DECODE_PIPELINE_FAST_CACHE_SLOTS = 64,
@@ -2314,6 +2324,15 @@ static int ds4_gpu_use_compressor_pair_nr4(void) {
 
 static int ds4_gpu_device_name_contains(const char *needle);
 
+/* These optional compressor fusions are only part of the validated Apple GPU
+ * matrix on M3, M4, and M5.  Keep M1/M2 on the ordinary path
+ * even if a future source override happens to export a similarly named PSO. */
+static int ds4_gpu_compressor_fusion_device_supported(void) {
+    return ds4_gpu_device_name_contains("M3") ||
+           ds4_gpu_device_name_contains("M4") ||
+           ds4_gpu_device_name_contains("M5");
+}
+
 static int ds4_gpu_env_value_eq(const char *v, size_t n, const char *literal) {
     size_t m = strlen(literal);
     if (n != m) return 0;
@@ -2846,6 +2865,25 @@ static id<MTLComputePipelineState> ds4_gpu_get_mul_mv_pipeline(
             fast_name_len, fast_hash, pipeline);
     }
     return pipeline;
+}
+
+static id<MTLComputePipelineState>
+ds4_gpu_get_optional_pair_compressor_store_pipeline(int16_t nsg) {
+    for (uint8_t i = 0; i < g_pair_compressor_store_missing_count; i++) {
+        if (g_pair_compressor_store_missing_nsg[i] == nsg) return nil;
+    }
+
+    id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mv_pipeline(
+        "kernel_mul_mv_f16_f32_pair_compressor_store_4", nsg);
+    if (pipeline ||
+        g_pair_compressor_store_missing_count >=
+            DS4_METAL_PAIR_COMPRESSOR_NEGATIVE_CACHE_SLOTS) {
+        return pipeline;
+    }
+
+    g_pair_compressor_store_missing_nsg[
+        g_pair_compressor_store_missing_count++] = nsg;
+    return nil;
 }
 
 /* The ordinary mul-mv cache key covers function name and nsg only. Keep the
@@ -6640,6 +6678,7 @@ int ds4_gpu_init(void) {
 
     @autoreleasepool {
         ds4_gpu_decode_pipeline_fast_cache_reset();
+        g_pair_compressor_store_missing_count = 0;
         g_device = MTLCreateSystemDefaultDevice();
         if (!g_device) {
             fprintf(stderr, "ds4: Metal device not available\n");
@@ -9385,6 +9424,10 @@ int ds4_gpu_flush_commands(void) {
 
 int ds4_gpu_submit_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
+    /* A parallel FFN may have left a concurrent encoder or staged Q8 work
+     * armed.  Close it before this command buffer becomes terminal so the
+     * next batch cannot inherit partially encoded state. */
+    ds4_gpu_parallel_ffn_reset_state(YES);
     if (!g_batch_cb) return 0;
 
     ds4_gpu_close_batch_encoder();
@@ -9407,6 +9450,9 @@ int ds4_gpu_wait_submitted_commands(void) {
 
 int ds4_gpu_discard_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
+    /* Discard is also a terminal boundary: no parallel FFN encoder or
+     * staging flags may survive it, even when the batch is empty. */
+    ds4_gpu_parallel_ffn_reset_state(YES);
     if (!g_batch_cb) return 0;
     ds4_gpu_close_batch_encoder();
     g_batch_cb = nil;
@@ -9506,6 +9552,58 @@ static void ds4_gpu_parallel_ffn_reset_state(BOOL close_encoder) {
     g_parallel_gate_up_nr0 = 0;
     g_parallel_gate_up_smem = 0;
 }
+
+#ifdef DS4_TEST_HOOKS
+int ds4_gpu_parallel_ffn_test_arm_state(void) {
+    if (!g_batch_cb) return 0;
+    /* Synthetic state only: terminal-boundary tests use this to prove that
+     * submit/discard invoke the production reset, rather than calling reset
+     * directly and making the assertion tautological. */
+    g_batch_encoder_concurrent = YES;
+    g_parallel_q8_pending = YES;
+    g_parallel_q8_encoded = YES;
+    g_parallel_ffn_mode = 2;
+    g_parallel_ffn_stage = 2;
+    return 1;
+}
+
+int ds4_gpu_parallel_ffn_test_state_is_clean(void) {
+    const ds4_gpu_q8_0_matvec_args zero_args = {0};
+    return !g_batch_encoder_concurrent &&
+           !g_parallel_q8_pending &&
+           !g_parallel_q8_encoded &&
+           g_parallel_ffn_mode == 0 &&
+           g_parallel_ffn_stage == 0 &&
+           !g_parallel_q8_pipeline &&
+           !g_parallel_q8_weight &&
+           !g_parallel_q8_x &&
+           !g_parallel_q8_out &&
+           g_parallel_q8_weight_offset == 0 &&
+           g_parallel_q8_x_offset == 0 &&
+           g_parallel_q8_out_offset == 0 &&
+           memcmp(&g_parallel_q8_args, &zero_args, sizeof(zero_args)) == 0 &&
+           !g_parallel_gate_up_pipeline &&
+           !g_parallel_gate_weight &&
+           !g_parallel_up_weight &&
+           !g_parallel_gate_x &&
+           !g_parallel_gate_out &&
+           !g_parallel_up_out &&
+           !g_parallel_mid_out &&
+           g_parallel_gate_weight_offset == 0 &&
+           g_parallel_up_weight_offset == 0 &&
+           g_parallel_gate_x_offset == 0 &&
+           g_parallel_gate_out_offset == 0 &&
+           g_parallel_up_out_offset == 0 &&
+           g_parallel_mid_out_offset == 0 &&
+           memcmp(&g_parallel_gate_up_args,
+                  &zero_args,
+                  sizeof(zero_args)) == 0 &&
+           g_parallel_gate_up_clamp == 0.0f &&
+           g_parallel_gate_up_nsg == 0 &&
+           g_parallel_gate_up_nr0 == 0 &&
+           g_parallel_gate_up_smem == 0;
+}
+#endif
 
 void ds4_gpu_parallel_ffn_abort(void) {
     ds4_gpu_parallel_ffn_reset_state(YES);
@@ -10561,6 +10659,7 @@ void ds4_gpu_cleanup(void) {
 
     @autoreleasepool {
         ds4_gpu_decode_pipeline_fast_cache_reset();
+        g_pair_compressor_store_missing_count = 0;
         ds4_gpu_parallel_ffn_reset_state(YES);
         if (g_batch_cb) {
             ds4_gpu_close_batch_encoder();
@@ -18396,23 +18495,12 @@ int ds4_gpu_add3_rms_norm_weight_rows_tensor(
             return 0;
         }
 
-        const bool exact_decode_weight_view =
-            rows == 1u &&
-            row_bytes <= (1ull << 20) &&
-            getenv("DS4_METAL_ENABLE_DECODE_NORM_EXACT_VIEWS") != NULL &&
-            getenv("DS4_METAL_DISABLE_DECODE_NORM_EXACT_VIEWS") == NULL;
         uint64_t inner_offset = 0;
-        id<MTLBuffer> wbuf = exact_decode_weight_view ?
-            ds4_gpu_wrap_model_exact_range(model_map,
-                                           model_size,
-                                           weight_offset,
-                                           row_bytes,
-                                           &inner_offset) :
-            ds4_gpu_wrap_model_range(model_map,
-                                     model_size,
-                                     weight_offset,
-                                     row_bytes,
-                                     &inner_offset);
+        id<MTLBuffer> wbuf = ds4_gpu_wrap_model_range(model_map,
+                                                       model_size,
+                                                       weight_offset,
+                                                       row_bytes,
+                                                       &inner_offset);
         if (!wbuf) return 0;
 
         ds4_gpu_rms_norm_args args =
@@ -21332,8 +21420,8 @@ int ds4_gpu_matmul_f16_pair_compressor_store_tensor(
         uint32_t                ratio,
         uint32_t                pos) {
     if (!g_initialized && !ds4_gpu_init()) return -1;
-    /* PSO creation below is the capability probe; do not reject a device by
-     * product-name when the exact fused kernel is available. */
+    /* Keep this automatic fusion within the validated Apple GPU matrix;
+     * the PSO is the second capability check below. */
     if (g_quality_mode ||
         getenv("DS4_METAL_DISABLE_COMPRESSOR_PAIR_PROJ") != NULL ||
         getenv("DS4_METAL_DISABLE_COMPRESSOR_STORE_ONE") != NULL) {
@@ -21349,6 +21437,7 @@ int ds4_gpu_matmul_f16_pair_compressor_store_tensor(
         (ratio != 4u && ratio != 128u)) {
         return 0;
     }
+    if (!ds4_gpu_compressor_fusion_device_supported()) return 0;
 
     @autoreleasepool {
         const uint32_t state_rows = ratio == 4u ? 2u * ratio : ratio;
@@ -21410,9 +21499,9 @@ int ds4_gpu_matmul_f16_pair_compressor_store_tensor(
             .pos = pos,
             .ape_type = ape_type,
         };
-        id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mv_pipeline(
-            "kernel_mul_mv_f16_f32_pair_compressor_store_4",
-            mv_dispatch.nsg);
+        id<MTLComputePipelineState> pipeline =
+            ds4_gpu_get_optional_pair_compressor_store_pipeline(
+                mv_dispatch.nsg);
         /* The fused PSO is optional.  Let the caller select the ordinary
          * paired projection/store path when this source or device cannot
          * provide it. */
@@ -27416,10 +27505,12 @@ static int ds4_gpu_encode_flash_kv_stage_f16(
         ((uint64_t)n_raw + n_comp) * row_vecs64;
     const bool valid_grid =
         total_vecs64 != 0 && total_vecs64 <= UINT32_MAX;
-    /* The PSO is the capability probe.  Product-name gates rejected M4
-     * devices even though this kernel is available and exact there. */
+    /* Keep the automatic fusion within the validated Apple GPU matrix;
+     * the loaded PSO is the second capability check. */
+    const bool supported_device =
+        ds4_gpu_compressor_fusion_device_supported();
     const bool eligible =
-        supported_shape && valid_grid && !g_quality_mode &&
+        supported_shape && valid_grid && supported_device && !g_quality_mode &&
         getenv("DS4_METAL_DISABLE_GATHERED_KV_STAGE") == NULL &&
         g_flash_kv_stage_f16_pipeline != nil;
     const bool component_disabled = eligible &&

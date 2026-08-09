@@ -8857,6 +8857,72 @@ cleanup:
     ds4_gpu_tensor_free(b);
     ds4_gpu_tensor_free(a);
 }
+
+static void test_metal_parallel_ffn_terminal_lifecycle(void) {
+    enum { n = 64 };
+    const uint64_t bytes = (uint64_t)n * sizeof(float);
+    float a_host[n];
+    float b_host[n];
+    float expected[n];
+    float poison[n];
+    for (uint32_t i = 0; i < n; i++) {
+        a_host[i] = (float)((int)i - 21) * 0.125f;
+        b_host[i] = (float)((int)(i * 3u) - 17) * 0.0625f;
+        expected[i] = a_host[i] + b_host[i];
+        poison[i] = -777.0f;
+    }
+
+    ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *b = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *out = ds4_gpu_tensor_alloc(bytes);
+    TEST_ASSERT(a && b && out);
+    if (!a || !b || !out) goto cleanup;
+    TEST_ASSERT(ds4_gpu_tensor_write(a, 0, a_host, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(b, 0, b_host, bytes) != 0);
+
+    /* submit_commands() must reset the armed state before the command buffer
+     * becomes terminal; query it before begin_commands() can reset anything. */
+    TEST_ASSERT(ds4_gpu_tensor_write(out, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+    TEST_ASSERT(ds4_gpu_parallel_ffn_test_arm_state() != 0);
+    TEST_ASSERT(ds4_gpu_submit_commands() != 0);
+    TEST_ASSERT(ds4_gpu_parallel_ffn_test_state_is_clean() != 0);
+    TEST_ASSERT(!ds4_gpu_commands_active());
+    TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
+
+    /* A real ordinary batch after submit proves no concurrent encoder or
+     * stale stage metadata leaks into the next command sequence. */
+    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+    TEST_ASSERT(ds4_gpu_add_tensor(out, a, b, n) != 0);
+    TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(out, 0, poison, bytes) != 0);
+    TEST_ASSERT(memcmp(poison, expected, (size_t)bytes) == 0);
+
+    /* Repeat through discard, including its empty/aborted encoder boundary. */
+    TEST_ASSERT(ds4_gpu_tensor_write(out, 0, poison, bytes) != 0);
+    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+    TEST_ASSERT(ds4_gpu_parallel_ffn_test_arm_state() != 0);
+    TEST_ASSERT(ds4_gpu_discard_commands() != 0);
+    TEST_ASSERT(ds4_gpu_parallel_ffn_test_state_is_clean() != 0);
+    TEST_ASSERT(!ds4_gpu_commands_active());
+    TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
+
+    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+    TEST_ASSERT(ds4_gpu_add_tensor(out, a, b, n) != 0);
+    TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(out, 0, poison, bytes) != 0);
+    TEST_ASSERT(memcmp(poison, expected, (size_t)bytes) == 0);
+
+cleanup:
+    if (ds4_gpu_commands_active()) {
+        (void)ds4_gpu_discard_commands();
+    } else {
+        (void)ds4_gpu_wait_submitted_commands();
+    }
+    ds4_gpu_tensor_free(out);
+    ds4_gpu_tensor_free(b);
+    ds4_gpu_tensor_free(a);
+}
 #endif
 
 static void test_metal_kernel_group(void) {
@@ -8876,6 +8942,7 @@ static void test_metal_kernel_group(void) {
     test_metal_laguna_decode_ladder_ordering_exact();
     test_metal_laguna_q8_lmhead_screen_gates();
     test_metal_laguna_q8_lmhead_screen();
+    test_metal_parallel_ffn_terminal_lifecycle();
     test_metal_laguna_staged_swa_exact();
     test_metal_glm_qmv_r1_exact();
     test_metal_q8_0_output_nr4_exact();
@@ -10783,6 +10850,9 @@ static const ds4_test_entry test_entries[] = {
     {"--metal-glm-router-simd-topk", "metal-glm-router-simd-topk",
      "exact finite-domain GLM/Laguna router SIMD top-k selector",
      test_metal_glm_router_simd_topk_exact, true},
+    {"--metal-parallel-ffn-lifecycle", "metal-parallel-ffn-lifecycle",
+     "submit/discard parallel-FFN lifecycle cleanup and follow-up batch",
+     test_metal_parallel_ffn_terminal_lifecycle, true},
 #endif
     {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence, false},
     {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness, false},

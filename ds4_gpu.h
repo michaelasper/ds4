@@ -85,6 +85,12 @@ int ds4_gpu_commands_active(void);
 #ifdef __APPLE__
 int ds4_gpu_parallel_ffn_finish(void);
 void ds4_gpu_parallel_ffn_abort(void);
+#ifdef DS4_TEST_HOOKS
+/* Test-only synthetic arm used to exercise terminal command-boundary
+ * cleanup without requiring a model-shaped concurrent FFN dispatch. */
+int ds4_gpu_parallel_ffn_test_arm_state(void);
+int ds4_gpu_parallel_ffn_test_state_is_clean(void);
+#endif
 int ds4_gpu_parallel_ffn_start(
         ds4_gpu_tensor       *gate,
         ds4_gpu_tensor       *up,
