@@ -48521,6 +48521,9 @@ typedef struct {
     ds4_gpu_tensor *staged_value;
     ds4_gpu_tensor *output_norm;
     ds4_gpu_tensor *logits;
+    ds4_gpu_tensor *argmax;
+    bool gpu_argmax_enabled;
+    int32_t gpu_argmax_result;
     ds4_gpu_tensor *spec_output_norm;
     ds4_gpu_tensor *spec_logits;
     ds4_gpu_tensor *spec_argmax;
@@ -48565,6 +48568,7 @@ static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     DS4_LAGUNA_FREE(staged_value);
     DS4_LAGUNA_FREE(output_norm);
     DS4_LAGUNA_FREE(logits);
+    DS4_LAGUNA_FREE(argmax);
     DS4_LAGUNA_FREE(spec_output_norm);
     DS4_LAGUNA_FREE(spec_logits);
     DS4_LAGUNA_FREE(spec_argmax);
@@ -50221,7 +50225,7 @@ static bool laguna_graph_forward_token(
     if (ok) {
         ok = laguna_graph_capture_feature(capture, g->cur, DS4_N_LAYER);
     }
-    if (ok && logits_out) {
+    if (ok && (logits_out || g->gpu_argmax_enabled)) {
         ok = ds4_gpu_rms_norm_weight_tensor(g->output_norm,
                                              g->cur,
                                              model->map,
@@ -50237,7 +50241,20 @@ static bool laguna_graph_forward_token(
                                      1);
         }
     }
+#ifdef __APPLE__
+    if (ok && g->gpu_argmax_enabled) {
+        ok = ds4_gpu_laguna_argmax_tensor(g->argmax,
+                                          g->logits,
+                                          DS4_N_VOCAB) != 0;
+    }
+#endif
     if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
+    if (ok && g->gpu_argmax_enabled) {
+        ok = ds4_gpu_tensor_read(g->argmax,
+                                 0,
+                                 &g->gpu_argmax_result,
+                                 sizeof(g->gpu_argmax_result)) != 0;
+    }
     if (ok && logits_out) {
         ok = ds4_gpu_tensor_read(g->logits,
                                  0,
@@ -50876,7 +50893,8 @@ static bool laguna_graph_forward_batch(
             if (ok) {
                 const bool layer_is_all_work =
                     completed_layers == (uint32_t)DS4_N_LAYER &&
-                    logits_out == NULL;
+                    logits_out == NULL &&
+                    !g->gpu_argmax_enabled;
                 laguna_graph_report_prefill_display_progress(
                         display_progress,
                         display_progress_ud,
@@ -50887,7 +50905,7 @@ static bool laguna_graph_forward_batch(
                         layer_is_all_work);
             }
             if (ok && (completed_layers < (uint32_t)DS4_N_LAYER ||
-                       logits_out != NULL)) {
+                       logits_out != NULL || g->gpu_argmax_enabled)) {
                 ok = ds4_gpu_begin_commands() != 0;
             }
         }
@@ -50949,7 +50967,7 @@ static bool laguna_graph_forward_batch(
     }
 
     ds4_gpu_tensor *last = NULL;
-    if (ok && logits_out) {
+    if (ok && (logits_out || g->gpu_argmax_enabled)) {
         last = ds4_gpu_tensor_view(
                 g->cur,
                 (uint64_t)(n_tokens - 1u) * DS4_N_EMBD * sizeof(float),
@@ -50973,6 +50991,14 @@ static bool laguna_graph_forward_batch(
                                      1);
         }
     }
+#ifdef __APPLE__
+    if (ok && g->gpu_argmax_enabled) {
+        failed_stage = "GPU argmax";
+        ok = ds4_gpu_laguna_argmax_tensor(g->argmax,
+                                          g->logits,
+                                          DS4_N_VOCAB) != 0;
+    }
+#endif
     /* A speculative cycle appends support-cache injection before completing
      * the shared snapshot/draft/verify command stream. */
     const bool defer_completion = ok && gpu_draft_tokens != NULL;
@@ -50981,6 +51007,12 @@ static bool laguna_graph_forward_batch(
         ok = false;
     }
     ds4_gpu_tensor_free(last);
+    if (ok && g->gpu_argmax_enabled && !defer_completion) {
+        ok = ds4_gpu_tensor_read(g->argmax,
+                                 0,
+                                 &g->gpu_argmax_result,
+                                 sizeof(g->gpu_argmax_result)) != 0;
+    }
     if (ok && row_argmax_out && !defer_completion) {
         ok = ds4_gpu_tensor_read(g->spec_argmax,
                                  0,
@@ -50994,7 +51026,8 @@ static bool laguna_graph_forward_batch(
                                  logits_out,
                                  (uint64_t)DS4_N_VOCAB * sizeof(float)) != 0;
     }
-    if (ok && (!live_progress || logits_out != NULL)) {
+    if (ok && (!live_progress || logits_out != NULL ||
+               (g->gpu_argmax_enabled && !defer_completion))) {
         laguna_graph_report_prefill_display_progress(display_progress,
                                                       display_progress_ud,
                                                       pos0,
@@ -51005,6 +51038,60 @@ static bool laguna_graph_forward_batch(
     }
     ds4_gpu_set_tensor_matmul_suppressed(false);
     return ok;
+}
+
+#if defined(__APPLE__)
+static bool laguna_metal_gpu_argmax_requested(void) {
+    const char *env = getenv("DS4_METAL_LAGUNA_GPU_ARGMAX");
+    return env && strcmp(env, "1") == 0;
+}
+
+static bool laguna_metal_gpu_argmax_debug_forces_full_logits(void) {
+    /* These diagnostics inspect or dump the complete row, so retaining the
+     * host logits buffer is part of their contract. Presence matches the
+     * existing DS4_TRACE_TOP behavior; dump paths require a non-empty value. */
+    static const char *const presence[] = {
+        "DS4_TRACE_TOP",
+        "DS4_METAL_GRAPH_DUMP_PREFIX",
+        "DS4_METAL_GRAPH_DUMP_NAME",
+        "DS4_METAL_GRAPH_DUMP_LAYER",
+        "DS4_METAL_GRAPH_DUMP_POS",
+        "DS4_ROCM_GRAPH_DUMP_PREFIX",
+        "DS4_ROCM_GRAPH_DUMP_NAME",
+        "DS4_ROCM_GRAPH_DUMP_LAYER",
+        "DS4_ROCM_GRAPH_DUMP_POS",
+        "DS4_METAL_GRAPH_DUMP_TRACE",
+        "DS4_ROCM_GRAPH_DUMP_TRACE",
+        "DS4_METAL_GRAPH_TRACE_CACHE",
+        "DS4_METAL_GRAPH_TRACE_COMP",
+        "DS4_METAL_GRAPH_TRACE_LAYERS",
+        "DS4_METAL_GRAPH_TRACE_STAGE_LAYER",
+    };
+    static const char *const dumps[] = {
+        "DS4_METAL_DUMP_PREFILL_LOGITS",
+        "DS4_METAL_GRAPH_DUMP_LOGITS",
+        "DS4_CPU_DUMP_LOGITS",
+        "DS4_CPU_DUMP_PREFILL_LOGITS",
+        "DS4_GLM_LOGIT_DUMP",
+    };
+    for (size_t i = 0; i < sizeof(presence) / sizeof(presence[0]); i++) {
+        if (getenv(presence[i]) != NULL) return true;
+    }
+    for (size_t i = 0; i < sizeof(dumps) / sizeof(dumps[0]); i++) {
+        const char *value = getenv(dumps[i]);
+        if (value && value[0]) return true;
+    }
+    return false;
+}
+#endif
+
+static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
+    if (!g || g->gpu_argmax_enabled) return g != NULL;
+    g->argmax = ds4_gpu_tensor_alloc(sizeof(int32_t));
+    if (!g->argmax) return false;
+    g->scratch_bytes += sizeof(int32_t);
+    g->gpu_argmax_enabled = true;
+    return true;
 }
 
 static int generate_laguna_metal_argmax(
@@ -51023,14 +51110,41 @@ static int generate_laguna_metal_argmax(
         fprintf(stderr, "ds4: Laguna prompt is empty or leaves no context room\n");
         return 1;
     }
+#if defined(__APPLE__)
+    const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
+    const bool gpu_argmax =
+        gpu_argmax_requested &&
+        !laguna_metal_gpu_argmax_debug_forces_full_logits();
+    if (gpu_argmax && !ds4_gpu_laguna_argmax_available()) {
+        /* This check runs before the first graph dispatch/KV mutation. A
+         * missing prerequisite is an explicit failure; later kernel failures
+         * are propagated and never retried through the old path. */
+        fprintf(stderr,
+                "ds4: Laguna GPU argmax requested but its Metal pipeline is unavailable\n");
+        return 1;
+    }
+#else
+    const bool gpu_argmax = false;
+#endif
     ds4_laguna_gpu_graph g;
     if (!laguna_graph_alloc(&g, (uint32_t)ctx_size)) return 1;
-    float *logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(float));
+    if (gpu_argmax) {
+        if (!laguna_graph_enable_gpu_argmax(&g)) {
+            fprintf(stderr, "ds4: failed to allocate Laguna GPU argmax output\n");
+            laguna_graph_free(&g);
+            return 1;
+        }
+        fprintf(stderr, "ds4: Laguna GPU argmax enabled (single-dispatch)\n");
+    }
+    float *logits = gpu_argmax ? NULL :
+        xmalloc((size_t)DS4_N_VOCAB * sizeof(float));
     bool ok = true;
     const double prefill_t0 = now_sec();
     for (int i = 0; ok && i < prompt->len;) {
         uint32_t n = (uint32_t)(prompt->len - i);
         if (n > g.prefill_cap) n = g.prefill_cap;
+        g.gpu_argmax_enabled = gpu_argmax &&
+            i + (int)n == prompt->len;
         ok = laguna_graph_forward_batch(&g,
                                         model,
                                         weights,
@@ -51038,6 +51152,7 @@ static int generate_laguna_metal_argmax(
                                         NULL,
                                         n,
                                         (uint32_t)i,
+                                        !g.gpu_argmax_enabled &&
                                         i + (int)n == prompt->len ?
                                             logits : NULL,
                                         NULL,
@@ -51048,24 +51163,35 @@ static int generate_laguna_metal_argmax(
         i += (int)n;
         if (progress) progress(progress_ud, "prefill_chunk", i, prompt->len);
     }
+    g.gpu_argmax_enabled = gpu_argmax;
     const double prefill_t1 = now_sec();
 
     int generated = 0;
     uint32_t pos = (uint32_t)prompt->len;
     const double decode_t0 = now_sec();
     for (int i = 0; ok && i < n_predict && pos < (uint32_t)ctx_size; i++) {
-        if (getenv("DS4_TRACE_TOP") != NULL) {
+        if (!gpu_argmax && getenv("DS4_TRACE_TOP") != NULL) {
             char label[64];
             snprintf(label, sizeof(label), "Laguna step %d", i);
             print_top_logits(stderr, label, vocab, logits, DS4_N_VOCAB, 10);
         }
-        const int token = sample_argmax(logits, DS4_N_VOCAB);
+        const int token = gpu_argmax ? (int)g.gpu_argmax_result :
+            sample_argmax(logits, DS4_N_VOCAB);
+        if (gpu_argmax &&
+            (token < 0 || token >= (int)DS4_N_VOCAB)) {
+            fprintf(stderr,
+                    "ds4: Laguna GPU argmax returned invalid token %d\n",
+                    token);
+            ok = false;
+            break;
+        }
         if (vocab_token_is_generation_stop(vocab, token)) break;
         if (emit) emit(emit_ud, token);
         generated++;
         if (i + 1 == n_predict || pos + 1u >= (uint32_t)ctx_size) break;
         ok = laguna_graph_forward_token(
-            &g, model, weights, token, pos, NULL, logits);
+            &g, model, weights, token, pos, NULL,
+            gpu_argmax ? NULL : logits);
         pos++;
     }
     const double decode_t1 = now_sec();

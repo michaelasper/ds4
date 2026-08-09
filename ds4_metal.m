@@ -256,6 +256,7 @@ static id<MTLComputePipelineState> g_laguna_stage_kv_pipeline;
 static id<MTLComputePipelineState> g_laguna_prefill_attention_pipeline;
 static id<MTLComputePipelineState> g_laguna_commit_kv_pipeline;
 static id<MTLComputePipelineState> g_laguna_q6_k_matmul_pipeline;
+static id<MTLComputePipelineState> g_laguna_argmax_f32_pipeline;
 static id<MTLComputePipelineState> g_dsv4_router_weights_batch_pipeline;
 static id<MTLComputePipelineState> g_dsv4_hc_expand4_pipeline;
 static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *g_pipeline_cache;
@@ -8044,6 +8045,8 @@ int ds4_gpu_init(void) {
             ds4_gpu_get_pipeline("kernel_laguna_commit_kv_f16");
         g_laguna_q6_k_matmul_pipeline =
             ds4_gpu_get_pipeline("kernel_laguna_q6_K_matmul_f32");
+        g_laguna_argmax_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_laguna_argmax_f32");
         g_dsv4_router_weights_batch_pipeline =
             ds4_gpu_get_pipeline("kernel_dsv4_router_weights_batch");
         g_dsv4_hc_expand4_pipeline =
@@ -9545,6 +9548,7 @@ void ds4_gpu_cleanup(void) {
         g_laguna_prefill_attention_pipeline = nil;
         g_laguna_commit_kv_pipeline = nil;
         g_laguna_q6_k_matmul_pipeline = nil;
+        g_laguna_argmax_f32_pipeline = nil;
         g_dsv4_router_weights_batch_pipeline = nil;
         g_dsv4_hc_expand4_pipeline = nil;
         g_flash_attn_mask_buffer = nil;
@@ -17079,6 +17083,58 @@ int ds4_gpu_argmax_tensor(
     }
 
     return ds4_gpu_indexer_topk_tensor(out_idx, logits, n_vocab, 1, 1);
+}
+
+int ds4_gpu_laguna_argmax_available(void) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    return g_laguna_argmax_f32_pipeline != nil;
+}
+
+int ds4_gpu_laguna_argmax_tensor(
+        ds4_gpu_tensor       *out_idx,
+        const ds4_gpu_tensor *logits,
+        uint32_t              n_vocab) {
+    enum { DS4_LAGUNA_ARGMAX_THREADS = 256 };
+    if (!ds4_gpu_laguna_argmax_available() ||
+        !out_idx || !logits || n_vocab == 0 ||
+        ds4_gpu_tensor_bytes(out_idx) < sizeof(int32_t) ||
+        ds4_gpu_tensor_bytes(logits) < (uint64_t)n_vocab * sizeof(float)) {
+        fprintf(stderr, "ds4: Laguna GPU argmax received invalid buffers\n");
+        return 0;
+    }
+
+    @autoreleasepool {
+        id<MTLBuffer> logitsbuf = ds4_gpu_tensor_buffer(logits);
+        id<MTLBuffer> outbuf = ds4_gpu_tensor_buffer(out_idx);
+        if (!logitsbuf || !outbuf) {
+            fprintf(stderr, "ds4: Laguna GPU argmax received missing Metal buffers\n");
+            return 0;
+        }
+
+        int owned = 0;
+        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+        if (!cb) return 0;
+        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        if (!enc) return 0;
+        [enc setComputePipelineState:g_laguna_argmax_f32_pipeline];
+        [enc setBuffer:logitsbuf
+                offset:ds4_gpu_tensor_offset(logits)
+               atIndex:0];
+        [enc setBuffer:outbuf
+                offset:ds4_gpu_tensor_offset(out_idx)
+               atIndex:1];
+        [enc setBytes:&n_vocab length:sizeof(n_vocab) atIndex:2];
+        [enc setThreadgroupMemoryLength:
+                  (NSUInteger)DS4_LAGUNA_ARGMAX_THREADS * sizeof(float)
+                              atIndex:0];
+        [enc setThreadgroupMemoryLength:
+                  (NSUInteger)DS4_LAGUNA_ARGMAX_THREADS * sizeof(uint32_t)
+                              atIndex:1];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(DS4_LAGUNA_ARGMAX_THREADS, 1, 1)];
+        ds4_gpu_end_compute_encoder(cb, enc);
+        return ds4_gpu_finish_command_buffer(cb, owned, "Laguna F32 argmax");
+    }
 }
 
 int ds4_gpu_dsv4_topk_mask_tensor(

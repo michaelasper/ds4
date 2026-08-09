@@ -2,6 +2,57 @@
 // these kernels only cover operations that are not represented by the shared
 // DeepSeek/GLM Metal API.
 
+/* A single fixed-size reduction is enough for Laguna's one-row greedy decode.
+ * Each lane scans a strided portion of the row, then the threadgroup reduces
+ * the lane winners. The sentinel and strict comparison intentionally mirror
+ * sample_argmax: NaNs never update, equal values retain the lower index, and
+ * values at or below -1e30f leave index zero selected. */
+kernel void kernel_laguna_argmax_f32(
+        device const float *logits [[buffer(0)]],
+        device int32_t     *out_idx [[buffer(1)]],
+        constant uint      &n_vocab [[buffer(2)]],
+        threadgroup float *best_values [[threadgroup(0)]],
+        threadgroup uint  *best_indices [[threadgroup(1)]],
+        uint tid [[thread_index_in_threadgroup]],
+        ushort3 ntg_u [[threads_per_threadgroup]]) {
+    const uint nth = (uint)ntg_u.x;
+    float best_value = -1.0e30f;
+    uint best_index = 0u;
+    for (uint i = tid; i < n_vocab; i += nth) {
+        const float value = logits[i];
+        /* Metal libraries default to fast math. Classify the IEEE-754 bits
+         * before comparing so every NaN payload/sign is ignored explicitly;
+         * the numeric compare alone is not a sufficient contract there. */
+        const uint bits = as_type<uint>(value);
+        const bool is_nan =
+            (bits & 0x7f800000u) == 0x7f800000u &&
+            (bits & 0x007fffffu) != 0u;
+        if (!is_nan && value > best_value) {
+            best_value = value;
+            best_index = i;
+        }
+    }
+    best_values[tid] = best_value;
+    best_indices[tid] = best_index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint step = nth >> 1u; step != 0u; step >>= 1u) {
+        if (tid < step) {
+            const float other_value = best_values[tid + step];
+            const uint other_index = best_indices[tid + step];
+            if (other_value > best_values[tid] ||
+                (other_value == best_values[tid] &&
+                 other_index < best_indices[tid])) {
+                best_values[tid] = other_value;
+                best_indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0u) out_idx[0] = (int32_t)best_indices[0];
+}
+
 struct ds4_metal_args_laguna_norm_rope {
     uint32_t n_tokens;
     uint32_t n_head;
