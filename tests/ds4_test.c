@@ -831,6 +831,798 @@ static void test_metal_q8_0_decode_pair_exact(void) {
 }
 
 #if defined(__APPLE__)
+static void test_metal_q8_0_output_nr4_exact_case(
+        uint32_t in_dim,
+        uint32_t out_dim,
+        uint32_t seed) {
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t row_bytes = (uint64_t)(in_dim / 32u) * 34u;
+    const uint64_t weight_bytes = (uint64_t)out_dim * row_bytes;
+    const uint64_t weight_alloc =
+        test_round_up_u64(weight_bytes, page);
+    const uint64_t x_bytes = (uint64_t)in_dim * sizeof(float);
+    const uint64_t out_bytes = (uint64_t)out_dim * sizeof(float);
+
+    void *weights_raw = NULL;
+    TEST_ASSERT(posix_memalign(&weights_raw, (size_t)page,
+                               (size_t)weight_alloc) == 0);
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
+    ds4_gpu_tensor *reference = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *candidate = ds4_gpu_tensor_alloc(out_bytes);
+    float *x_host = malloc((size_t)x_bytes);
+    float *reference_host = malloc((size_t)out_bytes);
+    float *candidate_host = malloc((size_t)out_bytes);
+    TEST_ASSERT(weights_raw != NULL);
+    TEST_ASSERT(x != NULL);
+    TEST_ASSERT(reference != NULL);
+    TEST_ASSERT(candidate != NULL);
+    TEST_ASSERT(x_host != NULL);
+    TEST_ASSERT(reference_host != NULL);
+    TEST_ASSERT(candidate_host != NULL);
+
+    const char *force_env = "DS4_METAL_ENABLE_OUTPUT_Q8_NR4";
+    const char *disable_env = "DS4_METAL_DISABLE_M3_OUTPUT_Q8_NR4";
+    char *saved_force = test_save_env(force_env);
+    char *saved_disable = test_save_env(disable_env);
+    test_float_compare_stats stats = {0};
+
+    const bool allocated = weights_raw && x && reference && candidate &&
+        x_host && reference_host && candidate_host;
+    if (allocated) {
+        memset(weights_raw, 0, (size_t)weight_alloc);
+        test_fill_q8_0_weights(
+            (uint8_t *)weights_raw, in_dim, out_dim, seed);
+        for (uint32_t i = 0; i < in_dim; i++) {
+            const int value =
+                (int)((i * 29u + (i ^ (i >> 3u)) * 7u +
+                       seed * 17u) % 127u) - 63;
+            x_host[i] = (float)value / 72.0f;
+        }
+        for (uint32_t i = 0; i < out_dim; i++) {
+            const uint32_t poison = 0x7fc00001u + (i & 0x3ffu);
+            memcpy(reference_host + i, &poison, sizeof(poison));
+            memcpy(candidate_host + i, &poison, sizeof(poison));
+        }
+        TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        reference, 0, reference_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        candidate, 0, candidate_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_set_model_map(
+                        weights_raw, weight_alloc) != 0);
+        ds4_gpu_set_quality(false);
+
+        TEST_ASSERT(unsetenv(force_env) == 0);
+        TEST_ASSERT(setenv(disable_env, "1", 1) == 0);
+        TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                        reference, weights_raw, weight_alloc, 0,
+                        in_dim, out_dim, x, 1) != 0);
+
+        TEST_ASSERT(setenv(force_env, "1", 1) == 0);
+        TEST_ASSERT(unsetenv(disable_env) == 0);
+        TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                        candidate, weights_raw, weight_alloc, 0,
+                        in_dim, out_dim, x, 1) != 0);
+
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        reference, 0, reference_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        candidate, 0, candidate_host, out_bytes) != 0);
+        stats = test_compare_float_bits(
+            reference_host, candidate_host, out_dim);
+    }
+
+    test_restore_env(force_env, saved_force);
+    test_restore_env(disable_env, saved_disable);
+    fprintf(stderr,
+            "ds4-test: output Q8 NR4 exact in=%u out=%u nsg=%u "
+            "mismatch=%zu/%u max_ulp=%u max_abs=%g\n",
+            in_dim, out_dim, out_dim > 65536u ? 8u : 4u,
+            stats.mismatch_count, out_dim, stats.max_ulp, stats.max_abs);
+    TEST_ASSERT(stats.mismatch_count == 0);
+
+    free(candidate_host);
+    free(reference_host);
+    free(x_host);
+    ds4_gpu_tensor_free(candidate);
+    ds4_gpu_tensor_free(reference);
+    ds4_gpu_tensor_free(x);
+    free(weights_raw);
+}
+
+static void test_metal_q8_0_output_nr4_exact(void) {
+    test_metal_q8_0_output_nr4_exact_case(4096, 68, 83);
+    test_metal_q8_0_output_nr4_exact_case(128, 65540, 89);
+}
+
+/* The focused selector starts in a fresh process, so use it to prove that a
+ * fast-compiled Metal library cannot be certified merely by setting
+ * DS4_METAL_MATH_SAFE after initialization.  The ordinary Metal suite does
+ * not pay this cleanup/recompile cost. */
+static void test_metal_laguna_q8_lmhead_screen_compile_gate(void) {
+    if (!test_env_bool("DS4_TEST_LAGUNA_Q8_LMHEAD_SCREEN") ||
+        !test_env_bool("DS4_METAL_MATH_SAFE")) {
+        return;
+    }
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t valid_bytes =
+        100352ull * (3072ull / 32ull) * 34ull;
+    const uint64_t valid_alloc = test_round_up_u64(valid_bytes, page);
+    void *dummy = NULL;
+    TEST_ASSERT(posix_memalign(&dummy, (size_t)page,
+                               (size_t)valid_alloc) == 0);
+    if (!dummy) return;
+    char *saved_math = test_save_env("DS4_METAL_MATH_SAFE");
+    char *saved_mpp = test_save_env("DS4_METAL_Q8_DECODE_MPP");
+    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    char *saved_nr4 = test_save_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4");
+
+    TEST_ASSERT(unsetenv("DS4_METAL_MATH_SAFE") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_DECODE_MPP") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") == 0);
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_set_model_map(dummy, valid_alloc) != 0);
+    TEST_ASSERT(setenv("DS4_METAL_MATH_SAFE", "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+
+    /* No tensor handles or screen plan exist in this helper.  Recompile the
+     * library safely for the actual focused test and restore the valid map. */
+    ds4_gpu_cleanup();
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+    test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
+    test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
+    test_restore_env("DS4_METAL_MATH_SAFE", saved_math);
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_set_model_map(dummy, valid_alloc) != 0);
+    free(dummy);
+}
+
+static void test_metal_laguna_q8_lmhead_screen_gates(void) {
+    if (!test_env_bool("DS4_TEST_LAGUNA_Q8_LMHEAD_SCREEN") ||
+        !test_env_bool("DS4_METAL_MATH_SAFE")) {
+        return;
+    }
+    /* Gate validation is deliberately cheap: create() must reject before it
+     * touches the production-sized sidecopy for every incompatible mode. */
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t valid_bytes =
+        100352ull * (3072ull / 32ull) * 34ull;
+    const uint64_t valid_alloc = test_round_up_u64(valid_bytes, page);
+    void *dummy = NULL;
+    TEST_ASSERT(posix_memalign(&dummy, (size_t)page,
+                               (size_t)valid_alloc) == 0);
+    if (!dummy) return;
+    char *saved_math = test_save_env("DS4_METAL_MATH_SAFE");
+    char *saved_mpp = test_save_env("DS4_METAL_Q8_DECODE_MPP");
+    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    char *saved_nr4 = test_save_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4");
+
+    /* A focused invocation may be the first Metal caller. Compile the
+     * library under the caller's safe setting before exercising post-init
+     * environment changes. */
+    if (saved_math && strcmp(saved_math, "0") != 0) {
+        TEST_ASSERT(ds4_gpu_init() != 0);
+    }
+
+    /* Register the production-sized range before selector checks.  Without
+     * this, a deleted eligibility gate could still be masked by the later
+     * model-range wrapper returning NULL. */
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_set_model_map(dummy, valid_alloc) != 0);
+
+    TEST_ASSERT(unsetenv("DS4_METAL_MATH_SAFE") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_DECODE_MPP") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+
+    /* Setting the environment after a fast-math library was initialized must
+     * not falsely certify the screen.  The implementation also checks the
+     * current flag, so removing it after a safe compile suppresses the path. */
+    TEST_ASSERT(setenv("DS4_METAL_MATH_SAFE", "1", 1) == 0);
+    TEST_ASSERT(setenv("DS4_METAL_Q8_DECODE_MPP", "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_DECODE_MPP") == 0);
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "4", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
+    TEST_ASSERT(setenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+    TEST_ASSERT(unsetenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100351u) == NULL);
+
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+    test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
+    test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
+    test_restore_env("DS4_METAL_MATH_SAFE", saved_math);
+    free(dummy);
+}
+
+static void test_metal_laguna_q8_lmhead_screen(void) {
+    /* The production sidecopy is intentionally large. Keep this opt-in so
+     * ordinary kernel CI remains bounded; focused M5 runs set both guards. */
+    if (!test_env_bool("DS4_TEST_LAGUNA_Q8_LMHEAD_SCREEN")) {
+        fprintf(stderr,
+                "ds4-test: Laguna Q8 lm-head screen skipped "
+                "(set DS4_TEST_LAGUNA_Q8_LMHEAD_SCREEN=1)\n");
+        return;
+    }
+    if (!test_env_bool("DS4_METAL_MATH_SAFE")) {
+        fprintf(stderr,
+                "ds4-test: Laguna Q8 lm-head screen skipped "
+                "(requires DS4_METAL_MATH_SAFE=1 before Metal init)\n");
+        return;
+    }
+
+    const uint32_t in_dim = 3072u;
+    const uint32_t out_dim = 100352u;
+    const uint32_t n_blocks = in_dim / 32u;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t row_bytes = (uint64_t)n_blocks * 34u;
+    const uint64_t weight_bytes = (uint64_t)out_dim * row_bytes;
+    const uint64_t weight_alloc = test_round_up_u64(weight_bytes, page);
+    const uint64_t x_bytes = (uint64_t)in_dim * sizeof(float);
+    const uint64_t logits_bytes = (uint64_t)out_dim * sizeof(float);
+
+    void *weights_raw = NULL;
+    TEST_ASSERT(posix_memalign(&weights_raw, (size_t)page,
+                               (size_t)weight_alloc) == 0);
+    if (!weights_raw) return;
+    memset(weights_raw, 0, (size_t)weight_alloc);
+    test_fill_q8_0_weights((uint8_t *)weights_raw, in_dim, out_dim, 211u);
+
+    /* Make a duplicated, cross-NR0 maximum and exercise both signed limits. */
+    uint8_t *row0 = (uint8_t *)weights_raw;
+    uint8_t *row100 = row0 + (uint64_t)100u * row_bytes;
+    memcpy(row100, row0, (size_t)row_bytes);
+    uint16_t scale_one = test_float_to_f16(1.0f);
+    uint16_t scale_large = test_float_to_f16(65504.0f);
+    memcpy(row0, &scale_one, sizeof(scale_one));
+    memcpy(row100, &scale_one, sizeof(scale_one));
+    int8_t *q0 = (int8_t *)(row0 + 2u);
+    int8_t *q100 = (int8_t *)(row100 + 2u);
+    q0[0] = 127;
+    q0[1] = -128;
+    q100[0] = 127;
+    q100[1] = -128;
+    /* Make the first component a deterministic dominant pair while leaving
+     * the remaining block data nontrivial.  This also gives the extreme-input
+     * cases a known sentinel/tie shape. */
+    for (uint32_t row = 0; row < out_dim; row++) {
+        uint8_t *raw = (uint8_t *)weights_raw + (uint64_t)row * row_bytes;
+        memcpy(raw, &scale_large, sizeof(scale_large));
+        ((int8_t *)(raw + 2u))[0] = 2;
+    }
+    memcpy(row100, row0, (size_t)row_bytes);
+    q0[0] = 127;
+    q0[1] = -128;
+    q100[0] = 127;
+    q100[1] = -128;
+    /* A nonfinite scale must force this row through exact evaluation. */
+    uint16_t scale_nan = 0x7e00u;
+    uint8_t *row200 = (uint8_t *)weights_raw + (uint64_t)200u * row_bytes;
+    memcpy(row200, &scale_nan, sizeof(scale_nan));
+    /* Reserve a later block for a nonzero +Inf winner.  Every row starts with
+     * q=0 at block 8/lane 0; row 300 gets a finite large scale and q=127 so
+     * the +FLT_MAX probe cannot falsely pass if the reducer skips +Inf while
+     * defaulting to row 0. */
+    for (uint32_t row = 0; row < out_dim; row++) {
+        uint8_t *block8 = (uint8_t *)weights_raw +
+            (uint64_t)row * row_bytes + 8u * 34u;
+        ((int8_t *)(block8 + 2u))[0] = 0;
+    }
+    uint8_t *row300_block8 = (uint8_t *)weights_raw +
+        (uint64_t)300u * row_bytes + 8u * 34u;
+    memcpy(row300_block8, &scale_large, sizeof(scale_large));
+    ((int8_t *)(row300_block8 + 2u))[0] = 127;
+
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
+    ds4_gpu_tensor *reference = ds4_gpu_tensor_alloc(logits_bytes);
+    ds4_gpu_tensor *reference_idx = ds4_gpu_tensor_alloc(sizeof(int32_t));
+    ds4_gpu_tensor *screen_idx = ds4_gpu_tensor_alloc(sizeof(int32_t));
+    ds4_gpu_tensor *screen_value = ds4_gpu_tensor_alloc(sizeof(float));
+    ds4_gpu_tensor *poison_logits = ds4_gpu_tensor_alloc(logits_bytes);
+    TEST_ASSERT(x != NULL);
+    TEST_ASSERT(reference != NULL);
+    TEST_ASSERT(reference_idx != NULL);
+    TEST_ASSERT(screen_idx != NULL);
+    TEST_ASSERT(screen_value != NULL);
+    TEST_ASSERT(poison_logits != NULL);
+    if (!x || !reference || !reference_idx || !screen_idx ||
+        !screen_value || !poison_logits) goto cleanup;
+
+    char *saved_mpp = test_save_env("DS4_METAL_Q8_DECODE_MPP");
+    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    char *saved_nr4 = test_save_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4");
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_DECODE_MPP") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") == 0);
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_set_model_map(weights_raw, weight_alloc) != 0);
+
+    float *x_host = calloc(in_dim, sizeof(float));
+    float *reference_host = malloc((size_t)logits_bytes);
+    float *poison_host = malloc((size_t)logits_bytes);
+    TEST_ASSERT(x_host != NULL);
+    TEST_ASSERT(reference_host != NULL);
+    TEST_ASSERT(poison_host != NULL);
+    if (!x_host || !reference_host || !poison_host) {
+        free(poison_host);
+        free(reference_host);
+        free(x_host);
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
+        test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
+        goto cleanup;
+    }
+
+    x_host[0] = 1.0f;
+    for (uint32_t i = 0; i < out_dim; i++) {
+        const uint32_t bits = 0x7fc00001u + (i & 0x3ffu);
+        memcpy(poison_host + i, &bits, sizeof(bits));
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(reference, 0, poison_host,
+                                     logits_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(poison_logits, 0, poison_host,
+                                     logits_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+
+    ds4_gpu_laguna_q8_lmhead_screen *screen =
+        ds4_gpu_laguna_q8_lmhead_screen_create(
+            weights_raw, weight_alloc, 0, in_dim, out_dim);
+    TEST_ASSERT(screen != NULL);
+    if (!screen) {
+        free(poison_host);
+        free(reference_host);
+        free(x_host);
+        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+        test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
+        test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
+        goto cleanup;
+    }
+
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    int32_t ref_idx = -1;
+    int32_t got_idx = -1;
+    float got_value = 0.0f;
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(ref_idx >= 0 && ref_idx < (int32_t)out_dim);
+    TEST_ASSERT(ref_idx == 0);
+    /* Read the winning stock value separately so the assertion is bitwise. */
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    uint32_t candidate_rows = 0;
+    uint32_t candidate_row_blocks = 0;
+    uint32_t coarse_nonfinite = 0;
+    uint64_t dispatch_count = 0;
+    uint64_t packed_bytes = 0;
+    double sidecopy_init_ms = 0.0;
+    uint32_t exact_row_blocks = 0;
+    int32_t stat_idx = -1;
+    float stat_value = 0.0f;
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats(
+                    screen, &candidate_rows, &candidate_row_blocks,
+                    &coarse_nonfinite, &dispatch_count,
+                    &packed_bytes, &sidecopy_init_ms, &exact_row_blocks,
+                    &stat_idx, &stat_value) != 0);
+    fprintf(stderr,
+            "ds4-test: Laguna Q8 lm-head screen candidates=%u/%u "
+            "row_blocks=%u exact_row_blocks=%u nonfinite=%u "
+            "screen_calls=%llu packed_bytes=%llu sidecopy_init_ms=%.3f\n",
+            candidate_rows, out_dim, candidate_row_blocks,
+            exact_row_blocks, coarse_nonfinite,
+            (unsigned long long)dispatch_count,
+            (unsigned long long)packed_bytes, sidecopy_init_ms);
+    TEST_ASSERT(dispatch_count > 0u);
+    TEST_ASSERT(packed_bytes == 173408256ull);
+    TEST_ASSERT(sidecopy_init_ms >= 0.0);
+    TEST_ASSERT(candidate_rows == 3u);
+    TEST_ASSERT(candidate_row_blocks == 288u);
+    TEST_ASSERT(exact_row_blocks == 576u);
+    TEST_ASSERT(coarse_nonfinite == 1u);
+    TEST_ASSERT(stat_idx == got_idx);
+    TEST_ASSERT(memcmp(&stat_value, &got_value, sizeof(float)) == 0);
+
+    /* The screen must not materialize or overwrite a caller's logits scratch. */
+    TEST_ASSERT(ds4_gpu_tensor_read(poison_logits, 0, poison_host,
+                                    logits_bytes) != 0);
+    for (uint32_t i = 0; i < out_dim; i++) {
+        uint32_t bits = 0;
+        memcpy(&bits, poison_host + i, sizeof(bits));
+        TEST_ASSERT(bits == 0x7fc00001u + (i & 0x3ffu));
+    }
+
+    /* Repeat once inside an explicit command batch to cover the graph-style
+     * encoder path as well as the standalone API call above. */
+    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) == 0);
+    TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats(
+                    screen, &candidate_rows, &candidate_row_blocks,
+                    &coarse_nonfinite, &dispatch_count,
+                    &packed_bytes, &sidecopy_init_ms, &exact_row_blocks,
+                    &stat_idx, &stat_value) != 0);
+    TEST_ASSERT(dispatch_count == 2u);
+    TEST_ASSERT(candidate_rows == 3u);
+    TEST_ASSERT(candidate_row_blocks == 288u);
+    TEST_ASSERT(exact_row_blocks == 576u);
+    TEST_ASSERT(coarse_nonfinite == 1u);
+    TEST_ASSERT(stat_idx == got_idx);
+    TEST_ASSERT(memcmp(&stat_value, &got_value, sizeof(float)) == 0);
+
+    /* Dense finite probes exercise all 96 packed blocks and block-boundary
+     * lanes, not just the first quantized byte.  Keep the activations inside
+     * the certificate's safe interval and verify both winner bits and a
+     * genuinely pruned candidate set for two deterministic seeds. */
+    for (uint32_t case_id = 0; case_id < 2u; case_id++) {
+        uint32_t state = 0x243f6a88u ^ (case_id * 0x9e3779b9u);
+        for (uint32_t i = 0; i < in_dim; i++) {
+            state = state * 1664525u + 1013904223u;
+            const float unit = (float)(state >> 8) * (1.0f / 16777216.0f);
+            const float magnitude = 0.125f + unit * 0.875f;
+            x_host[i] = (state & 0x80000000u) ? -magnitude : magnitude;
+        }
+        x_host[0] = 1.0f;
+        x_host[31] = -0.75f;
+        x_host[32] = 0.625f;
+        x_host[63] = -0.5f;
+        x_host[64] = 0.375f;
+        x_host[95] = -0.25f;
+        x_host[96] = 0.1875f;
+        x_host[in_dim - 1u] = -0.15625f;
+        TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                        reference, weights_raw, weight_alloc, 0,
+                        in_dim, out_dim, x, 1) != 0);
+        TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                        reference_idx, reference, out_dim) != 0);
+        TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                        screen, screen_idx, screen_value,
+                        weights_raw, weight_alloc, 0, x) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                        &ref_idx, sizeof(ref_idx)) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                        &got_idx, sizeof(got_idx)) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                        &got_value, sizeof(got_value)) != 0);
+        TEST_ASSERT(got_idx == ref_idx);
+        TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                        (uint64_t)ref_idx * sizeof(float),
+                                        reference_host + ref_idx,
+                                        sizeof(float)) != 0);
+        TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                           sizeof(got_value)) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats(
+                        screen, &candidate_rows, &candidate_row_blocks,
+                        &coarse_nonfinite, &dispatch_count,
+                        &packed_bytes, &sidecopy_init_ms, &exact_row_blocks,
+                        &stat_idx, &stat_value) != 0);
+        TEST_ASSERT(candidate_rows > 0u && candidate_rows < out_dim);
+        TEST_ASSERT(candidate_row_blocks == candidate_rows * n_blocks);
+        TEST_ASSERT(exact_row_blocks >= candidate_row_blocks);
+        TEST_ASSERT(stat_idx == got_idx);
+        TEST_ASSERT(memcmp(&stat_value, &got_value, sizeof(float)) == 0);
+    }
+
+    /* Zero input admits every row but must preserve the stock lower-index tie. */
+    memset(x_host, 0, (size_t)x_bytes);
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(got_idx == 0);
+    TEST_ASSERT(memcmp(&got_value, &(float){0.0f}, sizeof(float)) == 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats(
+                    screen, &candidate_rows, &candidate_row_blocks,
+                    &coarse_nonfinite, &dispatch_count,
+                    &packed_bytes, &sidecopy_init_ms, &exact_row_blocks,
+                    &stat_idx, &stat_value) != 0);
+    TEST_ASSERT(candidate_rows == out_dim);
+    TEST_ASSERT(candidate_row_blocks == out_dim * n_blocks);
+    TEST_ASSERT(exact_row_blocks == out_dim * n_blocks);
+    TEST_ASSERT(coarse_nonfinite > 0u);
+    TEST_ASSERT(stat_idx == got_idx);
+    TEST_ASSERT(memcmp(&stat_value, &got_value, sizeof(float)) == 0);
+
+    /* Explicit -0 input checks normalized ordering and bitwise parity with
+     * the stock Q8 output; the screen does not promise a raw -0 payload. */
+    memset(x_host, 0, (size_t)x_bytes);
+    {
+        const uint32_t negative_zero_bits = 0x80000000u;
+        memcpy(&x_host[0], &negative_zero_bits, sizeof(negative_zero_bits));
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(got_idx == 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    TEST_ASSERT(got_value == 0.0f);
+
+    /* Unsafe subnormal input must force every row through exact evaluation,
+     * not rely on the coarse A bound. */
+    memset(x_host, 0, (size_t)x_bytes);
+    x_host[0] = ldexpf(1.0f, -100);
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats(
+                    screen, &candidate_rows, &candidate_row_blocks,
+                    &coarse_nonfinite, &dispatch_count,
+                    &packed_bytes, &sidecopy_init_ms, &exact_row_blocks,
+                    &stat_idx, &stat_value) != 0);
+    TEST_ASSERT(candidate_rows == out_dim);
+    TEST_ASSERT(candidate_row_blocks == out_dim * n_blocks);
+    TEST_ASSERT(exact_row_blocks == out_dim * n_blocks);
+    TEST_ASSERT(coarse_nonfinite > 0u);
+
+    /* Nonfinite exact values are valid stock ordering values: +Inf wins,
+     * while NaNs are skipped. */
+    memset(x_host, 0, (size_t)x_bytes);
+    {
+        const uint32_t positive_max_bits = 0x7f7fffffu;
+        memcpy(&x_host[256], &positive_max_bits, sizeof(positive_max_bits));
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(got_idx == 300);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    {
+        uint32_t got_bits = 0;
+        memcpy(&got_bits, &got_value, sizeof(got_bits));
+        TEST_ASSERT(got_bits == 0x7f800000u);
+    }
+
+    memset(x_host, 0, (size_t)x_bytes);
+    {
+        const uint32_t negative_max_bits = 0xff7fffffu;
+        memcpy(&x_host[0], &negative_max_bits, sizeof(negative_max_bits));
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(got_idx == 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    {
+        uint32_t got_bits = 0;
+        memcpy(&got_bits, &got_value, sizeof(got_bits));
+        TEST_ASSERT(got_bits == 0xff800000u);
+    }
+
+    /* Safe-boundary input keeps every exact value below the -1e30 sentinel;
+     * stock therefore keeps index zero even though its winning value is a
+     * finite large negative.  Row zero must still be admitted for its bits. */
+    memset(x_host, 0, (size_t)x_bytes);
+    x_host[0] = -0x1p90f;
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(got_idx == 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    {
+        TEST_ASSERT(isfinite(got_value));
+        TEST_ASSERT(got_value < -1.0e30f);
+    }
+
+    /* NaN input is admitted everywhere and follows stock NaN skipping. */
+    memset(x_host, 0, (size_t)x_bytes);
+    {
+        const uint32_t nan_bits = 0x7fc00000u;
+        memcpy(&x_host[0], &nan_bits, sizeof(nan_bits));
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    reference, weights_raw, weight_alloc, 0,
+                    in_dim, out_dim, x, 1) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
+                    reference_idx, reference, out_dim) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                    screen, screen_idx, screen_value,
+                    weights_raw, weight_alloc, 0, x) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference_idx, 0,
+                                    &ref_idx, sizeof(ref_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_idx, 0,
+                                    &got_idx, sizeof(got_idx)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(screen_value, 0,
+                                    &got_value, sizeof(got_value)) != 0);
+    TEST_ASSERT(got_idx == ref_idx);
+    TEST_ASSERT(ds4_gpu_tensor_read(reference,
+                                    (uint64_t)ref_idx * sizeof(float),
+                                    reference_host + ref_idx,
+                                    sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(&got_value, reference_host + ref_idx,
+                       sizeof(got_value)) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats(
+                    screen, &candidate_rows, &candidate_row_blocks,
+                    &coarse_nonfinite, &dispatch_count,
+                    &packed_bytes, &sidecopy_init_ms, &exact_row_blocks,
+                    &stat_idx, &stat_value) != 0);
+    TEST_ASSERT(candidate_rows == out_dim);
+    TEST_ASSERT(candidate_row_blocks == out_dim * n_blocks);
+    TEST_ASSERT(exact_row_blocks == out_dim * n_blocks);
+    TEST_ASSERT(coarse_nonfinite > 0u);
+    TEST_ASSERT(stat_idx == got_idx);
+    TEST_ASSERT(memcmp(&stat_value, &got_value, sizeof(float)) == 0);
+    ds4_gpu_laguna_q8_lmhead_screen_destroy(screen);
+    free(poison_host);
+    free(reference_host);
+    free(x_host);
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+    test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
+    test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
+
+cleanup:
+    ds4_gpu_tensor_free(poison_logits);
+    ds4_gpu_tensor_free(screen_value);
+    ds4_gpu_tensor_free(screen_idx);
+    ds4_gpu_tensor_free(reference_idx);
+    ds4_gpu_tensor_free(reference);
+    ds4_gpu_tensor_free(x);
+    free(weights_raw);
+}
+
+static void test_metal_laguna_q8_lmhead_screen_focused(void) {
+    if (!test_env_bool("DS4_TEST_LAGUNA_Q8_LMHEAD_SCREEN") ||
+        !test_env_bool("DS4_METAL_MATH_SAFE")) {
+        TEST_ASSERT(false);
+        return;
+    }
+    test_metal_laguna_q8_lmhead_screen_compile_gate();
+    test_metal_laguna_q8_lmhead_screen_gates();
+    test_metal_laguna_q8_lmhead_screen();
+}
+
 static void test_metal_f16_compressor_pair_state_store_exact_case(
         uint32_t width,
         uint32_t ratio,
@@ -6958,6 +7750,8 @@ static void test_metal_kernel_group(void) {
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
     test_metal_laguna_gpu_argmax();
+    test_metal_laguna_q8_lmhead_screen_gates();
+    test_metal_laguna_q8_lmhead_screen();
     test_metal_laguna_staged_swa_exact();
     test_metal_glm_qmv_r1_exact();
     test_metal_q8_0_output_nr4_exact();
@@ -8832,46 +9626,53 @@ typedef struct {
     const char *name;
     const char *desc;
     test_fn fn;
+    bool explicit_only;
 } ds4_test_entry;
 
 static const ds4_test_entry test_entries[] = {
 #ifndef DS4_NO_GPU
     {"--laguna-attention-numeric", "laguna-attention-numeric",
      "Laguna decode attention against a double-precision reference",
-     test_laguna_gqa3_decode_numeric},
+     test_laguna_gqa3_decode_numeric, false},
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
     {"--cuda-laguna-moe", "cuda-laguna-moe",
      "CUDA Laguna Q8 signal and Q4/Q3 MoE prefill/decode numerics",
-     test_cuda_laguna_moe_decode_prefill},
+     test_cuda_laguna_moe_decode_prefill, false},
 #endif
-    {"--long-context", "long-context", "long-context story fact-recall regression", test_long_story_fact_recall},
-    {"--tool-call-quality", "tool-call-quality", "model tool call and post-result stop regression", test_tool_call_quality},
-    {"--think-tool-recovery", "think-tool-recovery", "recover a complete tool call emitted inside unclosed reasoning", test_think_tool_recovery},
-    {"--logprob-vectors", "logprob-vectors", "official API top-logprob vector comparison on the standard Metal path", test_official_logprob_vectors},
-    {"--metal-ssd-streaming-cache-pressure", "metal-ssd-streaming-cache-pressure", "Metal SSD-streaming layer-batched decode cache-pressure repro for issue #384", test_metal_ssd_streaming_cache_pressure},
-    {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors},
-    {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4},
-    {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group},
+    {"--long-context", "long-context", "long-context story fact-recall regression", test_long_story_fact_recall, false},
+    {"--tool-call-quality", "tool-call-quality", "model emits valid DSML tool calls", test_tool_call_quality, false},
+    {"--think-tool-recovery", "think-tool-recovery", "recover a complete tool call emitted inside unclosed reasoning", test_think_tool_recovery, false},
+    {"--logprob-vectors", "logprob-vectors", "official API top-logprob vector comparison on the standard Metal path", test_official_logprob_vectors, false},
+    {"--metal-ssd-streaming-cache-pressure", "metal-ssd-streaming-cache-pressure", "Metal SSD-streaming layer-batched decode cache-pressure repro for issue #384", test_metal_ssd_streaming_cache_pressure, false},
+    {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors, false},
+    {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4, false},
+    {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group, false},
 #if defined(__APPLE__)
+    {"--metal-laguna-q8-lmhead-screen", "metal-laguna-q8-lmhead-screen",
+     "certified Laguna Q8 lm-head top-1 screen (focused opt-in)",
+     test_metal_laguna_q8_lmhead_screen_focused, true},
     {"--metal-glm-qmv-r1", "metal-glm-qmv-r1",
      "resident decode-only GLM QMV one-row-per-SIMD exactness",
-     test_metal_glm_qmv_r1_exact},
+     test_metal_glm_qmv_r1_exact, false},
 #endif
-    {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence},
-    {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness},
-    {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth},
-    {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth},
+    {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence, false},
+    {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness, false},
+    {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth, false},
+    {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth, false},
 #endif
-    {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
+    {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group, false},
 };
 
 static void test_print_help(const char *prog) {
     printf("Usage: %s [--all | TEST...]\n\n", prog);
     puts("Tests:");
     puts("  --all");
-    puts("      Run every test. This is the default, ordered from slower to faster.");
+    puts("      Run every non-explicit test. This is the default, ordered from slower to faster.");
     for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
-        printf("  %-20s %s\n", test_entries[i].flag, test_entries[i].desc);
+        printf("  %-20s %s%s\n",
+               test_entries[i].flag,
+               test_entries[i].desc,
+               test_entries[i].explicit_only ? " [explicit-only]" : "");
     }
     puts("  --list");
     puts("      Print test names only.");
@@ -8949,8 +9750,23 @@ int main(int argc, char **argv) {
         }
     }
 
+    for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
+        if (!selected[i] || !test_entries[i].explicit_only) continue;
+        for (size_t j = 0; j < sizeof(test_entries) / sizeof(test_entries[0]); j++) {
+            if ((run_all && !test_entries[j].explicit_only) ||
+                (selected[j] && j != i)) {
+                fprintf(stderr,
+                        "ds4-test: %s is explicit-only and must run alone "
+                        "in a fresh process\n",
+                        test_entries[i].flag);
+                return 2;
+            }
+        }
+    }
+
     if (run_all) {
         for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
+            if (test_entries[i].explicit_only) continue;
             test_run_entry(&test_entries[i]);
         }
     } else {
