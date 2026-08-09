@@ -1,0 +1,10 @@
+revision,observation,row_type,prefill_tps,gen_tps,gen_steady_tps,gen_first_ms
+pre,1,observation,464.73,59.48,60.75,20.769
+pre,2,observation,498.36,59.85,61.17,21.708
+pre,median,median,481.545,59.665,60.96,21.2385
+base,1,observation,493.86,59.81,61.08,20.537
+base,2,observation,500.98,60.3,61.65,21.96
+base,median,median,497.42,60.055,61.364999999999995,21.2485
+cand,1,observation,499.49,60.19,61.53,21.951
+cand,2,observation,502.85,60.13,61.51,23.68
+cand,median,median,501.17,60.16,61.519999999999996,22.8155

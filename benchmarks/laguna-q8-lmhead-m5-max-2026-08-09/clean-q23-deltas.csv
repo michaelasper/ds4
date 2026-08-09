@@ -1,0 +1,13 @@
+comparison,metric,left_median,right_median,delta_percent,formula
+pre_to_base,prefill_tps,481.545,497.42,3.296680476383318,(right_median/left_median-1)*100
+pre_to_base,gen_tps,59.665,60.055,0.65364954328333,(right_median/left_median-1)*100
+pre_to_base,gen_steady_tps,60.96,61.364999999999995,0.6643700787401396,(right_median/left_median-1)*100
+pre_to_base,gen_first_ms,21.2385,21.2485,-0.047062145563225855,(left_median/right_median-1)*100
+base_to_candidate,prefill_tps,497.42,501.17,0.7538900727755316,(right_median/left_median-1)*100
+base_to_candidate,gen_tps,60.055,60.16,0.17483973024727817,(right_median/left_median-1)*100
+base_to_candidate,gen_steady_tps,61.364999999999995,61.519999999999996,0.2525869795485969,(right_median/left_median-1)*100
+base_to_candidate,gen_first_ms,21.2485,22.8155,-6.868137888716008,(left_median/right_median-1)*100
+pre_to_candidate,prefill_tps,481.545,501.17,4.075423896001418,(right_median/left_median-1)*100
+pre_to_candidate,gen_tps,59.665,60.16,0.8296321126288309,(right_median/left_median-1)*100
+pre_to_candidate,gen_steady_tps,60.96,61.519999999999996,0.9186351706036655,(right_median/left_median-1)*100
+pre_to_candidate,gen_first_ms,21.2385,22.8155,-6.911967741228553,(left_median/right_median-1)*100

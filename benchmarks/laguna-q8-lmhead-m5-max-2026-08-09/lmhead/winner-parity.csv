@@ -1,0 +1,2 @@
+stock_top0_id,stock_top0_printed,stock_top0_float32_bits,screen_winner_id,screen_winner_bits,winner_values_not_nan,winner_id_exact,winner_value_bits_exact,generated_output_byte_exact,parity_status
+329,21.3458462,0x41aac44b,329,0x41aac44b,True,True,True,True,pass

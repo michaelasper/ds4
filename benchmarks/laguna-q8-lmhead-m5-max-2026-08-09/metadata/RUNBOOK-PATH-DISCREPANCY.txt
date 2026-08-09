@@ -1,0 +1,28 @@
+Runbook internal path discrepancy: clean-q23 report files
+=========================================================
+
+BENCHMARK.md @ 6ef3f02e is inconsistent about where the clean Q2/Q3 metric and
+delta reports live.
+
+  Generator ("Run the current bounded first pass", section 1) invokes:
+      python3 - "$DS4_RESULTS/default-q23" <<'PY'
+  and inside that helper:
+      root = sys.argv[1]
+      metrics_report = os.path.join(root, "clean-q23-metrics.csv")
+      delta_report   = os.path.join(root, "clean-q23-deltas.csv")
+  so the files are written to $DS4_RESULTS/default-q23/.
+
+  Packager ("Package the evidence") requires:
+      "$DS4_RESULTS/clean-q23-metrics.csv"
+      "$DS4_RESULTS/clean-q23-deltas.csv"
+  i.e. at the results root.
+
+Resolution used for this return: the generated files were left untouched where
+the helper wrote them, and byte-identical copies were placed at the paths the
+packager requires. Both locations are listed in MANIFEST.txt and hold the same
+bytes:
+
+860fcb0c938bf350490ec1c4269e1793c38a5f5524a09ed9464db65fd626a46a  /Users/masper/source/ds4-bench-lmhead-root2/results/default-q23/clean-q23-metrics.csv
+860fcb0c938bf350490ec1c4269e1793c38a5f5524a09ed9464db65fd626a46a  /Users/masper/source/ds4-bench-lmhead-root2/results/clean-q23-metrics.csv
+f279cfeb24eb55e56f44c93473a6ea339cfd635f34dc6555b8b6450396e7f914  /Users/masper/source/ds4-bench-lmhead-root2/results/default-q23/clean-q23-deltas.csv
+f279cfeb24eb55e56f44c93473a6ea339cfd635f34dc6555b8b6450396e7f914  /Users/masper/source/ds4-bench-lmhead-root2/results/clean-q23-deltas.csv

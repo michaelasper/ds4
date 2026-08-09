@@ -1,0 +1,8 @@
+utc=2026-08-09T14:54:20Z
+status=FAIL
+failure=safe-tax generated output mismatch: 02-safe-B
+failure=safe-tax token/output-byte mismatch: 02-safe-B
+failure=safe-tax generated output mismatch: 03-safe-B
+failure=safe-tax token/output-byte mismatch: 03-safe-B
+failure=one or more executable lm-head performance thresholds failed
+decision_must_not_be=promote

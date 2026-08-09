@@ -1,0 +1,160 @@
+Battery Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         2
+ womp                 0
+ networkoversleep     0
+ sleep                1
+ lessbright           1
+ tcpkeepalive         1
+ disksleep            10
+AC Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         10
+ womp                 1
+ networkoversleep     0
+ sleep                0
+ tcpkeepalive         1
+ disksleep            10
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=35651683)	100%; charged; 0:00 remaining present: true
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+{
+  "SPPowerDataType": [
+    {
+      "_name": "spbattery_information",
+      "sppower_battery_charge_info": {
+        "sppower_battery_at_warn_level": "FALSE",
+        "sppower_battery_fully_charged": "TRUE",
+        "sppower_battery_is_charging": "FALSE",
+        "sppower_battery_state_of_charge": 100
+      },
+      "sppower_battery_health_info": {
+        "sppower_battery_cycle_count": 45,
+        "sppower_battery_health": "Good",
+        "sppower_battery_health_maximum_capacity": "100%"
+      },
+      "sppower_battery_model_info": {
+        "sppower_battery_cell_revision": "3b1d",
+        "sppower_battery_device_name": "bq40z651",
+        "sppower_battery_firmware_version": "0b00",
+        "sppower_battery_hardware_revision": "0100",
+        "sppower_battery_pack_lot_code": "0000",
+        "sppower_battery_pcb_lot_code": "0000",
+        "sppower_battery_serial_number": "<redacted>"
+      }
+    },
+    {
+      "AC Power": {
+        "Current Power Source": "TRUE",
+        "Disk Sleep Timer": 10,
+        "Display Sleep Timer": 10,
+        "Hibernate Mode": 3,
+        "HighPowerMode": "No",
+        "LowPowerMode": "Yes",
+        "PrioritizeNetworkReachabilityOverSleep": "No",
+        "Sleep On Power Button": "Yes",
+        "System Sleep Timer": 0,
+        "Wake On LAN": "Yes"
+      },
+      "Battery Power": {
+        "Disk Sleep Timer": 10,
+        "Display Sleep Timer": 2,
+        "Hibernate Mode": 3,
+        "HighPowerMode": "No",
+        "LowPowerMode": "Yes",
+        "PrioritizeNetworkReachabilityOverSleep": "No",
+        "ReduceBrightness": "Yes",
+        "Sleep On Power Button": "Yes",
+        "System Sleep Timer": 1,
+        "Wake On LAN": "No"
+      },
+      "_name": "sppower_information"
+    },
+    {
+      "_name": "sppower_hwconfig_information",
+      "sppower_ups_installed": "FALSE"
+    },
+    {
+      "_name": "sppower_ac_charger_information",
+      "sppower_ac_charger_ID": "0x7019",
+      "sppower_ac_charger_family": "0xe000400a",
+      "sppower_ac_charger_firmware_version": "01040084",
+      "sppower_ac_charger_hardware_version": "1.0",
+      "sppower_ac_charger_manufacturer": "Apple Inc.",
+      "sppower_ac_charger_name": "140W USB-C Power Adapter",
+      "sppower_ac_charger_serial_number": "<redacted>",
+      "sppower_ac_charger_watts": "140",
+      "sppower_battery_charger_connected": "TRUE",
+      "sppower_battery_is_charging": "FALSE"
+    },
+    {
+      "_items": [
+        {
+          "_items": [
+            {
+              "UserVisible": false,
+              "appPID": 1030,
+              "eventtype": "wake",
+              "scheduledby": "com.apple.alarm.user-invisible-com.apple.calaccessd.travelEngine.periodicRefreshTimer",
+              "time": "2026-08-09T13:34:29Z"
+            },
+            {
+              "UserVisible": false,
+              "appPID": 532,
+              "eventtype": "wake",
+              "scheduledby": "com.apple.alarm.user-invisible-com.apple.osanalytics.hardhighengagementtimer",
+              "time": "2026-08-09T23:59:44Z"
+            }
+          ],
+          "_name": "sppower_scheduled_events_info"
+        }
+      ],
+      "_name": "sppower_events_info"
+    }
+  ]
+}
+--- PowerManagement preferences (High Power encodes as LowPowerMode=2 on this build) ---
+{
+  "AC Power" => {
+    "Hibernate File" => "/var/vm/sleepimage"
+    "Hibernate Mode" => 3
+    "HighPowerMode" => 0
+    "LowPowerMode" => 2
+    "PrioritizeNetworkReachabilityOverSleep" => 0
+    "Sleep On Power Button" => 1
+    "Standby Enabled" => 1
+    "TCPKeepAlivePref" => 1
+    "TTYSPreventSleep" => 1
+  }
+  "Battery Power" => {
+    "Hibernate File" => "/var/vm/sleepimage"
+    "Hibernate Mode" => 3
+    "HighPowerMode" => 0
+    "LowPowerMode" => 2
+    "PrioritizeNetworkReachabilityOverSleep" => 0
+    "Sleep On Power Button" => 1
+    "Standby Enabled" => 1
+    "TCPKeepAlivePref" => 1
+    "TTYSPreventSleep" => 1
+  }
+  "BatteryWarn" => {
+    "<redacted>" => <redacted>
+  }
+}
+runbook_spprofiler_gate=fail
+deviation=see metadata/POWER-GATE-DEVIATION.txt
+power_gate=pass (AC, Energy Mode High Power via powermode=2, thermals nominal)

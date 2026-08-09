@@ -1,0 +1,200 @@
+utc=2026-08-09T15:12:56Z
+Battery Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         2
+ womp                 0
+ networkoversleep     0
+ sleep                1
+ lessbright           1
+ tcpkeepalive         1
+ disksleep            10
+AC Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         10
+ womp                 1
+ networkoversleep     0
+ sleep                0
+ tcpkeepalive         1
+ disksleep            10
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=35651683)	100%; charged; 0:00 remaining present: true
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+{
+  "SPPowerDataType": [
+    {
+      "_name": "spbattery_information",
+      "sppower_battery_charge_info": {
+        "sppower_battery_at_warn_level": "FALSE",
+        "sppower_battery_fully_charged": "TRUE",
+        "sppower_battery_is_charging": "FALSE",
+        "sppower_battery_state_of_charge": 100
+      },
+      "sppower_battery_health_info": {
+        "sppower_battery_cycle_count": 45,
+        "sppower_battery_health": "Good",
+        "sppower_battery_health_maximum_capacity": "100%"
+      },
+      "sppower_battery_model_info": {
+        "sppower_battery_cell_revision": "3b1d",
+        "sppower_battery_device_name": "bq40z651",
+        "sppower_battery_firmware_version": "0b00",
+        "sppower_battery_hardware_revision": "0100",
+        "sppower_battery_pack_lot_code": "0000",
+        "sppower_battery_pcb_lot_code": "0000",
+        "sppower_battery_serial_number": "<redacted>"
+      }
+    },
+    {
+      "AC Power": {
+        "Current Power Source": "TRUE",
+        "Disk Sleep Timer": 10,
+        "Display Sleep Timer": 10,
+        "Hibernate Mode": 3,
+        "HighPowerMode": "No",
+        "LowPowerMode": "Yes",
+        "PrioritizeNetworkReachabilityOverSleep": "No",
+        "Sleep On Power Button": "Yes",
+        "System Sleep Timer": 0,
+        "Wake On LAN": "Yes"
+      },
+      "Battery Power": {
+        "Disk Sleep Timer": 10,
+        "Display Sleep Timer": 2,
+        "Hibernate Mode": 3,
+        "HighPowerMode": "No",
+        "LowPowerMode": "Yes",
+        "PrioritizeNetworkReachabilityOverSleep": "No",
+        "ReduceBrightness": "Yes",
+        "Sleep On Power Button": "Yes",
+        "System Sleep Timer": 1,
+        "Wake On LAN": "No"
+      },
+      "_name": "sppower_information"
+    },
+    {
+      "_name": "sppower_hwconfig_information",
+      "sppower_ups_installed": "FALSE"
+    },
+    {
+      "_name": "sppower_ac_charger_information",
+      "sppower_ac_charger_ID": "0x7019",
+      "sppower_ac_charger_family": "0xe000400a",
+      "sppower_ac_charger_firmware_version": "01040084",
+      "sppower_ac_charger_hardware_version": "1.0",
+      "sppower_ac_charger_manufacturer": "Apple Inc.",
+      "sppower_ac_charger_name": "140W USB-C Power Adapter",
+      "sppower_ac_charger_serial_number": "<redacted>",
+      "sppower_ac_charger_watts": "140",
+      "sppower_battery_charger_connected": "TRUE",
+      "sppower_battery_is_charging": "FALSE"
+    },
+    {
+      "_items": [
+        {
+          "_items": [
+            {
+              "UserVisible": false,
+              "appPID": 1030,
+              "eventtype": "wake",
+              "scheduledby": "com.apple.alarm.user-invisible-com.apple.calaccessd.travelEngine.periodicRefreshTimer",
+              "time": "2026-08-09T13:34:29Z"
+            },
+            {
+              "UserVisible": false,
+              "appPID": 532,
+              "eventtype": "wake",
+              "scheduledby": "com.apple.alarm.user-invisible-com.apple.osanalytics.hardhighengagementtimer",
+              "time": "2026-08-09T23:59:44Z"
+            }
+          ],
+          "_name": "sppower_scheduled_events_info"
+        }
+      ],
+      "_name": "sppower_events_info"
+    }
+  ]
+}
+{
+  "SPDisplaysDataType": [
+    {
+      "_name": "Apple M5 Max",
+      "spdisplays_mtlgpufamilysupport": "spdisplays_metal4",
+      "spdisplays_ndrvs": [
+        {
+          "_name": "Color LCD",
+          "_spdisplays_display-product-id": "a05d",
+          "_spdisplays_display-serial-number": "<redacted>",
+          "_spdisplays_display-vendor-id": "610",
+          "_spdisplays_display-week": "0",
+          "_spdisplays_display-year": "0",
+          "_spdisplays_displayID": "1",
+          "_spdisplays_pixels": "3456 x 2234",
+          "_spdisplays_resolution": "1728 x 1117 @ 120.00Hz",
+          "spdisplays_ambient_brightness": "spdisplays_yes",
+          "spdisplays_connection_type": "spdisplays_internal",
+          "spdisplays_display_type": "spdisplays_built-in-liquid-retina-xdr",
+          "spdisplays_main": "spdisplays_yes",
+          "spdisplays_mirror": "spdisplays_off",
+          "spdisplays_online": "spdisplays_yes",
+          "spdisplays_pixelresolution": "spdisplays_3456x2234Retina"
+        }
+      ],
+      "spdisplays_vendor": "sppci_vendor_Apple",
+      "sppci_bus": "spdisplays_builtin",
+      "sppci_cores": "40",
+      "sppci_device_type": "spdisplays_gpu",
+      "sppci_model": "Apple M5 Max"
+    }
+  ]
+}
+vm.swapusage: total = 5120.00M  used = 4057.19M  free = 1062.81M  (encrypted)
+The system has 137438953472 (8388608 pages with a page size of 16384).
+System-wide memory free percentage: 95%
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   776824.
+Pages active:                                2178908.
+Pages inactive:                              4961488.
+Pages speculative:                              8517.
+Pages throttled:                                   0.
+Pages wired down:                             310044.
+Pages purgeable:                                2176.
+"Translation faults":                    13910977167.
+Pages copy-on-write:                      2017866226.
+Pages zero filled:                       11989126503.
+Pages reactivated:                         850006916.
+Pages purged:                              115287189.
+File-backed pages:                           6158236.
+Anonymous pages:                              990677.
+Pages stored in compressor:                   687540.
+Pages occupied by compressor:                  85502.
+Decompressions:                            488787994.
+Compressions:                              510781711.
+Pageins:                                   418999043.
+Pageouts:                                    2838533.
+Swapins:                                     5766253.
+Swapouts:                                   13234798.
+Pages tagged:                                 155242.
+Pages tagged resident:                        142810.
+Pages tagged compressed:                       12432.
+Pages tag-storage:                            262144.
+Pages tag-storage holding tags:                 9997.
+Pages tag-storage free:                         4767.
+Pages tag-storage non-tag pageable:           247113.
+Pages tag-storage non-tag wired:                 267.
+Bytes of compressed tags:                    1728960.
+Tagged compressions:                         7368533.
+Tagged decompressions:                       6826275.

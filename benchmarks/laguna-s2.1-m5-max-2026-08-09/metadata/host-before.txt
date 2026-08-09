@@ -1,0 +1,205 @@
+utc=2026-08-09T06:29:12Z
+Darwin [redacted-hostname] 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:41:12 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6050 arm64
+ProductName:		macOS
+ProductVersion:		26.5.1
+BuildVersion:		25F80
+Apple M5 Max
+137438953472
+18
+Xcode 26.5
+Build version 17F42
+Apple clang version 21.0.0 (clang-2100.1.1.101)
+Target: arm64-apple-darwin25.5.0
+Thread model: posix
+InstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+2026-08-08 23:29:13.247 system_profiler[61365:76844543] hw.cpufamily: 0xf76c5b1a
+Hardware:
+
+    Hardware Overview:
+
+      Model Name: MacBook Pro
+      Model Identifier: Mac17,6
+      Model Number: Z1MZ0002ALL/A
+      Chip: Apple M5 Max
+      Total Number of Cores: 18 (6 Super and 12 Performance)
+      Memory: 128 GB
+      System Firmware Version: 18000.120.36
+      OS Loader Version: 18000.120.36
+      Serial Number (system): [redacted]
+      Hardware UUID: [redacted]
+      Provisioning UDID: [redacted]
+      Activation Lock Status: Disabled
+
+Graphics/Displays:
+
+    Apple M5 Max:
+
+      Chipset Model: Apple M5 Max
+      Type: GPU
+      Bus: Built-In
+      Total Number of Cores: 40
+      Vendor: Apple (0x106b)
+      Metal Support: Metal 4
+      Displays:
+        Color LCD:
+          Display Type: Built-in Liquid Retina XDR Display
+          Resolution: 3456 x 2234 Retina
+          Main Display: Yes
+          Mirror: Off
+          Online: Yes
+          Automatically Adjust Brightness: Yes
+          Connection Type: Internal
+
+Power:
+
+    Battery Information:
+
+      Model Information:
+          Serial Number: [redacted]
+          Device Name: bq40z651
+          Pack Lot Code: 0
+          PCB Lot Code: 0
+          Firmware Version: 0b00
+          Hardware Revision: 100
+          Cell Revision: 3b1d
+      Charge Information:
+          The battery’s charge is below the warning level: No
+          Fully Charged: No
+          Charging: Yes
+          State of Charge (%): 73
+      Health Information:
+          Cycle Count: 45
+          Condition: Normal
+          Maximum Capacity: 100%
+
+    System Power Settings:
+
+      AC Power:
+          System Sleep Timer (Minutes): 0
+          Disk Sleep Timer (Minutes): 10
+          Display Sleep Timer (Minutes): 10
+          Sleep on Power Button: Yes
+          Wake on LAN: Yes
+          Current Power Source: Yes
+          Hibernate Mode: 3
+          High Power Mode: No
+          Low Power Mode: Yes
+          Prioritize Network Reachability Over Sleep: No
+      Battery Power:
+          System Sleep Timer (Minutes): 1
+          Disk Sleep Timer (Minutes): 10
+          Display Sleep Timer (Minutes): 2
+          Sleep on Power Button: Yes
+          Wake on LAN: No
+          Hibernate Mode: 3
+          High Power Mode: No
+          Low Power Mode: Yes
+          Prioritize Network Reachability Over Sleep: No
+          Reduce Brightness: Yes
+
+    Hardware Configuration:
+
+      UPS Installed: No
+
+    AC Charger Information:
+
+      Connected: Yes
+      ID: 0x7019
+      Wattage (W): 140
+      Family: 0xe000400a
+      Serial Number: [redacted]
+      Name: 140W USB-C Power Adapter
+      Manufacturer: Apple Inc.
+      Hardware Version: 1.0
+      Firmware Version: 1040084
+      Charging: Yes
+
+    Power Events:
+
+        Next Scheduled Events:
+
+              appPID: 532
+              Type: Wake
+              Scheduled By: com.apple.alarm.user-invisible-com.apple.osanalytics.hardhighengagementtimer
+              Time: 8/7/26, 4:52 PM
+              UserVisible: 0
+
+              appPID: 1030
+              Type: Wake
+              Scheduled By: com.apple.alarm.user-invisible-com.apple.calaccessd.travelEngine.periodicRefreshTimer
+              Time: 8/7/26, 5:21 PM
+              UserVisible: 0
+
+Battery Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         2
+ womp                 0
+ networkoversleep     0
+ sleep                1
+ lessbright           1
+ tcpkeepalive         1
+ disksleep            10
+AC Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         10
+ womp                 1
+ networkoversleep     0
+ sleep                0
+ tcpkeepalive         1
+ disksleep            10
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=35651683)	73%; charging; 8:23 remaining present: true
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+The system has 137438953472 (8388608 pages with a page size of 16384).
+System-wide memory free percentage: 94%
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                     8050.
+Pages active:                                 474010.
+Pages inactive:                              7367130.
+Pages speculative:                             11339.
+Pages throttled:                                   0.
+Pages wired down:                             277649.
+Pages purgeable:                               20321.
+"Translation faults":                    13607535423.
+Pages copy-on-write:                      2007210754.
+Pages zero filled:                       11912858847.
+Pages reactivated:                         849964648.
+Pages purged:                              114952102.
+File-backed pages:                           7357589.
+Anonymous pages:                              494890.
+Pages stored in compressor:                   797477.
+Pages occupied by compressor:                  88223.
+Decompressions:                            488308637.
+Compressions:                              510781711.
+Pageins:                                   412995659.
+Pageouts:                                    2836921.
+Swapins:                                     5703743.
+Swapouts:                                   13206760.
+Pages tagged:                                 127800.
+Pages tagged resident:                        110255.
+Pages tagged compressed:                       17545.
+Pages tag-storage:                            262144.
+Pages tag-storage holding tags:                 8203.
+Pages tag-storage free:                        99742.
+Pages tag-storage non-tag pageable:           153936.
+Pages tag-storage non-tag wired:                 263.
+Bytes of compressed tags:                    2522688.
+Tagged compressions:                         7368533.
+Tagged decompressions:                       6821249.
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   1.8Ti   1.2Ti   611Gi    67%    3.8M  6.4G    0%   /System/Volumes/Data
+/dev/disk3s5   1.8Ti   1.2Ti   611Gi    67%    3.8M  6.4G    0%   /System/Volumes/Data

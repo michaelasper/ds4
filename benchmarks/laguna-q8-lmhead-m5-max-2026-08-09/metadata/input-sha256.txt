@@ -1,0 +1,4 @@
+61fc66596597985cb9408a8530de6322d9e0d5b1d2ad4ed6503938018e0ce903  /Users/masper/source/ds4/gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
+29363eab21bbbccaeea8e13f669e7ce05e8eafc48e31fcf9b725edabb2058666  /Users/masper/source/ds4-bench-lmhead-root2/candidate/tests/long_context_story_prompt.txt
+f53e0d80cb2d4492d24ebd63c7000c397b16ae70f9bf09b3763e5d8323ec209f  /Users/masper/source/ds4-bench-lmhead-root2/candidate/speed-bench/promessi_sposi.txt
+a50224adb48545ded1a76ab176543812a1afb5e76f413dbd7fe8cf256cb9c1c2  /Users/masper/source/ds4-bench-lmhead-root2/results/metadata/promessi-first-600-lines.txt

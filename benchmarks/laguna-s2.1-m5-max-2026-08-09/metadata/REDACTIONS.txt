@@ -1,0 +1,33 @@
+Redactions applied to this results tree before publication
+==========================================================
+
+Only host-identifying values were replaced. No measurement, timing, hash,
+log line, or generated output was modified.
+
+File: metadata/host-before.txt
+  "Serial Number (system): <value>"   -> "Serial Number (system): [redacted]"
+  "Serial Number: <value>"            -> "Serial Number: [redacted]"   (2 occurrences:
+                                          display and battery serials)
+  "Hardware UUID: <value>"            -> "Hardware UUID: [redacted]"
+  "Provisioning UDID: <value>"        -> "Provisioning UDID: [redacted]"
+  hostname in the `uname -a` line     -> "[redacted-hostname]"
+
+File: metadata/host-after.txt
+  Same substitutions applied; this file contained no matches other than the
+  hostname pattern.
+
+File: SUMMARY.md
+  The machine serial number was removed from the host identity table.
+
+Reproducing the redaction from an unredacted tree:
+
+  sed -i '' -E \
+    -e 's/(Serial Number( \(system\))?: ).*/\1[redacted]/' \
+    -e 's/(Hardware UUID: ).*/\1[redacted]/' \
+    -e 's/(Provisioning UDID: ).*/\1[redacted]/' \
+    -e 's/<hostname>/[redacted-hostname]/g' \
+    metadata/host-before.txt metadata/host-after.txt
+
+The pre-redaction archive had SHA-256
+01af914fc57b10ffab014173884524263ae5e5e92767fd8c12690ba1572dee3b and is
+retained locally; it is not published because it contains the values above.
