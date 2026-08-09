@@ -132,6 +132,76 @@ kernel void kernel_add_rms_norm_mul_f32_4(
     }
 }
 
+// Laguna MoE residual path: use the same explicit source grouping and stored
+// residual boundary as the stock add3 followed by RMSNorm while also computing
+// the normalized consumer row.  The volatile reload structurally preserves
+// that old store/load boundary.  Bit-exactness of the explicit grouping is an
+// empirical result on the validated Apple compiler/GPU under default fast
+// math, not a portable arbitrary-IEEE or cross-device guarantee.
+kernel void kernel_add3_rms_norm_mul_f32_4(
+        constant ds4_metal_args_norm & args,
+        device const char * src0,
+        device const char * src1,
+        device const char * src2,
+        device const char * weight,
+        device       char * sum_dst,
+        device       char * norm_dst,
+        threadgroup float * shmem_f32 [[threadgroup(0)]],
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort  sgitg[[simdgroup_index_in_threadgroup]],
+        ushort  tiisg[[thread_index_in_simdgroup]],
+        ushort3 ntg[[threads_per_threadgroup]]) {
+    if (sgitg == 0) shmem_f32[tiisg] = 0.0f;
+
+    const int i01 = tgpig.x;
+    const int i02 = tgpig.y;
+    const int i03 = tgpig.z;
+    device const float4 *a = (device const float4 *)
+        (src0 + i03*args.nbf3[0] + i02*args.nbf2[0] + i01*args.nbf1[0]);
+    device const float4 *b = (device const float4 *)
+        (src1 + i03*args.nbf3[0] + i02*args.nbf2[0] + i01*args.nbf1[0]);
+    device const float4 *c = (device const float4 *)
+        (src2 + i03*args.nbf3[0] + i02*args.nbf2[0] + i01*args.nbf1[0]);
+    device const float4 *w = (device const float4 *)
+        (weight + (i03%args.nef3[1])*args.nbf3[1] +
+                  (i02%args.nef2[1])*args.nbf2[1] +
+                  (i01%args.nef1[1])*args.nbf1[1]);
+    device volatile float4 *sum = (device volatile float4 *)
+        (sum_dst + i03*args.nb3 + i02*args.nb2 + i01*args.nb1);
+    device float4 *norm = (device float4 *)
+        (norm_dst + i03*args.nb3 + i02*args.nb2 + i01*args.nb1);
+
+    // Keep the first pass as the stock residual write.  The device barrier
+    // and volatile reload below intentionally preserve the separate
+    // add3->RMSNorm store/load boundary of the unfused graph.
+    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
+        // Explicit ab/v grouping matches the validated Apple/default-fast-
+        // math path; it is not asserted as a portable IEEE association rule.
+        const float4 ab = a[i00] + b[i00];
+        const float4 v = ab + c[i00];
+        sum[i00] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+
+    float sumf = 0.0f;
+    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
+        const float4 v = sum[i00];
+        sumf += dot(v, v);
+    }
+    sumf = simd_sum(sumf);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tiisg == 0) shmem_f32[sgitg] = sumf;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumf = simd_sum(shmem_f32[tiisg]);
+
+    const float mean = sumf / args.ne00;
+    const float scale = 1.0f / sqrt(mean + args.eps);
+    for (int i00 = tpitg.x; i00 < args.ne00_t; i00 += ntg.x) {
+        norm[i00] = (sum[i00] * scale) * w[i00];
+    }
+}
+
 // RMSNorm reduction used when the following F16 matmul applies the row scale
 // while staging its RHS tile.
 kernel void kernel_rms_norm_scale_f32_4(

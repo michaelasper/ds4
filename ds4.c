@@ -49838,6 +49838,11 @@ static bool dflash_graph_draft_block(
     return ok;
 }
 
+#ifdef __APPLE__
+static int laguna_metal_decode_residual_norm_mode(void);
+static bool laguna_metal_decode_residual_norm_preflight(void);
+#endif
+
 static bool laguna_graph_forward_token(
         ds4_laguna_gpu_graph *g,
         const ds4_model      *model,
@@ -49852,9 +49857,24 @@ static bool laguna_graph_forward_token(
     }
 
 #ifdef __APPLE__
+    bool decode_residual_norm_completion_waited = false;
+    const int decode_residual_norm_mode =
+        laguna_metal_decode_residual_norm_mode();
+    if (decode_residual_norm_mode < 0) return false;
+    const bool decode_residual_fusion = decode_residual_norm_mode != 0;
+    if (decode_residual_fusion &&
+        !ds4_gpu_laguna_decode_residual_norm_available()) {
+        fprintf(stderr,
+                "ds4: Laguna decode residual fusion requested but "
+                "kernel_add3_rms_norm_mul_f32_4 is unavailable\n");
+        return false;
+    }
     uint64_t decode_ladder_mask = 0;
     uint32_t decode_ladder_flushes = 0;
     static bool decode_ladder_reported;
+    static bool decode_residual_norm_reported;
+    uint32_t fused_add2_count = 0;
+    uint32_t fused_add3_count = 0;
     const char *decode_ladder_value =
         getenv("DS4_METAL_LAGUNA_DECODE_LADDER");
     if (!ds4_laguna_decode_ladder_parse(decode_ladder_value,
@@ -49876,6 +49896,11 @@ static bool laguna_graph_forward_token(
     g->q8_lmhead_screen_dispatched = false;
 #else
     const bool q8_lmhead_screen = false;
+#endif
+
+#ifdef __APPLE__
+    bool decode_attn_norm_ready = false;
+    bool decode_output_norm_ready = false;
 #endif
 
     bool ok = ds4_gpu_begin_commands() != 0;
@@ -49913,13 +49938,20 @@ static bool laguna_graph_forward_token(
 
         ok = laguna_graph_capture_feature(capture, g->cur, il);
         if (!ok) break;
-        ok = ds4_gpu_rms_norm_weight_tensor(g->attn_norm,
-                                             g->cur,
-                                             model->map,
-                                             model->size,
-                                             l->attn_norm->abs_offset,
-                                             DS4_N_EMBD,
-                                             DS4_RMS_EPS) != 0;
+#ifdef __APPLE__
+        if (decode_attn_norm_ready) {
+            decode_attn_norm_ready = false;
+        } else
+#endif
+        {
+            ok = ds4_gpu_rms_norm_weight_tensor(g->attn_norm,
+                                                 g->cur,
+                                                 model->map,
+                                                 model->size,
+                                                 l->attn_norm->abs_offset,
+                                                 DS4_N_EMBD,
+                                                 DS4_RMS_EPS) != 0;
+        }
         if (ok) {
             if (l->attn_q->type == DS4_TENSOR_F16) {
                 ok = ds4_gpu_laguna_qkvg_f16_tensor(
@@ -50101,10 +50133,44 @@ static bool laguna_graph_forward_token(
                                          1);
             }
             if (ok) {
-                ok = ds4_gpu_add_tensor(g->next,
-                                        g->after_attn,
-                                        g->ffn_out,
-                                        DS4_N_EMBD) != 0;
+#ifdef __APPLE__
+                const bool fuse_residual_norm =
+                    decode_residual_fusion &&
+                    (il + 1u < (uint32_t)DS4_N_LAYER ||
+                     logits_out != NULL || g->gpu_argmax_enabled);
+                if (fuse_residual_norm) {
+                    ds4_gpu_tensor *norm_out = il + 1u < (uint32_t)DS4_N_LAYER ?
+                        g->attn_norm : g->output_norm;
+                    const uint64_t norm_offset = il + 1u < (uint32_t)DS4_N_LAYER ?
+                        weights->layer[il + 1u].attn_norm->abs_offset :
+                        weights->output_norm->abs_offset;
+                    ok = ds4_gpu_add_rms_norm_weight_rows_tensor(
+                             norm_out,
+                             g->next,
+                             g->after_attn,
+                             g->ffn_out,
+                             model->map,
+                             model->size,
+                             norm_offset,
+                             DS4_N_EMBD,
+                             1,
+                             DS4_RMS_EPS) != 0;
+                    if (ok) {
+                        if (il + 1u < (uint32_t)DS4_N_LAYER) {
+                            decode_attn_norm_ready = true;
+                        } else {
+                            decode_output_norm_ready = true;
+                        }
+                        fused_add2_count++;
+                    }
+                } else
+#endif
+                {
+                    ok = ds4_gpu_add_tensor(g->next,
+                                            g->after_attn,
+                                            g->ffn_out,
+                                            DS4_N_EMBD) != 0;
+                }
             }
         } else if (ok) {
             ok = ds4_gpu_matmul_f32_tensor(g->router_logits,
@@ -50250,11 +50316,46 @@ static bool laguna_graph_forward_token(
                 }
             }
             if (ok) {
-                ok = ds4_gpu_add3_tensor(g->next,
-                                         g->after_attn,
-                                         g->ffn_out,
-                                         g->shared_out,
-                                         DS4_N_EMBD) != 0;
+#ifdef __APPLE__
+                const bool fuse_residual_norm =
+                    decode_residual_fusion &&
+                    (il + 1u < (uint32_t)DS4_N_LAYER ||
+                     logits_out != NULL || g->gpu_argmax_enabled);
+                if (fuse_residual_norm) {
+                    ds4_gpu_tensor *norm_out = il + 1u < (uint32_t)DS4_N_LAYER ?
+                        g->attn_norm : g->output_norm;
+                    const uint64_t norm_offset = il + 1u < (uint32_t)DS4_N_LAYER ?
+                        weights->layer[il + 1u].attn_norm->abs_offset :
+                        weights->output_norm->abs_offset;
+                    ok = ds4_gpu_add3_rms_norm_weight_rows_tensor(
+                             norm_out,
+                             g->next,
+                             g->after_attn,
+                             g->ffn_out,
+                             g->shared_out,
+                             model->map,
+                             model->size,
+                             norm_offset,
+                             DS4_N_EMBD,
+                             1,
+                             DS4_RMS_EPS) != 0;
+                    if (ok) {
+                        if (il + 1u < (uint32_t)DS4_N_LAYER) {
+                            decode_attn_norm_ready = true;
+                        } else {
+                            decode_output_norm_ready = true;
+                        }
+                        fused_add3_count++;
+                    }
+                } else
+#endif
+                {
+                    ok = ds4_gpu_add3_tensor(g->next,
+                                             g->after_attn,
+                                             g->ffn_out,
+                                             g->shared_out,
+                                             DS4_N_EMBD) != 0;
+                }
             }
         }
 
@@ -50279,6 +50380,12 @@ static bool laguna_graph_forward_token(
         ok = laguna_graph_capture_feature(capture, g->cur, DS4_N_LAYER);
     }
     if (ok && (logits_out || g->gpu_argmax_enabled)) {
+#ifdef __APPLE__
+        if (decode_output_norm_ready) {
+            /* The final residual fused directly into g->output_norm. */
+        } else
+#endif
+        {
         ok = ds4_gpu_rms_norm_weight_tensor(g->output_norm,
                                              g->cur,
                                              model->map,
@@ -50286,6 +50393,7 @@ static bool laguna_graph_forward_token(
                                              weights->output_norm->abs_offset,
                                              DS4_N_EMBD,
                                              DS4_RMS_EPS) != 0;
+        }
         if (ok) {
             if (q8_lmhead_screen) {
 #ifdef __APPLE__
@@ -50315,8 +50423,26 @@ static bool laguna_graph_forward_token(
                                           DS4_N_VOCAB) != 0;
     }
 #endif
-    if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
 #ifdef __APPLE__
+    if (ds4_gpu_commands_active()) {
+        if (ds4_gpu_end_commands() == 0) {
+            ok = false;
+        } else {
+            decode_residual_norm_completion_waited = true;
+        }
+    }
+    if (ok && decode_residual_fusion &&
+        decode_residual_norm_completion_waited &&
+        !decode_residual_norm_reported &&
+        (logits_out != NULL || g->gpu_argmax_enabled) &&
+        (fused_add2_count != 0 || fused_add3_count != 0)) {
+        fprintf(stderr,
+                "ds4: Laguna decode residual+RMS fusion enabled "
+                "(add2=%u add3=%u completion=waited)\n",
+                fused_add2_count,
+                fused_add3_count);
+        decode_residual_norm_reported = true;
+    }
     if (ok && decode_ladder_flushes != 0 && !decode_ladder_reported) {
         char canonical[256];
         if (ds4_laguna_decode_ladder_format(decode_ladder_mask,
@@ -50338,6 +50464,8 @@ static bool laguna_graph_forward_token(
         }
         decode_ladder_reported = true;
     }
+#else
+    if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
 #endif
     if (ok && g->gpu_argmax_enabled) {
         ok = ds4_gpu_tensor_read(g->argmax,
@@ -51211,6 +51339,34 @@ static bool laguna_metal_q8_lmhead_screen_requested(void) {
         "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN", false);
 }
 
+/* The decode residual fusion is deliberately stricter than the other
+ * experiment switches: unset, empty, and "0" are off; only a literal "1"
+ * enables it.  Returning -1 lets every caller reject malformed values before
+ * opening a command batch or touching a Laguna graph/KV cache. */
+static int laguna_metal_decode_residual_norm_mode(void) {
+    const char *env = getenv("DS4_METAL_LAGUNA_DECODE_RESIDUAL_NORM");
+    const int mode = ds4_gpu_laguna_decode_residual_norm_env_mode(env);
+    if (mode >= 0) return mode;
+    fprintf(stderr,
+            "ds4: invalid DS4_METAL_LAGUNA_DECODE_RESIDUAL_NORM='%s'; "
+            "expected unset, empty, 0, or literal 1\n",
+            env ? env : "");
+    return mode;
+}
+
+static bool laguna_metal_decode_residual_norm_preflight(void) {
+    const int mode = laguna_metal_decode_residual_norm_mode();
+    if (mode < 0) return false;
+    if (mode == 0) return true;
+    if (!ds4_gpu_laguna_decode_residual_norm_available()) {
+        fprintf(stderr,
+                "ds4: Laguna decode residual fusion requested but "
+                "kernel_add3_rms_norm_mul_f32_4 is unavailable\n");
+        return false;
+    }
+    return true;
+}
+
 #endif
 
 static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
@@ -51286,6 +51442,7 @@ static int generate_laguna_metal_argmax(
         return 1;
     }
 #if defined(__APPLE__)
+    if (!laguna_metal_decode_residual_norm_preflight()) return 1;
     const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
     const bool lmhead_screen_requested =
         laguna_metal_q8_lmhead_screen_requested();
@@ -62138,6 +62295,12 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     s->engine = e;
     s->ctx_size = ctx_size;
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
+#ifdef __APPLE__
+        if (!laguna_metal_decode_residual_norm_preflight()) {
+            free(s);
+            return 1;
+        }
+#endif
         if (!laguna_graph_alloc(&s->laguna_graph, (uint32_t)ctx_size)) {
             free(s);
             return 1;
@@ -63657,6 +63820,14 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
     const char *backend_name = ds4_backend_name(e->backend);
     (void)backend_name; (void)e;
     if (ds4_session_is_laguna(s)) {
+#ifdef __APPLE__
+        if (!laguna_metal_decode_residual_norm_preflight()) {
+            snprintf(err, errlen,
+                     "%s Laguna decode residual fusion preflight failed",
+                     backend_name);
+            return 1;
+        }
+#endif
         if (!s->laguna_graph_ready) {
             snprintf(err, errlen, "%s Laguna graph is not initialized",
                      backend_name);
@@ -65401,6 +65572,14 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
 #else
     ds4_engine *e = s->engine;
     if (ds4_session_is_laguna(s)) {
+#ifdef __APPLE__
+        if (!laguna_metal_decode_residual_norm_preflight()) {
+            if (errlen) snprintf(err, errlen,
+                                 "%s Laguna decode residual fusion preflight failed",
+                                 ds4_backend_name(e->backend));
+            return 1;
+        }
+#endif
         if (!s->laguna_graph_ready) {
             if (errlen) snprintf(err, errlen,
                                  "%s Laguna graph is not initialized",
@@ -70311,6 +70490,19 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
     ds4_engine *e = s->engine;
     if (ds4_session_is_laguna(s) &&
         e->support_kind == DS4_SUPPORT_DFLASH) {
+#ifdef __APPLE__
+        /* DFlash's first action is a speculative graph snapshot.  Reject a
+         * malformed/unsupported residual-fusion request before that snapshot
+         * or any support/KV mutation, matching the ordinary session paths. */
+        if (!laguna_metal_decode_residual_norm_preflight()) {
+            if (err && errlen) {
+                snprintf(err, errlen,
+                         "%s Laguna decode residual fusion preflight failed",
+                         ds4_backend_name(e->backend));
+            }
+            return -1;
+        }
+#endif
         return ds4_session_eval_dflash_speculative_argmax(
             s,
             first_token,

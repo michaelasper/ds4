@@ -523,6 +523,31 @@ int ds4_gpu_laguna_argmax_tensor(
         const ds4_gpu_tensor *logits,
         uint32_t              n_vocab);
 
+/* Opt-in Laguna decode-only MoE residual fusion.  This Apple-only API is
+ * intentionally append-only: dense layer 0 reuses the cross-backend
+ * ds4_gpu_add_rms_norm_weight_rows_tensor API above, while this entry point
+ * supplies the three-input add3 variant used by MoE layers. */
+static inline int ds4_gpu_laguna_decode_residual_norm_env_mode(
+        const char *value) {
+    if (!value || value[0] == '\0' ||
+        (value[0] == '0' && value[1] == '\0')) return 0;
+    if (value[0] == '1' && value[1] == '\0') return 1;
+    return -1;
+}
+int ds4_gpu_laguna_decode_residual_norm_available(void);
+int ds4_gpu_add3_rms_norm_weight_rows_tensor(
+        ds4_gpu_tensor       *norm_out,
+        ds4_gpu_tensor       *sum_out,
+        const ds4_gpu_tensor *a,
+        const ds4_gpu_tensor *b,
+        const ds4_gpu_tensor *c,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint32_t              n,
+        uint32_t              rows,
+        float                 eps);
+
 /* Optional Laguna S2.1 Q8_0 lm-head top-1 screen.  The plan owns a packed
  * high-nibble sidecopy and small per-row scratch; it never exposes an
  * approximate logits row.  Creation performs the sidecopy build, so callers

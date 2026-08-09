@@ -6543,6 +6543,374 @@ static void test_metal_add_rms_norm_weight_rows_exact(void) {
     test_metal_add_rms_norm_weight_rows_exact_case(7168, 5, 89);
 }
 
+static void test_metal_laguna_decode_residual_norm_env(void) {
+    static const struct {
+        const char *value;
+        int expected;
+    } cases[] = {
+        { NULL, 0 },
+        { "", 0 },
+        { "0", 0 },
+        { "1", 1 },
+        { "01", -1 },
+        { "true", -1 },
+        { " 1", -1 },
+        { "1 ", -1 },
+        { "2", -1 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        TEST_ASSERT(ds4_gpu_laguna_decode_residual_norm_env_mode(
+                        cases[i].value) == cases[i].expected);
+    }
+}
+
+static void test_metal_add3_rms_norm_rejects_partial_simd(void) {
+    if (!ds4_gpu_laguna_decode_residual_norm_available()) {
+        const char *override = getenv("DS4_METAL_NORM_SOURCE");
+        if (override && override[0]) {
+            fprintf(stderr,
+                    "ds4-test: skipping partial-SIMD add3 rejection; "
+                    "DS4_METAL_NORM_SOURCE lacks the opt-in kernel\n");
+            return;
+        }
+        TEST_ASSERT(false);
+        return;
+    }
+
+    const uint32_t n = 132u; /* n/4 = 33, one partial SIMD group. */
+    const uint64_t bytes = (uint64_t)n * sizeof(float);
+    const uint64_t page = (uint64_t)getpagesize();
+    void *model_raw = NULL;
+    TEST_ASSERT(posix_memalign(&model_raw, (size_t)page, (size_t)page) == 0);
+    if (!model_raw) return;
+    memset(model_raw, 0, (size_t)page);
+
+    ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *b = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *c = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *sum = ds4_gpu_tensor_alloc(bytes);
+    ds4_gpu_tensor *norm = ds4_gpu_tensor_alloc(bytes);
+    TEST_ASSERT(a && b && c && sum && norm);
+    if (a && b && c && sum && norm) {
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, page) != 0);
+        TEST_ASSERT(ds4_gpu_add3_rms_norm_weight_rows_tensor(
+                        norm, sum, a, b, c, model_raw, page, 0,
+                        n, 1, 1.0e-6f) == 0);
+    }
+    (void)ds4_gpu_wait_submitted_commands();
+    ds4_gpu_tensor_free(norm);
+    ds4_gpu_tensor_free(sum);
+    ds4_gpu_tensor_free(c);
+    ds4_gpu_tensor_free(b);
+    ds4_gpu_tensor_free(a);
+    free(model_raw);
+}
+
+static uint32_t test_laguna_residual_poison_word(uint32_t tag, uint64_t index) {
+    uint32_t payload = (uint32_t)(
+        (index * UINT64_C(2654435761) + (uint64_t)tag * UINT64_C(0x123457)) &
+        UINT64_C(0x003fffff));
+    if (payload == 0) payload = 1;
+    return UINT32_C(0x7fc00000) | payload;
+}
+
+static void test_laguna_store_f32_bits(float *dst, uint32_t bits) {
+    memcpy(dst, &bits, sizeof(bits));
+}
+
+static void test_metal_add3_rms_norm_weight_rows_exact_case(
+        uint32_t n,
+        uint32_t n_rows,
+        uint32_t seed,
+        bool exceptional_row) {
+    const float eps = 1.0e-6f;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t weight_offset = page;
+    const uint64_t row_bytes = (uint64_t)n * sizeof(float);
+    const uint64_t activation_bytes = (uint64_t)n_rows * row_bytes;
+    const uint64_t model_alloc = test_round_up_u64(
+        weight_offset + row_bytes, page);
+
+    void *model_raw = NULL;
+    TEST_ASSERT(posix_memalign(
+                    &model_raw, (size_t)page, (size_t)model_alloc) == 0);
+    ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *b = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *c = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *ref_sum = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *fused_sum = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *ref_norm = ds4_gpu_tensor_alloc(activation_bytes);
+    ds4_gpu_tensor *fused_norm = ds4_gpu_tensor_alloc(activation_bytes);
+    float *a_host = malloc((size_t)activation_bytes);
+    float *b_host = malloc((size_t)activation_bytes);
+    float *c_host = malloc((size_t)activation_bytes);
+    float *ref_sum_host = malloc((size_t)activation_bytes);
+    float *fused_sum_host = malloc((size_t)activation_bytes);
+    float *ref_norm_host = malloc((size_t)activation_bytes);
+    float *fused_norm_host = malloc((size_t)activation_bytes);
+    uint32_t *poison = malloc((size_t)activation_bytes);
+
+    TEST_ASSERT(model_raw != NULL);
+    TEST_ASSERT(a != NULL);
+    TEST_ASSERT(b != NULL);
+    TEST_ASSERT(c != NULL);
+    TEST_ASSERT(ref_sum != NULL);
+    TEST_ASSERT(fused_sum != NULL);
+    TEST_ASSERT(ref_norm != NULL);
+    TEST_ASSERT(fused_norm != NULL);
+    TEST_ASSERT(a_host != NULL);
+    TEST_ASSERT(b_host != NULL);
+    TEST_ASSERT(c_host != NULL);
+    TEST_ASSERT(ref_sum_host != NULL);
+    TEST_ASSERT(fused_sum_host != NULL);
+    TEST_ASSERT(ref_norm_host != NULL);
+    TEST_ASSERT(fused_norm_host != NULL);
+    TEST_ASSERT(poison != NULL);
+
+    const bool allocated = model_raw && a && b && c && ref_sum && fused_sum &&
+        ref_norm && fused_norm && a_host && b_host && c_host &&
+        ref_sum_host && fused_sum_host && ref_norm_host && fused_norm_host &&
+        poison;
+    test_float_compare_stats sum_stats = {0};
+    test_float_compare_stats norm_stats = {0};
+    if (!allocated) goto cleanup;
+
+    if (!ds4_gpu_laguna_decode_residual_norm_available()) {
+        /* An explicitly supplied old norm source is allowed to omit this
+         * opt-in kernel; the default in-repo source must provide it. */
+        const char *override = getenv("DS4_METAL_NORM_SOURCE");
+        if (override && override[0]) {
+            fprintf(stderr,
+                    "ds4-test: skipping add3+RMS exact case because "
+                    "DS4_METAL_NORM_SOURCE lacks the opt-in kernel\n");
+            goto cleanup;
+        }
+        TEST_ASSERT(false);
+        goto cleanup;
+    }
+
+    memset(model_raw, 0, (size_t)model_alloc);
+    float *weight = (float *)((uint8_t *)model_raw + weight_offset);
+    for (uint32_t d = 0; d < n; d++) {
+        const uint32_t key = d * 29u + seed * 17u;
+        weight[d] = (d % 31u == 0u) ? -0.0f :
+            0.25f + (float)(key % 113u) / 64.0f;
+    }
+    for (uint32_t row = 0; row < n_rows; row++) {
+        for (uint32_t d = 0; d < n; d++) {
+            const uint32_t key = d * 73u + row * 1009u + seed * 131u;
+            const uint64_t i = (uint64_t)row * n + d;
+            if (exceptional_row && row + 1u == n_rows && d < 6u) {
+                /* Keep exceptional values in one isolated row.  Metal's
+                 * fast-math NaN/Inf payload behavior is not a portable
+                 * source-level contract, so this row is a write/poison probe;
+                 * the finite row below remains the exactness gate. */
+                switch (d) {
+                case 0:
+                    a_host[i] = 0x1.fffffep+127f;
+                    b_host[i] = -0x1.fffffep+127f;
+                    c_host[i] = 1.0f;
+                    break;
+                case 1:
+                    a_host[i] = 0x1.fffffep+127f;
+                    b_host[i] = 0x1.fffffep+127f;
+                    c_host[i] = 0.0f;
+                    break;
+                case 2:
+                    test_laguna_store_f32_bits(&a_host[i], UINT32_C(0x7f800000));
+                    b_host[i] = 1.0f;
+                    c_host[i] = -1.0f;
+                    break;
+                case 3:
+                    test_laguna_store_f32_bits(&a_host[i], UINT32_C(0x7fc00000));
+                    b_host[i] = 1.0f;
+                    c_host[i] = 2.0f;
+                    break;
+                case 4:
+                    test_laguna_store_f32_bits(&a_host[i], UINT32_C(0xff800000));
+                    test_laguna_store_f32_bits(&b_host[i], UINT32_C(0x7f800000));
+                    c_host[i] = 0.0f;
+                    break;
+                default:
+                    a_host[i] = 0x1p-149f;
+                    b_host[i] = -0x1p-149f;
+                    c_host[i] = 0x1p-149f;
+                    break;
+                }
+            } else if (row == 0u && d == 7u) {
+                /* A triple negative zero is the deterministic signed-zero
+                 * case; (1 + -1) + +/-0 would round to +0. */
+                const uint32_t neg_zero = UINT32_C(0x80000000);
+                memcpy(&a_host[i], &neg_zero, sizeof(neg_zero));
+                memcpy(&b_host[i], &neg_zero, sizeof(neg_zero));
+                memcpy(&c_host[i], &neg_zero, sizeof(neg_zero));
+            } else if ((key % 19u) == 0u) {
+                /* Cancellation and an explicit signed zero exercise the
+                 * stock left-associated add3 operation. */
+                a_host[i] = 1.0f;
+                b_host[i] = -1.0f;
+                c_host[i] = (d & 1u) ? -0.0f : 0.0f;
+            } else if ((key % 23u) == 0u) {
+                a_host[i] = 1.0e20f;
+                b_host[i] = -1.0e20f;
+                c_host[i] = (float)((int)(key % 17u) - 8) / 4096.0f;
+            } else if ((key % 29u) == 0u) {
+                /* Include subnormals and max-finite operands whose
+                 * left-associated residual remains finite.  The latter
+                 * avoids making every tested row's RMS reduction Inf. */
+                a_host[i] = (d & 1u) ? 0x1.fffffep+127f : 0x1p-149f;
+                b_host[i] = (d & 1u) ? -0x1.fffffep+127f : -0x1p-149f;
+                c_host[i] = (d & 1u) ? 1.0f : 0x1p-149f;
+            } else {
+                a_host[i] = (float)((int)(key % 4093u) - 2046) / 1024.0f;
+                b_host[i] = (float)((int)((key * 7u + 19u) % 4093u) - 2046) /
+                    2048.0f;
+                c_host[i] = (float)((int)((key * 11u + 31u) % 4093u) - 2046) /
+                    4096.0f;
+            }
+        }
+    }
+
+    TEST_ASSERT(ds4_gpu_tensor_write(a, 0, a_host, activation_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(b, 0, b_host, activation_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(c, 0, c_host, activation_bytes) != 0);
+    memset(poison, 0xa5, (size_t)activation_bytes);
+    const size_t value_count = (size_t)n * n_rows;
+    for (size_t i = 0; i < value_count; i++) {
+        poison[i] = test_laguna_residual_poison_word(1, i);
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    ref_sum, 0, poison, activation_bytes) != 0);
+    for (size_t i = 0; i < value_count; i++) {
+        poison[i] = test_laguna_residual_poison_word(2, i);
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    fused_sum, 0, poison, activation_bytes) != 0);
+    for (size_t i = 0; i < value_count; i++) {
+        poison[i] = test_laguna_residual_poison_word(3, i);
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    ref_norm, 0, poison, activation_bytes) != 0);
+    for (size_t i = 0; i < value_count; i++) {
+        poison[i] = test_laguna_residual_poison_word(4, i);
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    fused_norm, 0, poison, activation_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_set_model_map(model_raw, model_alloc) != 0);
+    TEST_ASSERT(ds4_gpu_add3_tensor(
+                    ref_sum, a, b, c,
+                    (uint32_t)((uint64_t)n * n_rows)) != 0);
+    TEST_ASSERT(ds4_gpu_rms_norm_weight_rows_tensor(
+                    ref_norm, ref_sum, model_raw, model_alloc,
+                    weight_offset, n, n_rows, eps) != 0);
+    TEST_ASSERT(ds4_gpu_add3_rms_norm_weight_rows_tensor(
+                    fused_norm, fused_sum, a, b, c,
+                    model_raw, model_alloc, weight_offset, n, n_rows, eps) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    ref_sum, 0, ref_sum_host, activation_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    fused_sum, 0, fused_sum_host, activation_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    ref_norm, 0, ref_norm_host, activation_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    fused_norm, 0, fused_norm_host, activation_bytes) != 0);
+    for (size_t i = 0; i < value_count; i++) {
+        uint32_t bits = 0;
+        memcpy(&bits, &ref_sum_host[i], sizeof(bits));
+        TEST_ASSERT(bits != test_laguna_residual_poison_word(1, i));
+        memcpy(&bits, &fused_sum_host[i], sizeof(bits));
+        TEST_ASSERT(bits != test_laguna_residual_poison_word(2, i));
+        memcpy(&bits, &ref_norm_host[i], sizeof(bits));
+        TEST_ASSERT(bits != test_laguna_residual_poison_word(3, i));
+        memcpy(&bits, &fused_norm_host[i], sizeof(bits));
+        TEST_ASSERT(bits != test_laguna_residual_poison_word(4, i));
+    }
+    {
+        const size_t signed_zero_index = 7u;
+        uint32_t input_a_bits = 0;
+        uint32_t input_b_bits = 0;
+        uint32_t input_c_bits = 0;
+        uint32_t ref_bits = 0;
+        uint32_t fused_bits = 0;
+        memcpy(&input_a_bits, &a_host[signed_zero_index], sizeof(input_a_bits));
+        memcpy(&input_b_bits, &b_host[signed_zero_index], sizeof(input_b_bits));
+        memcpy(&input_c_bits, &c_host[signed_zero_index], sizeof(input_c_bits));
+        memcpy(&ref_bits, &ref_sum_host[signed_zero_index], sizeof(ref_bits));
+        memcpy(&fused_bits, &fused_sum_host[signed_zero_index], sizeof(fused_bits));
+        TEST_ASSERT(input_a_bits == UINT32_C(0x80000000));
+        TEST_ASSERT(input_b_bits == UINT32_C(0x80000000));
+        TEST_ASSERT(input_c_bits == UINT32_C(0x80000000));
+        TEST_ASSERT(ref_bits == fused_bits);
+    }
+    for (uint32_t row = 0; row < n_rows; row++) {
+        for (uint32_t d = 0; d < n; d++) {
+            const uint32_t key = d * 73u + row * 1009u + seed * 131u;
+            /* The host sentinel checks intentionally stop at ordinary finite
+             * values: the Metal fast-math contract flushes subnormal sums,
+             * while the ref/fused GPU bit comparison above still covers the
+             * key%29 subnormal/max-finite vectors. */
+            if ((exceptional_row && row + 1u == n_rows) ||
+                ((key % 19u) != 0u && (key % 23u) != 0u)) continue;
+            const uint64_t i = (uint64_t)row * n + d;
+            volatile float partial = a_host[i] + b_host[i];
+            volatile float expected = partial + c_host[i];
+            const float expected_value = expected;
+            uint32_t expected_bits = 0;
+            uint32_t actual_bits = 0;
+            memcpy(&expected_bits, &expected_value, sizeof(expected_bits));
+            memcpy(&actual_bits, &fused_sum_host[i], sizeof(actual_bits));
+            TEST_ASSERT(expected_bits == actual_bits);
+        }
+    }
+    const size_t exact_value_count = exceptional_row ? (size_t)n : value_count;
+    sum_stats = test_compare_float_bits(
+        ref_sum_host, fused_sum_host, exact_value_count);
+    norm_stats = test_compare_float_bits(
+        ref_norm_host, fused_norm_host, exact_value_count);
+    fprintf(stderr,
+            "ds4-test: add3+RMSNorm rows exact n=%u rows=%u "
+            "sum=%zu/%llu max_ulp=%u norm=%zu/%llu max_ulp=%u"
+            " exceptional=%s\n",
+            n, n_rows,
+            sum_stats.mismatch_count,
+            (unsigned long long)exact_value_count,
+            sum_stats.max_ulp,
+            norm_stats.mismatch_count,
+            (unsigned long long)exact_value_count,
+            norm_stats.max_ulp,
+            exceptional_row ? "write-probe" : "no");
+    TEST_ASSERT(sum_stats.mismatch_count == 0);
+    TEST_ASSERT(norm_stats.mismatch_count == 0);
+
+cleanup:
+    (void)ds4_gpu_wait_submitted_commands();
+    free(poison);
+    free(fused_norm_host);
+    free(ref_norm_host);
+    free(fused_sum_host);
+    free(ref_sum_host);
+    free(c_host);
+    free(b_host);
+    free(a_host);
+    ds4_gpu_tensor_free(fused_norm);
+    ds4_gpu_tensor_free(ref_norm);
+    ds4_gpu_tensor_free(fused_sum);
+    ds4_gpu_tensor_free(ref_sum);
+    ds4_gpu_tensor_free(c);
+    ds4_gpu_tensor_free(b);
+    ds4_gpu_tensor_free(a);
+    free(model_raw);
+}
+
+static void test_metal_add3_rms_norm_weight_rows_exact(void) {
+    test_metal_add3_rms_norm_weight_rows_exact_case(4096, 1, 101, false);
+    test_metal_add3_rms_norm_weight_rows_exact_case(4096, 3, 103, false);
+    test_metal_add3_rms_norm_weight_rows_exact_case(3072, 1, 106, false);
+    test_metal_add3_rms_norm_weight_rows_exact_case(3072, 4, 107, false);
+    test_metal_add3_rms_norm_weight_rows_exact_case(7168, 5, 109, false);
+    test_metal_add3_rms_norm_weight_rows_exact_case(3072, 2, 113, true);
+}
+
 static void test_metal_hc_split_weighted_sum_norm_batch_exact(void) {
     /* Compare the batched HC+RMSNorm fusion against the exact two-dispatch
      * sequence used by the reference path at DS4's production dimensions. */
@@ -8159,6 +8527,8 @@ static void test_metal_kernel_group(void) {
     test_dspark_cache_window_crop();
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
+    test_metal_laguna_decode_residual_norm_env();
+    test_metal_add3_rms_norm_rejects_partial_simd();
     test_metal_laguna_gpu_argmax();
     test_metal_laguna_decode_ladder_ordering_exact();
     test_metal_laguna_q8_lmhead_screen_gates();
@@ -8182,6 +8552,7 @@ static void test_metal_kernel_group(void) {
     test_laguna_gqa3_decode_numeric();
     test_metal_laguna_qk_norm_rope_pair_exact();
     test_metal_add_rms_norm_weight_rows_exact();
+    test_metal_add3_rms_norm_weight_rows_exact();
     test_metal_hc_split_weighted_sum_norm_batch_exact();
     test_metal_output_hc_weights4_exact();
     test_metal_output_hc_sum_norm_exact();
