@@ -97,6 +97,11 @@ static id<MTLComputePipelineState> g_mul_pipeline;
 static id<MTLComputePipelineState> g_rms_norm_pipeline;
 static id<MTLComputePipelineState> g_rms_norm_plain_pipeline;
 static id<MTLComputePipelineState> g_add_rms_norm_pipeline;
+/* Optional Laguna S2.1 decode fusion.  Keep this lazy so an older explicit
+ * DS4_METAL_NORM_SOURCE override remains usable until the opt-in path asks
+ * for the new kernel. */
+static id<MTLComputePipelineState> g_laguna_add3_rms_norm_pipeline;
+static int g_laguna_add3_rms_norm_pipeline_checked;
 static id<MTLComputePipelineState> g_rms_norm_scale_pipeline;
 static id<MTLComputePipelineState> g_dsv4_qkv_rms_norm_pipeline;
 static id<MTLComputePipelineState> g_dsv4_head_rms_norm_rope_tail_pipeline;
@@ -2266,6 +2271,16 @@ static id<MTLComputePipelineState> ds4_gpu_get_pipeline(
 
     [g_pipeline_cache setObject:pipeline forKey:key];
     return pipeline;
+}
+
+static id<MTLComputePipelineState>
+ds4_gpu_laguna_add3_rms_norm_pipeline(void) {
+    if (!g_laguna_add3_rms_norm_pipeline_checked) {
+        g_laguna_add3_rms_norm_pipeline_checked = 1;
+        g_laguna_add3_rms_norm_pipeline =
+            ds4_gpu_get_pipeline("kernel_add3_rms_norm_mul_f32_4");
+    }
+    return g_laguna_add3_rms_norm_pipeline;
 }
 
 static int ds4_gpu_disable_hot_pipeline_statics(void) {
@@ -10615,6 +10630,8 @@ void ds4_gpu_cleanup(void) {
         g_rms_norm_pipeline = nil;
         g_rms_norm_plain_pipeline = nil;
         g_add_rms_norm_pipeline = nil;
+        g_laguna_add3_rms_norm_pipeline = nil;
+        g_laguna_add3_rms_norm_pipeline_checked = 0;
         g_rms_norm_scale_pipeline = nil;
         g_dsv4_qkv_rms_norm_pipeline = nil;
         g_dsv4_head_rms_norm_rope_tail_pipeline = nil;
@@ -18239,6 +18256,192 @@ int ds4_gpu_argmax_tensor(
 int ds4_gpu_laguna_argmax_available(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     return g_laguna_argmax_f32_pipeline != nil;
+}
+
+static int ds4_gpu_laguna_add3_rms_norm_pipeline_usable(
+        id<MTLComputePipelineState> pipeline,
+        uint32_t                    n) {
+    if (!pipeline) return 0;
+    /* The kernel's reduction stages one float per SIMD lane in a fixed
+     * 32-entry threadgroup buffer.  A different execution width would make
+     * the existing simdgroup indexing/second reduction topology invalid. */
+    const NSUInteger execution_width = pipeline.threadExecutionWidth;
+    if (execution_width != 32u) {
+        fprintf(stderr,
+                "ds4: Laguna add3+RMS norm pipeline has execution width %lu, "
+                "requires 32\n",
+                (unsigned long)execution_width);
+        return 0;
+    }
+    const NSUInteger required = ds4_gpu_rms_norm_threads(n);
+    if (required > execution_width && required % execution_width != 0u) {
+        fprintf(stderr,
+                "ds4: Laguna add3+RMS norm needs %lu threads, which "
+                "leaves a partial SIMD group at width %lu\n",
+                (unsigned long)required,
+                (unsigned long)execution_width);
+        return 0;
+    }
+    if (pipeline.maxTotalThreadsPerThreadgroup < required) {
+        fprintf(stderr,
+                "ds4: Laguna add3+RMS norm pipeline supports %lu "
+                "threads, needs at least %lu for n=%u\n",
+                (unsigned long)pipeline.maxTotalThreadsPerThreadgroup,
+                (unsigned long)required,
+                n);
+        return 0;
+    }
+    return 1;
+}
+
+int ds4_gpu_laguna_decode_residual_norm_available(void) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    @autoreleasepool {
+        id<MTLComputePipelineState> pipeline =
+            ds4_gpu_laguna_add3_rms_norm_pipeline();
+        if (!pipeline) return 0;
+        return ds4_gpu_laguna_add3_rms_norm_pipeline_usable(pipeline, 3072u);
+    }
+}
+
+static int ds4_gpu_metal_ranges_overlap(
+        const ds4_gpu_tensor *a,
+        uint64_t              a_bytes,
+        const ds4_gpu_tensor *b,
+        uint64_t              b_bytes) {
+    id<MTLBuffer> abuf = ds4_gpu_tensor_buffer(a);
+    id<MTLBuffer> bbuf = ds4_gpu_tensor_buffer(b);
+    if (!abuf || !bbuf || abuf != bbuf || a_bytes == 0 || b_bytes == 0) {
+        return 0;
+    }
+    const uint64_t a0 = (uint64_t)ds4_gpu_tensor_offset(a);
+    const uint64_t b0 = (uint64_t)ds4_gpu_tensor_offset(b);
+    if (a0 > UINT64_MAX - a_bytes || b0 > UINT64_MAX - b_bytes) {
+        return 1;
+    }
+    const uint64_t a1 = a0 + a_bytes;
+    const uint64_t b1 = b0 + b_bytes;
+    return a0 < b1 && b0 < a1;
+}
+
+int ds4_gpu_add3_rms_norm_weight_rows_tensor(
+        ds4_gpu_tensor       *norm_out,
+        ds4_gpu_tensor       *sum_out,
+        const ds4_gpu_tensor *a,
+        const ds4_gpu_tensor *b,
+        const ds4_gpu_tensor *c,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint32_t              n,
+        uint32_t              rows,
+        float                 eps) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    if (!norm_out || !sum_out || !a || !b || !c || !model_map ||
+        model_size == 0 || n == 0 || rows == 0 || (n & 3u) != 0 ||
+        n > (uint32_t)INT32_MAX || rows > (uint32_t)INT32_MAX) {
+        fprintf(stderr,
+                "ds4: Laguna add3+RMS norm received invalid arguments\n");
+        return 0;
+    }
+
+    @autoreleasepool {
+        id<MTLComputePipelineState> pipeline =
+            ds4_gpu_laguna_add3_rms_norm_pipeline();
+        if (!pipeline) {
+            fprintf(stderr,
+                    "ds4: Laguna add3+RMS norm pipeline is unavailable\n");
+            return 0;
+        }
+        const uint64_t row_bytes = (uint64_t)n * sizeof(float);
+        if ((uint64_t)rows > UINT64_MAX / row_bytes) {
+            fprintf(stderr,
+                    "ds4: Laguna add3+RMS norm row count overflows activation size\n");
+            return 0;
+        }
+        const uint64_t bytes = row_bytes * rows;
+        if (!ds4_gpu_laguna_add3_rms_norm_pipeline_usable(pipeline, n)) {
+            return 0;
+        }
+        id<MTLBuffer> abuf = ds4_gpu_tensor_buffer(a);
+        id<MTLBuffer> bbuf = ds4_gpu_tensor_buffer(b);
+        id<MTLBuffer> cbuf = ds4_gpu_tensor_buffer(c);
+        id<MTLBuffer> sumbuf = ds4_gpu_tensor_buffer(sum_out);
+        id<MTLBuffer> normbuf = ds4_gpu_tensor_buffer(norm_out);
+        if (!abuf || !bbuf || !cbuf || !sumbuf || !normbuf ||
+            ds4_gpu_tensor_bytes(a) < bytes ||
+            ds4_gpu_tensor_bytes(b) < bytes ||
+            ds4_gpu_tensor_bytes(c) < bytes ||
+            ds4_gpu_tensor_bytes(sum_out) < bytes ||
+            ds4_gpu_tensor_bytes(norm_out) < bytes ||
+            ds4_gpu_metal_ranges_overlap(sum_out, bytes, norm_out, bytes) ||
+            ds4_gpu_metal_ranges_overlap(sum_out, bytes, a, bytes) ||
+            ds4_gpu_metal_ranges_overlap(sum_out, bytes, b, bytes) ||
+            ds4_gpu_metal_ranges_overlap(sum_out, bytes, c, bytes) ||
+            ds4_gpu_metal_ranges_overlap(norm_out, bytes, a, bytes) ||
+            ds4_gpu_metal_ranges_overlap(norm_out, bytes, b, bytes) ||
+            ds4_gpu_metal_ranges_overlap(norm_out, bytes, c, bytes)) {
+            fprintf(stderr,
+                    "ds4: Laguna add3+RMS norm received undersized or aliased activation buffers\n");
+            return 0;
+        }
+        if (weight_offset > model_size ||
+            row_bytes > model_size - weight_offset) {
+            fprintf(stderr,
+                    "ds4: Laguna add3+RMS norm range is outside the mapped model\n");
+            return 0;
+        }
+
+        const bool exact_decode_weight_view =
+            rows == 1u &&
+            row_bytes <= (1ull << 20) &&
+            getenv("DS4_METAL_ENABLE_DECODE_NORM_EXACT_VIEWS") != NULL &&
+            getenv("DS4_METAL_DISABLE_DECODE_NORM_EXACT_VIEWS") == NULL;
+        uint64_t inner_offset = 0;
+        id<MTLBuffer> wbuf = exact_decode_weight_view ?
+            ds4_gpu_wrap_model_exact_range(model_map,
+                                           model_size,
+                                           weight_offset,
+                                           row_bytes,
+                                           &inner_offset) :
+            ds4_gpu_wrap_model_range(model_map,
+                                     model_size,
+                                     weight_offset,
+                                     row_bytes,
+                                     &inner_offset);
+        if (!wbuf) return 0;
+
+        ds4_gpu_rms_norm_args args =
+            ds4_gpu_make_rms_norm_args(n, rows, eps);
+        int owned = 0;
+        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+        if (!cb) return 0;
+        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        if (!enc) {
+            if (owned) {
+                (void)ds4_gpu_finish_command_buffer(
+                    cb, owned, "Laguna add3+RMS norm setup");
+            }
+            return 0;
+        }
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBytes:&args length:sizeof(args) atIndex:0];
+        [enc setBuffer:abuf offset:ds4_gpu_tensor_offset(a) atIndex:1];
+        [enc setBuffer:bbuf offset:ds4_gpu_tensor_offset(b) atIndex:2];
+        [enc setBuffer:cbuf offset:ds4_gpu_tensor_offset(c) atIndex:3];
+        [enc setBuffer:wbuf offset:(NSUInteger)inner_offset atIndex:4];
+        [enc setBuffer:sumbuf offset:ds4_gpu_tensor_offset(sum_out) atIndex:5];
+        [enc setBuffer:normbuf offset:ds4_gpu_tensor_offset(norm_out) atIndex:6];
+        [enc setThreadgroupMemoryLength:32u * sizeof(float) atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(ds4_gpu_rms_norm_threads(n), 1, 1)];
+        ds4_gpu_end_compute_encoder(cb, enc);
+
+        if (!ds4_gpu_finish_command_buffer(
+                cb, owned, "Laguna add3+RMS norm")) return 0;
+    }
+    return 1;
 }
 
 /* Encode the Laguna argmax into an already-open compute encoder.  The Q8
