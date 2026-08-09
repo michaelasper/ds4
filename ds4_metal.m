@@ -248,14 +248,19 @@ static id<MTLComputePipelineState> g_glm_q4_k_pair_swiglu4_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q4_k_pair_swiglu2_mapped_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q4_k_pair_swiglu2_mapped_row_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q2_k_pair_swiglu_f32_pipeline;
+static id<MTLComputePipelineState> g_glm_q2_k_pair_swiglu_r1_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q3_k_pair_swiglu_f32_pipeline;
+static id<MTLComputePipelineState> g_glm_q3_k_pair_swiglu_r1_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q2_k_addr_pair_swiglu2_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q2_k_addr_pair_swiglu2_masked_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q4_k_addr_pair_swiglu_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q4_k_addr_pair_swiglu_masked_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q2_k_down_f32_pipeline;
+static id<MTLComputePipelineState> g_glm_q2_k_down_r1_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q3_k_down_f32_pipeline;
+static id<MTLComputePipelineState> g_glm_q3_k_down_r1_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q4_k_down_f32_pipeline;
+static id<MTLComputePipelineState> g_glm_q4_k_down_r1_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q2_k_addr_down_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q4_k_addr_down_f32_pipeline;
 static id<MTLComputePipelineState> g_glm_q5_k_pair_swiglu_f32_pipeline;
@@ -8694,8 +8699,12 @@ int ds4_gpu_init(void) {
             ds4_gpu_get_pipeline("kernel_glm_q4_K_pair_swiglu2_mapped_row_f32");
         g_glm_q2_k_pair_swiglu_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_glm_q2_K_pair_swiglu_f32");
+        g_glm_q2_k_pair_swiglu_r1_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_glm_q2_K_pair_swiglu_r1_f32");
         g_glm_q3_k_pair_swiglu_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_glm_q3_K_pair_swiglu_f32");
+        g_glm_q3_k_pair_swiglu_r1_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_glm_q3_K_pair_swiglu_r1_f32");
         g_glm_q2_k_addr_pair_swiglu2_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_glm_q2_K_addr_pair_swiglu2_f32");
         g_glm_q2_k_addr_pair_swiglu2_masked_f32_pipeline =
@@ -8706,10 +8715,16 @@ int ds4_gpu_init(void) {
             ds4_gpu_get_pipeline("kernel_glm_q4_K_addr_pair_swiglu_f32_masked");
         g_glm_q2_k_down_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_glm_q2_K_down_f32");
+        g_glm_q2_k_down_r1_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_glm_q2_K_down_r1_f32");
         g_glm_q3_k_down_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_glm_q3_K_down_f32");
+        g_glm_q3_k_down_r1_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_glm_q3_K_down_r1_f32");
         g_glm_q4_k_down_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_glm_q4_K_down_simd_f32");
+        g_glm_q4_k_down_r1_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_glm_q4_K_down_r1_simd_f32");
         g_glm_q2_k_addr_down_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_glm_q2_K_addr_down_f32");
         g_glm_q4_k_addr_down_f32_pipeline =
@@ -8810,14 +8825,19 @@ int ds4_gpu_init(void) {
             !g_glm_q4_k_pair_swiglu2_mapped_f32_pipeline ||
             !g_glm_q4_k_pair_swiglu2_mapped_row_f32_pipeline ||
             !g_glm_q2_k_pair_swiglu_f32_pipeline ||
+            !g_glm_q2_k_pair_swiglu_r1_f32_pipeline ||
             !g_glm_q3_k_pair_swiglu_f32_pipeline ||
+            !g_glm_q3_k_pair_swiglu_r1_f32_pipeline ||
             !g_glm_q2_k_addr_pair_swiglu2_f32_pipeline ||
             !g_glm_q2_k_addr_pair_swiglu2_masked_f32_pipeline ||
             !g_glm_q4_k_addr_pair_swiglu_f32_pipeline ||
             !g_glm_q4_k_addr_pair_swiglu_masked_f32_pipeline ||
             !g_glm_q2_k_down_f32_pipeline ||
+            !g_glm_q2_k_down_r1_f32_pipeline ||
             !g_glm_q3_k_down_f32_pipeline ||
+            !g_glm_q3_k_down_r1_f32_pipeline ||
             !g_glm_q4_k_down_f32_pipeline ||
+            !g_glm_q4_k_down_r1_f32_pipeline ||
             !g_glm_q2_k_addr_down_f32_pipeline ||
             !g_glm_q4_k_addr_down_f32_pipeline ||
             !g_glm_q5_k_pair_swiglu_f32_pipeline ||
@@ -38112,6 +38132,10 @@ int ds4_gpu_glm_routed_moe_one_tensor(
                                                      n_expert);
         }
 
+        const BOOL glm_qmv_r1 =
+            !use_stream_expert_addr_table &&
+            ds4_gpu_env_bool("DS4_METAL_GLM_QMV_R1") > 0;
+
         uint64_t gate_inner = 0;
         uint64_t up_inner = 0;
         uint64_t down_inner = 0;
@@ -38145,11 +38169,17 @@ int ds4_gpu_glm_routed_moe_one_tensor(
               ds4_gpu_hot_pipeline(g_glm_q4_k_addr_pair_swiglu_f32_pipeline,
                                    "kernel_glm_q4_K_addr_pair_swiglu_f32")) :
              gate_pair_q2 ?
-             ds4_gpu_hot_pipeline(g_glm_q2_k_pair_swiglu_f32_pipeline,
-                                  "kernel_glm_q2_K_pair_swiglu_f32") :
+             ds4_gpu_hot_pipeline(
+                 glm_qmv_r1 ? g_glm_q2_k_pair_swiglu_r1_f32_pipeline :
+                               g_glm_q2_k_pair_swiglu_f32_pipeline,
+                 glm_qmv_r1 ? "kernel_glm_q2_K_pair_swiglu_r1_f32" :
+                               "kernel_glm_q2_K_pair_swiglu_f32") :
              gate_pair_q3 ?
-             ds4_gpu_hot_pipeline(g_glm_q3_k_pair_swiglu_f32_pipeline,
-                                  "kernel_glm_q3_K_pair_swiglu_f32") :
+             ds4_gpu_hot_pipeline(
+                 glm_qmv_r1 ? g_glm_q3_k_pair_swiglu_r1_f32_pipeline :
+                               g_glm_q3_k_pair_swiglu_f32_pipeline,
+                 glm_qmv_r1 ? "kernel_glm_q3_K_pair_swiglu_r1_f32" :
+                               "kernel_glm_q3_K_pair_swiglu_f32") :
              gate_pair_q5 ?
              ds4_gpu_hot_pipeline(g_glm_q5_k_pair_swiglu_f32_pipeline,
                                   "kernel_glm_q5_K_pair_swiglu_f32") :
@@ -38163,14 +38193,23 @@ int ds4_gpu_glm_routed_moe_one_tensor(
               ds4_gpu_hot_pipeline(g_glm_q4_k_addr_down_f32_pipeline,
                                    "kernel_glm_q4_K_addr_down_f32")) :
              down_scalar_q2 ?
-             ds4_gpu_hot_pipeline(g_glm_q2_k_down_f32_pipeline,
-                                  "kernel_glm_q2_K_down_f32") :
+             ds4_gpu_hot_pipeline(
+                 glm_qmv_r1 ? g_glm_q2_k_down_r1_f32_pipeline :
+                               g_glm_q2_k_down_f32_pipeline,
+                 glm_qmv_r1 ? "kernel_glm_q2_K_down_r1_f32" :
+                               "kernel_glm_q2_K_down_f32") :
              down_simd_q3 ?
-             ds4_gpu_hot_pipeline(g_glm_q3_k_down_f32_pipeline,
-                                  "kernel_glm_q3_K_down_f32") :
+             ds4_gpu_hot_pipeline(
+                 glm_qmv_r1 ? g_glm_q3_k_down_r1_f32_pipeline :
+                               g_glm_q3_k_down_f32_pipeline,
+                 glm_qmv_r1 ? "kernel_glm_q3_K_down_r1_f32" :
+                               "kernel_glm_q3_K_down_f32") :
              down_scalar_q4 ?
-             ds4_gpu_hot_pipeline(g_glm_q4_k_down_f32_pipeline,
-                                  "kernel_glm_q4_K_down_f32") :
+             ds4_gpu_hot_pipeline(
+                 glm_qmv_r1 ? g_glm_q4_k_down_r1_f32_pipeline :
+                               g_glm_q4_k_down_f32_pipeline,
+                 glm_qmv_r1 ? "kernel_glm_q4_K_down_r1_simd_f32" :
+                               "kernel_glm_q4_K_down_simd_f32") :
              down_simd_q5 ?
              ds4_gpu_hot_pipeline(g_glm_q5_k_down_f32_pipeline,
                                   "kernel_glm_q5_K_down_f32") :
@@ -38194,16 +38233,21 @@ int ds4_gpu_glm_routed_moe_one_tensor(
             use_stream_expert_addr_table ?
             (gate_pair_q2 ? "q2_stream_addr_swiglu" :
                             "q4_stream_addr_swiglu") :
-            gate_pair_q2 ? "q2_scalar_swiglu" :
-            gate_pair_q3 ? "q3_pair_simd_swiglu" :
+            gate_pair_q2 ? (glm_qmv_r1 ? "q2_r1_simd_swiglu" :
+                                        "q2_scalar_swiglu") :
+            gate_pair_q3 ? (glm_qmv_r1 ? "q3_r1_simd_swiglu" :
+                                        "q3_pair_simd_swiglu") :
             gate_pair_q5 ? "q5_pair_simd_swiglu" : "q4_pair2_simd_swiglu";
         const char *glm_down_path =
             use_stream_expert_addr_table ?
             (down_scalar_q2 ? "q2_stream_addr_down" :
                               "q4_stream_addr_down_simd") :
-            down_scalar_q2 ? "q2_down_simd" :
-            down_simd_q3 ? "q3_down_simd" :
-            down_scalar_q4 ? "q4_down_simd" :
+            down_scalar_q2 ? (glm_qmv_r1 ? "q2_r1_down_simd" :
+                                         "q2_down_simd") :
+            down_simd_q3 ? (glm_qmv_r1 ? "q3_r1_down_simd" :
+                                         "q3_down_simd") :
+            down_scalar_q4 ? (glm_qmv_r1 ? "q4_r1_down_simd" :
+                                         "q4_down_simd") :
             down_simd_q5 ? "q5_down_simd" : "q6_down_simd";
         double glm_moe_stage_t0 = 0.0;
         if (glm_moe_stage_profile) {
@@ -38268,17 +38312,27 @@ int ds4_gpu_glm_routed_moe_one_tensor(
         const NSUInteger pair_x_groups =
             gate_pair_q2 ? (use_stream_expert_addr_table ?
                             (NSUInteger)((expert_mid_dim + 1u) / 2u) :
+                            glm_qmv_r1 ?
+                            (NSUInteger)((expert_mid_dim + 1u) / 2u) :
                             (NSUInteger)((expert_mid_dim + 7u) / 8u)) :
-            gate_pair_q3 ? (NSUInteger)((expert_mid_dim + 3u) / 4u) :
+            gate_pair_q3 ? (glm_qmv_r1 ?
+                            (NSUInteger)((expert_mid_dim + 1u) / 2u) :
+                            (NSUInteger)((expert_mid_dim + 3u) / 4u)) :
             gate_pair_q5 ? (NSUInteger)((expert_mid_dim + 7u) / 8u) :
             use_stream_expert_addr_table ? (NSUInteger)((expert_mid_dim + 3u) / 4u) :
             (NSUInteger)((expert_mid_dim + 1u) / 2u);
         const NSUInteger pair_threadgroup_bytes = 0u;
         const NSUInteger pair_threads = 64u;
         const NSUInteger down_x_groups =
-            down_scalar_q2 ? (NSUInteger)((out_dim + 7u) / 8u) :
-            down_simd_q3 ? (NSUInteger)((out_dim + 3u) / 4u) :
-            down_simd_q4 ? (NSUInteger)((out_dim + 3u) / 4u) :
+            down_scalar_q2 ? (glm_qmv_r1 ?
+                              (NSUInteger)((out_dim + 1u) / 2u) :
+                              (NSUInteger)((out_dim + 7u) / 8u)) :
+            down_simd_q3 ? (glm_qmv_r1 ?
+                            (NSUInteger)((out_dim + 1u) / 2u) :
+                            (NSUInteger)((out_dim + 3u) / 4u)) :
+            down_simd_q4 ? (glm_qmv_r1 ?
+                            (NSUInteger)((out_dim + 1u) / 2u) :
+                            (NSUInteger)((out_dim + 3u) / 4u)) :
             down_simd_q5 ? (NSUInteger)((out_dim + 3u) / 4u) :
             down_simd_q6 ? (NSUInteger)((out_dim + 3u) / 4u) :
             (NSUInteger)out_dim;
