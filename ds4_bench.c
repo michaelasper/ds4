@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define DS4_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES (UINT64_C(1) << 30)
 
@@ -50,6 +51,7 @@ typedef struct {
     uint64_t simulate_used_memory_bytes;
     double step_mul;
     const char *dump_frontier_logits_dir;
+    const char *dump_frontier_logits_f32_dir;
     ds4_dist_options dist;
     bool warm_weights;
     bool quality;
@@ -258,6 +260,8 @@ static bench_config parse_options(int argc, char **argv) {
             c.csv_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--dump-frontier-logits-dir")) {
             c.dump_frontier_logits_dir = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dump-frontier-logits-f32-dir")) {
+            c.dump_frontier_logits_f32_dir = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--expert-profile")) {
             c.expert_profile_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
@@ -394,15 +398,112 @@ static void json_write_string(FILE *fp, const char *s) {
     fputc('"', fp);
 }
 
+static int write_frontier_logits_f32(
+        const char  *dir,
+        const float *logits,
+        int          vocab,
+        int          frontier) {
+    if (!dir) return 0;
+    if (sizeof(float) != 4) {
+        fprintf(stderr,
+                "ds4-bench: native float is not 32-bit; cannot write %s f32 logits\n",
+                dir);
+        return 1;
+    }
+
+    char path[PATH_MAX];
+    const int n = snprintf(path,
+                           sizeof(path),
+                           "%s/frontier_%06d.logits.f32",
+                           dir,
+                           frontier);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        fprintf(stderr, "ds4-bench: frontier logits f32 path is too long\n");
+        return 1;
+    }
+
+    char tmp_path[PATH_MAX];
+    const int tmp_n = snprintf(tmp_path,
+                               sizeof(tmp_path),
+                               "%s.tmp.XXXXXX",
+                               path);
+    if (tmp_n <= 0 || (size_t)tmp_n >= sizeof(tmp_path)) {
+        fprintf(stderr, "ds4-bench: frontier logits f32 temporary path is too long\n");
+        return 1;
+    }
+
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) {
+        fprintf(stderr,
+                "ds4-bench: failed to create %s: %s\n",
+                tmp_path,
+                strerror(errno));
+        return 1;
+    }
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+        const int saved_errno = errno;
+        close(fd);
+        unlink(tmp_path);
+        fprintf(stderr,
+                "ds4-bench: failed to open temporary %s: %s\n",
+                tmp_path,
+                strerror(saved_errno));
+        return 1;
+    }
+
+    const size_t count = (size_t)vocab;
+    errno = 0;
+    const size_t written = fwrite(logits, sizeof(float), count, fp);
+    const int write_errno = errno;
+    const bool stream_error = ferror(fp) != 0;
+    bool ok = written == count;
+    int saved_errno = ok ? 0 : write_errno;
+    if (ok && fflush(fp) != 0) {
+        ok = false;
+        saved_errno = errno;
+    }
+    if (fclose(fp) != 0) {
+        if (!saved_errno) saved_errno = errno;
+        ok = false;
+    }
+    if (!ok) {
+        fprintf(stderr,
+                "ds4-bench: failed to write temporary %s (%zu of %zu float32 values): %s\n",
+                tmp_path,
+                written,
+                count,
+                stream_error && write_errno ? strerror(write_errno) :
+                    (saved_errno ? strerror(saved_errno) : "short write"));
+        unlink(tmp_path);
+        return 1;
+    }
+
+    if (rename(tmp_path, path) != 0) {
+        const int saved_rename_errno = errno;
+        fprintf(stderr,
+                "ds4-bench: failed to install %s: %s\n",
+                path,
+                strerror(saved_rename_errno));
+        unlink(tmp_path);
+        return 1;
+    }
+    return 0;
+}
+
 static int write_frontier_logits_json(
         const bench_config *cfg,
         ds4_engine         *engine,
         ds4_session        *session,
         int                 frontier,
         int                 previous) {
-    if (!cfg->dump_frontier_logits_dir) return 0;
+    if (!cfg->dump_frontier_logits_dir && !cfg->dump_frontier_logits_f32_dir) return 0;
 
     const int vocab = ds4_engine_vocab_size(engine);
+    if (vocab <= 0 || (size_t)vocab > SIZE_MAX / sizeof(float)) {
+        fprintf(stderr, "ds4-bench: invalid vocabulary size %d for frontier logits\n", vocab);
+        return 1;
+    }
     float *logits = malloc((size_t)vocab * sizeof(logits[0]));
     if (!logits) {
         fprintf(stderr, "ds4-bench: out of memory copying frontier logits\n");
@@ -412,6 +513,19 @@ static int write_frontier_logits_json(
         fprintf(stderr, "ds4-bench: failed to copy frontier logits at %d\n", frontier);
         free(logits);
         return 1;
+    }
+
+    if (write_frontier_logits_f32(cfg->dump_frontier_logits_f32_dir,
+                                  logits,
+                                  vocab,
+                                  frontier) != 0) {
+        free(logits);
+        return 1;
+    }
+
+    if (!cfg->dump_frontier_logits_dir) {
+        free(logits);
+        return 0;
     }
 
     char path[PATH_MAX];
