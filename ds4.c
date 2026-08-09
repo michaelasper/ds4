@@ -50355,6 +50355,16 @@ static bool laguna_graph_capture_final_feature(
     return ok;
 }
 
+/* Keep the ordinary Laguna prefill Q/K norm+RoPE dispatch choice opt-in.  The
+ * paired kernel is already used by the exact verifier, but ordinary prefill
+ * remains on the historical split path unless this explicit experiment flag
+ * is set.  A literal "1" is required so an unrelated exported value cannot
+ * silently change inference behavior. */
+static bool laguna_graph_prefill_qk_norm_rope_paired_requested(void) {
+    const char *env = getenv("DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED");
+    return env && strcmp(env, "1") == 0;
+}
+
 static bool laguna_graph_forward_batch(
         ds4_laguna_gpu_graph *g,
         const ds4_model      *model,
@@ -50448,6 +50458,12 @@ static bool laguna_graph_forward_batch(
      * lower-overhead single-command path. */
     const bool live_progress = display_progress != NULL && n_tokens >= 32u;
     const bool exact_q8_rows = row_argmax_out != NULL;
+    /* DFlash feature capture and GPU draft-token verification have their own
+     * cache/injection sequencing. Keep them on the established split path;
+     * only an ordinary, host-token prefill may opt into the paired dispatch. */
+    const bool paired_qk_norm_rope =
+        !exact_q8_rows && !gpu_draft_tokens && !capture &&
+        laguna_graph_prefill_qk_norm_rope_paired_requested();
     if (gpu_draft_tokens) {
         ok = gpu_draft_pipeline_ready;
     } else {
@@ -50528,7 +50544,7 @@ static bool laguna_graph_forward_batch(
                                                  n_tokens,
                                                  exact_q8_rows);
         }
-        if (ok && exact_q8_rows) {
+        if (ok && (exact_q8_rows || paired_qk_norm_rope)) {
             failed_stage = "Q/K norm/RoPE";
             ok = ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
                     g->q,

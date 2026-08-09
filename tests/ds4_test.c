@@ -4527,15 +4527,20 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
         uint32_t n_q_head;
         uint32_t n_k_head;
         uint32_t pos0;
+        uint32_t n_rot;
         float ext_factor;
     } qk_case;
     static const qk_case cases[] = {
-        { 1, 48, 8,    37, 0.0f },
-        { 1, 72, 8, 65533, 1.0f },
-        { 3,  7, 3,  2047, 1.0f },
+        /* SWA RoPE, including a batch that crosses the 512-token window. */
+        { 1,  48, 8,    37, 128, 0.0f },
+        { 17, 72, 8,   510, 128, 0.0f },
+        { 32, 48, 8,  1024, 128, 0.0f },
+        /* Global YaRN RoPE, including larger batches and odd head counts. */
+        { 1,  72, 8, 65533,  64, 1.0f },
+        { 3,   7, 3,  2047,  64, 1.0f },
+        { 64, 72, 8,  8191,  64, 1.0f },
     };
     const uint32_t head_dim = 128;
-    const uint32_t n_rot = 64;
     const uint64_t page = (uint64_t)getpagesize();
     const uint64_t k_weight_offset = page;
     const uint64_t model_size = 2u * page;
@@ -4616,18 +4621,18 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
             : 1.0f;
         TEST_ASSERT(ds4_gpu_laguna_head_rms_norm_rope_tensor(
                         ref_q, model_raw, model_size, 0,
-                        c->n_tokens, c->n_q_head, head_dim, n_rot,
+                        c->n_tokens, c->n_q_head, head_dim, c->n_rot,
                         c->pos0, n_ctx_orig, freq_base, freq_scale,
                         c->ext_factor, attn_factor, 32.0f, 1.0f, 1e-6f) != 0);
         TEST_ASSERT(ds4_gpu_laguna_head_rms_norm_rope_tensor(
                         ref_k, model_raw, model_size, k_weight_offset,
-                        c->n_tokens, c->n_k_head, head_dim, n_rot,
+                        c->n_tokens, c->n_k_head, head_dim, c->n_rot,
                         c->pos0, n_ctx_orig, freq_base, freq_scale,
                         c->ext_factor, attn_factor, 32.0f, 1.0f, 1e-6f) != 0);
         TEST_ASSERT(ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
                         pair_q, pair_k, model_raw, model_size,
                         0, k_weight_offset, c->n_tokens,
-                        c->n_q_head, c->n_k_head, head_dim, n_rot,
+                        c->n_q_head, c->n_k_head, head_dim, c->n_rot,
                         c->pos0, n_ctx_orig, freq_base, freq_scale,
                         c->ext_factor, attn_factor, 32.0f, 1.0f, 1e-6f) != 0);
         TEST_ASSERT(ds4_gpu_tensor_read(
@@ -7924,6 +7929,7 @@ static void test_print_help(const char *prog) {
     puts("  DS4_TEST_SSD_STREAMING_COLD=1  Skip streaming hot expert preload.");
     puts("  DS4_METAL_DISABLE_STREAMING_COLD_DECODE_PREFILL=1  Force canonical streamed cold prefill.");
     puts("  DS4_METAL_GLM_QMV_R1=1  Enable resident decode-only one-row-per-SIMD GLM QMV.");
+    puts("  DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED=1  Enable ordinary Laguna prefill paired Q/K norm/RoPE.");
     puts("  DS4_TEST_LONG_PROMPT=FILE  Rendered long-context story fact prompt.");
     puts("  DS4_TEST_VECTOR_FILE=FILE  Official fixture. Default: flash-0731/official.vec.");
     puts("  DS4_TEST_LOCAL_GOLDEN_FILE=FILE  Local fixture. Default: flash-0731/local-golden.vec.");
