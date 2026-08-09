@@ -43,6 +43,9 @@
 #include "ds4.h"
 #include "ds4_distributed.h"
 #include "ds4_tp.h"
+#ifdef __APPLE__
+#include "ds4_laguna_ladder.h"
+#endif
 
 /* Wave-2 multi-GPU types are needed in every build because the engine
  * struct embeds ds4_gpu_config and the placement table. ds4_layer_pack.h
@@ -50885,6 +50888,25 @@ static bool laguna_graph_forward_token(
     }
 
 #ifdef __APPLE__
+    uint64_t decode_ladder_mask = 0;
+    uint32_t decode_ladder_flushes = 0;
+    static bool decode_ladder_reported;
+    const char *decode_ladder_value =
+        getenv("DS4_METAL_LAGUNA_DECODE_LADDER");
+    if (!ds4_laguna_decode_ladder_parse(decode_ladder_value,
+                                        (uint32_t)DS4_N_LAYER,
+                                        &decode_ladder_mask)) {
+        fprintf(stderr,
+                "ds4: invalid DS4_METAL_LAGUNA_DECODE_LADDER='%s'; "
+                "expected a strictly increasing comma-separated list of "
+                "layer indices in [0,%u]\n",
+                decode_ladder_value ? decode_ladder_value : "",
+                (unsigned)(DS4_N_LAYER ? DS4_N_LAYER - 1u : 0u));
+        return false;
+    }
+#endif /* __APPLE__ decode ladder parsing */
+
+#ifdef __APPLE__
     const bool q8_lmhead_screen =
         g->lmhead_screen != NULL && logits_out == NULL;
     g->q8_lmhead_screen_dispatched = false;
@@ -51277,6 +51299,16 @@ static bool laguna_graph_forward_token(
             g->cur = g->next;
             g->next = tmp;
         }
+#ifdef __APPLE__
+        if (ok && decode_ladder_mask != 0 && il < 64u &&
+            (decode_ladder_mask & (UINT64_C(1) << il)) != 0) {
+            if (ds4_gpu_flush_commands() == 0) {
+                ok = false;
+            } else {
+                decode_ladder_flushes++;
+            }
+        }
+#endif
     }
 
     if (ok) {
@@ -51320,6 +51352,29 @@ static bool laguna_graph_forward_token(
     }
 #endif
     if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
+#ifdef __APPLE__
+    if (ok && decode_ladder_flushes != 0 && !decode_ladder_reported) {
+        char canonical[256];
+        if (ds4_laguna_decode_ladder_format(decode_ladder_mask,
+                                             (uint32_t)DS4_N_LAYER,
+                                             canonical,
+                                             sizeof(canonical))) {
+            fprintf(stderr,
+                    "ds4: Laguna decode command-buffer ladder enabled "
+                    "(layers=%s; flushes=%u; completion=waited)\n",
+                    canonical,
+                    decode_ladder_flushes);
+        } else {
+            /* The fixed 64-bit mask always fits in the local buffer; keep a
+             * diagnostic if that invariant is ever changed. */
+            fprintf(stderr,
+                    "ds4: Laguna decode command-buffer ladder enabled "
+                    "(flushes=%u; completion=waited)\n",
+                    decode_ladder_flushes);
+        }
+        decode_ladder_reported = true;
+    }
+#endif
     if (ok && g->gpu_argmax_enabled) {
         ok = ds4_gpu_tensor_read(g->argmax,
                                  0,

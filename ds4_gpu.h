@@ -99,6 +99,9 @@ int ds4_gpu_parallel_ffn_start(
         uint32_t              shared_dim,
         const ds4_gpu_tensor *x,
         float                 clamp);
+/* Diagnostics/tests only: read the pending Metal command-buffer array.
+ * Inference hot paths must not use this getter or add a counter for it. */
+uint32_t ds4_gpu_diagnostic_pending_command_buffer_count(void);
 #endif
 int ds4_gpu_signal_selected_readback_ready(uint64_t *event_value);
 int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *label);
