@@ -1,0 +1,37 @@
+Redactions applied to this results tree before packaging
+========================================================
+
+The runbook's own capture_profiler_json already replaces system_profiler
+identity fields with "<redacted>". Two additional redactions were needed
+because the power-gate override (see POWER-GATE-DEVIATION.txt) dumps the
+PowerManagement preference file, which the runbook never reads:
+
+1. The plist's "BatteryWarn" block is keyed by the battery serial number.
+   Every line of the form
+       "<SERIAL>" => <integer>
+   inside those dumps was replaced with
+       "<redacted>" => <redacted>
+   Applied to: metadata/power-before.txt, power-at-benchmark-start.txt,
+   power-after-default-q23.txt, power-after-lmhead-safe-tax.txt,
+   power-after-lmhead-screen.txt, power-after-lmhead-init.txt,
+   power-after-lmhead-trace.txt, power-after-lmhead-winner.txt,
+   power-final.txt, POWER-GATE-DEVIATION.txt.
+
+2. The preference file's own name embeds the hardware UUID. Occurrences of
+       com.apple.PowerManagement.<UUID>.plist
+   were rewritten to
+       com.apple.PowerManagement.<redacted-uuid>.plist
+   Applied to: metadata/POWER-GATE-DEVIATION.txt.
+   Also applied to metadata/candidate-lmhead-smoke/power-after-cooldown.txt.
+
+Reproducing:
+
+  sed -i '' -E \
+    -e 's/^( *)"[A-Z0-9]{10,}" => [0-9]+$/\1"<redacted>" => <redacted>/' \
+    -e 's/com\.apple\.PowerManagement\.[0-9A-F-]{36}\.plist/com.apple.PowerManagement.<redacted-uuid>.plist/g' \
+    metadata/power-*.txt metadata/POWER-GATE-DEVIATION.txt
+
+No measurement, timing, throughput line, hash, log, decoded output, generated
+output, logit file, trace row or gate verdict was modified. The override has
+since been fixed to redact at capture time, so future runs will not need this
+post-hoc step.

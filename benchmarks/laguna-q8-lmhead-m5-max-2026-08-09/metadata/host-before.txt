@@ -1,0 +1,231 @@
+utc=2026-08-09T14:32:50Z
+Darwin 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:41:12 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6050 arm64 arm
+ProductName:		macOS
+ProductVersion:		26.5.1
+BuildVersion:		25F80
+Apple M5 Max
+137438953472
+18
+Xcode 26.5
+Build version 17F42
+Apple clang version 21.0.0 (clang-2100.1.1.101)
+Target: arm64-apple-darwin25.5.0
+Thread model: posix
+InstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+{
+  "SPDisplaysDataType": [
+    {
+      "_name": "Apple M5 Max",
+      "spdisplays_mtlgpufamilysupport": "spdisplays_metal4",
+      "spdisplays_ndrvs": [
+        {
+          "_name": "Color LCD",
+          "_spdisplays_display-product-id": "a05d",
+          "_spdisplays_display-serial-number": "<redacted>",
+          "_spdisplays_display-vendor-id": "610",
+          "_spdisplays_display-week": "0",
+          "_spdisplays_display-year": "0",
+          "_spdisplays_displayID": "1",
+          "_spdisplays_pixels": "3456 x 2234",
+          "_spdisplays_resolution": "1728 x 1117 @ 120.00Hz",
+          "spdisplays_ambient_brightness": "spdisplays_yes",
+          "spdisplays_connection_type": "spdisplays_internal",
+          "spdisplays_display_type": "spdisplays_built-in-liquid-retina-xdr",
+          "spdisplays_main": "spdisplays_yes",
+          "spdisplays_mirror": "spdisplays_off",
+          "spdisplays_online": "spdisplays_yes",
+          "spdisplays_pixelresolution": "spdisplays_3456x2234Retina"
+        }
+      ],
+      "spdisplays_vendor": "sppci_vendor_Apple",
+      "sppci_bus": "spdisplays_builtin",
+      "sppci_cores": "40",
+      "sppci_device_type": "spdisplays_gpu",
+      "sppci_model": "Apple M5 Max"
+    }
+  ],
+  "SPHardwareDataType": [
+    {
+      "_name": "hardware_overview",
+      "activation_lock_status": "activation_lock_disabled",
+      "boot_rom_version": "18000.120.36",
+      "chip_type": "Apple M5 Max",
+      "machine_model": "Mac17,6",
+      "machine_name": "MacBook Pro",
+      "model_number": "Z1MZ0002ALL/A",
+      "number_processors": "proc 18:6:0:12",
+      "os_loader_version": "18000.120.36",
+      "physical_memory": "128 GB",
+      "platform_UUID": "<redacted>",
+      "provisioning_UDID": "<redacted>",
+      "serial_number": "<redacted>"
+    }
+  ],
+  "SPPowerDataType": [
+    {
+      "_name": "spbattery_information",
+      "sppower_battery_charge_info": {
+        "sppower_battery_at_warn_level": "FALSE",
+        "sppower_battery_fully_charged": "TRUE",
+        "sppower_battery_is_charging": "FALSE",
+        "sppower_battery_state_of_charge": 100
+      },
+      "sppower_battery_health_info": {
+        "sppower_battery_cycle_count": 45,
+        "sppower_battery_health": "Good",
+        "sppower_battery_health_maximum_capacity": "100%"
+      },
+      "sppower_battery_model_info": {
+        "sppower_battery_cell_revision": "3b1d",
+        "sppower_battery_device_name": "bq40z651",
+        "sppower_battery_firmware_version": "0b00",
+        "sppower_battery_hardware_revision": "0100",
+        "sppower_battery_pack_lot_code": "0000",
+        "sppower_battery_pcb_lot_code": "0000",
+        "sppower_battery_serial_number": "<redacted>"
+      }
+    },
+    {
+      "AC Power": {
+        "Current Power Source": "TRUE",
+        "Disk Sleep Timer": 10,
+        "Display Sleep Timer": 10,
+        "Hibernate Mode": 3,
+        "HighPowerMode": "No",
+        "LowPowerMode": "Yes",
+        "PrioritizeNetworkReachabilityOverSleep": "No",
+        "Sleep On Power Button": "Yes",
+        "System Sleep Timer": 0,
+        "Wake On LAN": "Yes"
+      },
+      "Battery Power": {
+        "Disk Sleep Timer": 10,
+        "Display Sleep Timer": 2,
+        "Hibernate Mode": 3,
+        "HighPowerMode": "No",
+        "LowPowerMode": "Yes",
+        "PrioritizeNetworkReachabilityOverSleep": "No",
+        "ReduceBrightness": "Yes",
+        "Sleep On Power Button": "Yes",
+        "System Sleep Timer": 1,
+        "Wake On LAN": "No"
+      },
+      "_name": "sppower_information"
+    },
+    {
+      "_name": "sppower_hwconfig_information",
+      "sppower_ups_installed": "FALSE"
+    },
+    {
+      "_name": "sppower_ac_charger_information",
+      "sppower_ac_charger_ID": "0x7019",
+      "sppower_ac_charger_family": "0xe000400a",
+      "sppower_ac_charger_firmware_version": "01040084",
+      "sppower_ac_charger_hardware_version": "1.0",
+      "sppower_ac_charger_manufacturer": "Apple Inc.",
+      "sppower_ac_charger_name": "140W USB-C Power Adapter",
+      "sppower_ac_charger_serial_number": "<redacted>",
+      "sppower_ac_charger_watts": "140",
+      "sppower_battery_charger_connected": "TRUE",
+      "sppower_battery_is_charging": "FALSE"
+    },
+    {
+      "_items": [
+        {
+          "_items": [
+            {
+              "UserVisible": false,
+              "appPID": 1030,
+              "eventtype": "wake",
+              "scheduledby": "com.apple.alarm.user-invisible-com.apple.calaccessd.travelEngine.periodicRefreshTimer",
+              "time": "2026-08-09T13:34:29Z"
+            },
+            {
+              "UserVisible": false,
+              "appPID": 532,
+              "eventtype": "wake",
+              "scheduledby": "com.apple.alarm.user-invisible-com.apple.osanalytics.hardhighengagementtimer",
+              "time": "2026-08-09T23:59:44Z"
+            }
+          ],
+          "_name": "sppower_scheduled_events_info"
+        }
+      ],
+      "_name": "sppower_events_info"
+    }
+  ]
+}
+Battery Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         2
+ womp                 0
+ networkoversleep     0
+ sleep                1
+ lessbright           1
+ tcpkeepalive         1
+ disksleep            10
+AC Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         10
+ womp                 1
+ networkoversleep     0
+ sleep                0
+ tcpkeepalive         1
+ disksleep            10
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=35651683)	100%; charged; 0:00 remaining present: true
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+vm.swapusage: total = 5120.00M  used = 4089.19M  free = 1030.81M  (encrypted)
+The system has 137438953472 (8388608 pages with a page size of 16384).
+System-wide memory free percentage: 95%
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   293183.
+Pages active:                                1462737.
+Pages inactive:                              6070414.
+Pages speculative:                             95782.
+Pages throttled:                                   0.
+Pages wired down:                             309356.
+Pages purgeable:                               25778.
+"Translation faults":                    13821768748.
+Pages copy-on-write:                      2016054426.
+Pages zero filled:                       11967661697.
+Pages reactivated:                         849999641.
+Pages purged:                              115202258.
+File-backed pages:                           6632257.
+Anonymous pages:                              996676.
+Pages stored in compressor:                   691706.
+Pages occupied by compressor:                  85473.
+Decompressions:                            488724486.
+Compressions:                              510781711.
+Pageins:                                   418900777.
+Pageouts:                                    2838276.
+Swapins:                                     5764102.
+Swapouts:                                   13234798.
+Pages tagged:                                 155284.
+Pages tagged resident:                        142843.
+Pages tagged compressed:                       12441.
+Pages tag-storage:                            262144.
+Pages tag-storage holding tags:                10004.
+Pages tag-storage free:                         9134.
+Pages tag-storage non-tag pageable:           242739.
+Pages tag-storage non-tag wired:                 267.
+Bytes of compressed tags:                    1729664.
+Tagged compressions:                         7368533.
+Tagged decompressions:                       6826266.
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   1.8Ti   1.2Ti   612Gi    67%    3.8M  6.4G    0%   /System/Volumes/Data
+/dev/disk3s5   1.8Ti   1.2Ti   612Gi    67%    3.8M  6.4G    0%   /System/Volumes/Data

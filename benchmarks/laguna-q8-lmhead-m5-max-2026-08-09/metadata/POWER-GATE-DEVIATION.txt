@@ -1,0 +1,65 @@
+Power-gate deviation record
+===========================
+
+utc=2026-08-09T14:32:45Z
+
+
+The runbook's verify_power_and_thermals requires system_profiler
+SPPowerDataType to report, under AC Power: High Power Mode = Yes and
+Low Power Mode = No. On this host (macOS 26.5.1 / build 25F80) that output is
+unobtainable even with Energy Mode explicitly set to High Power for BOTH
+"On battery" and "On power adapter" in System Settings > Battery:
+
+  System Settings UI     : On battery = High Power, On power adapter = High Power
+  pmset -g custom        : AC Power powermode 2, Battery Power powermode 2
+  PowerManagement plist  : AC + Battery => HighPowerMode = 0, LowPowerMode = 2
+  system_profiler        : AC + Battery => High Power Mode: No, Low Power Mode: Yes
+
+i.e. this build encodes Energy Mode = High Power as LowPowerMode/powermode = 2
+and leaves the legacy HighPowerMode key at 0; system_profiler renders any
+non-zero LowPowerMode as "Low Power Mode: Yes". The runbook gate therefore
+tests a key this OS build no longer populates.
+
+This override keeps the runbook's thermal test verbatim and keeps recording
+the runbook gate's own verdict, but bases the pass/fail decision on the state
+sources that this OS build actually populates:
+  - AC connected (SPPowerDataType "Current Power Source" under AC Power);
+  - pmset AC powermode == 2 (High Power on this build);
+  - PowerManagement plist AC LowPowerMode == 2 and HighPowerMode == 0;
+  - thermal_is_nominal, unmodified.
+
+Every arm still captures the raw, unmodified SPPowerDataType JSON, so an
+auditor can re-derive the state independently and re-apply the original gate.
+
+functions[verify_power_and_thermals_runbook]=$functions[verify_power_and_thermals]
+
+Verbatim state captured at the time of this record:
+
+--- System Settings > Battery > Energy Mode (screenshot evidence) ---
+On battery       : High Power
+On power adapter : High Power
+
+--- pmset -g custom ---
+Battery Power:
+ powermode            2
+AC Power:
+ powermode            2
+
+--- /Library/Preferences/com.apple.PowerManagement.<uuid>.plist ---
+  "AC Power" => {
+    "HighPowerMode" => 0
+    "LowPowerMode" => 2
+  "Battery Power" => {
+    "HighPowerMode" => 0
+    "LowPowerMode" => 2
+
+--- system_profiler SPPowerDataType (System Power Settings) ---
+      AC Power:
+          High Power Mode: No
+          Low Power Mode: Yes
+      Battery Power:
+          High Power Mode: No
+          Low Power Mode: Yes
+
+--- plist last written ---
+Aug  7 14:22:07 2026 /Library/Preferences/com.apple.PowerManagement.<redacted-uuid>.plist

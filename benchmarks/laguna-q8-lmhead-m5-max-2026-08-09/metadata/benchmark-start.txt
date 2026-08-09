@@ -1,0 +1,72 @@
+utc=2026-08-09T14:35:13Z
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+Battery Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         2
+ womp                 0
+ networkoversleep     0
+ sleep                1
+ lessbright           1
+ tcpkeepalive         1
+ disksleep            10
+AC Power:
+ Sleep On Power Button 1
+ powermode            2
+ standby              1
+ ttyskeepawake        1
+ hibernatemode        3
+ powernap             1
+ hibernatefile        /var/vm/sleepimage
+ displaysleep         10
+ womp                 1
+ networkoversleep     0
+ sleep                0
+ tcpkeepalive         1
+ disksleep            10
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=35651683)	100%; charged; 0:00 remaining present: true
+vm.swapusage: total = 5120.00M  used = 4065.19M  free = 1054.81M  (encrypted)
+The system has 137438953472 (8388608 pages with a page size of 16384).
+System-wide memory free percentage: 95%
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   226009.
+Pages active:                                1483960.
+Pages inactive:                              6118948.
+Pages speculative:                             96316.
+Pages throttled:                                   0.
+Pages wired down:                             309727.
+Pages purgeable:                               35569.
+"Translation faults":                    13823114755.
+Pages copy-on-write:                      2016192413.
+Pages zero filled:                       11968416014.
+Pages reactivated:                         850000090.
+Pages purged:                              115203849.
+File-backed pages:                           6681212.
+Anonymous pages:                             1018012.
+Pages stored in compressor:                   689260.
+Pages occupied by compressor:                  85125.
+Decompressions:                            488730498.
+Compressions:                              510781711.
+Pageins:                                   418956200.
+Pageouts:                                    2838276.
+Swapins:                                     5765272.
+Swapouts:                                   13234798.
+Pages tagged:                                 155052.
+Pages tagged resident:                        142611.
+Pages tagged compressed:                       12441.
+Pages tag-storage:                            262144.
+Pages tag-storage holding tags:                10003.
+Pages tag-storage free:                         6487.
+Pages tag-storage non-tag pageable:           245387.
+Pages tag-storage non-tag wired:                 267.
+Bytes of compressed tags:                    1729664.
+Tagged compressions:                         7368533.
+Tagged decompressions:                       6826266.
