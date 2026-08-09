@@ -1054,6 +1054,12 @@ static void test_metal_laguna_q8_lmhead_screen_gates(void) {
     char *saved_mpp = test_save_env("DS4_METAL_Q8_DECODE_MPP");
     char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
     char *saved_nr4 = test_save_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4");
+    char *saved_v2 = test_save_env(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2");
+    char *saved_v2_fallback = test_save_env(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK");
+    char *saved_v2_disable_indirect = test_save_env(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_V2_DISABLE_INDIRECT");
 
     /* A focused invocation may be the first Metal caller. Compile the
      * library under the caller's safe setting before exercising post-init
@@ -1072,6 +1078,11 @@ static void test_metal_laguna_q8_lmhead_screen_gates(void) {
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_DECODE_MPP") == 0);
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
     TEST_ASSERT(unsetenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2") == 0);
+    TEST_ASSERT(unsetenv(
+                    "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK") == 0);
+    TEST_ASSERT(unsetenv(
+                    "DS4_METAL_LAGUNA_Q8_LMHEAD_V2_DISABLE_INDIRECT") == 0);
     TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
                     dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
 
@@ -1094,9 +1105,35 @@ static void test_metal_laguna_q8_lmhead_screen_gates(void) {
     TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
                     dummy, valid_alloc, 0, 3072u, 100351u) == NULL);
 
+    /* v2's selector is strict, and unavailable indirect dispatch has explicit
+     * require/fallback behavior rather than silently changing benchmark arms. */
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2", "bad", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2", "1", 1) == 0);
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_Q8_LMHEAD_V2_DISABLE_INDIRECT",
+                       "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK",
+                       "1", 1) == 0);
+    ds4_gpu_laguna_q8_lmhead_screen *fallback_screen =
+        ds4_gpu_laguna_q8_lmhead_screen_create(
+            dummy, valid_alloc, 0, 3072u, 100352u);
+    TEST_ASSERT(fallback_screen != NULL);
+    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(
+                    fallback_screen) == 0);
+    ds4_gpu_laguna_q8_lmhead_screen_destroy(fallback_screen);
+
     test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
     test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
     test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
+    test_restore_env("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2",
+                     saved_v2);
+    test_restore_env("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK",
+                     saved_v2_fallback);
+    test_restore_env("DS4_METAL_LAGUNA_Q8_LMHEAD_V2_DISABLE_INDIRECT",
+                     saved_v2_disable_indirect);
     test_restore_env("DS4_METAL_MATH_SAFE", saved_math);
     free(dummy);
 }
@@ -1235,6 +1272,13 @@ static void test_metal_laguna_q8_lmhead_screen(void) {
     TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(
                     reference_idx, reference, out_dim) != 0);
 
+    const bool requested_v2 = getenv(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2") &&
+        strcmp(getenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2"), "1") == 0;
+    const bool allow_v2_fallback = getenv(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK") &&
+        strcmp(getenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK"),
+               "1") == 0;
     ds4_gpu_laguna_q8_lmhead_screen *screen =
         ds4_gpu_laguna_q8_lmhead_screen_create(
             weights_raw, weight_alloc, 0, in_dim, out_dim);
@@ -1247,6 +1291,11 @@ static void test_metal_laguna_q8_lmhead_screen(void) {
         test_restore_env("DS4_METAL_Q8_DECODE_MPP", saved_mpp);
         test_restore_env("DS4_METAL_ENABLE_OUTPUT_Q8_NR4", saved_nr4);
         goto cleanup;
+    }
+    const bool using_v2 =
+        ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(screen) != 0;
+    if (requested_v2 && !allow_v2_fallback) {
+        TEST_ASSERT(using_v2);
     }
 
     TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_tensor(
@@ -1300,6 +1349,18 @@ static void test_metal_laguna_q8_lmhead_screen(void) {
     TEST_ASSERT(candidate_row_blocks == 288u);
     TEST_ASSERT(exact_row_blocks == 576u);
     TEST_ASSERT(coarse_nonfinite == 1u);
+    if (using_v2) {
+        uint32_t compact_pair_count = 0;
+        uint32_t exact_dispatch_groups = 0;
+        TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
+                        screen, &compact_pair_count,
+                        &exact_dispatch_groups) != 0);
+        TEST_ASSERT(compact_pair_count == 3u);
+        TEST_ASSERT(exact_dispatch_groups == 3u);
+    } else {
+        TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
+                        screen, NULL, NULL) == 0);
+    }
     TEST_ASSERT(stat_idx == got_idx);
     TEST_ASSERT(memcmp(&stat_value, &got_value, sizeof(float)) == 0);
 
@@ -1345,6 +1406,15 @@ static void test_metal_laguna_q8_lmhead_screen(void) {
     TEST_ASSERT(candidate_row_blocks == 288u);
     TEST_ASSERT(exact_row_blocks == 576u);
     TEST_ASSERT(coarse_nonfinite == 1u);
+    if (using_v2) {
+        uint32_t compact_pair_count = 0;
+        uint32_t exact_dispatch_groups = 0;
+        TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
+                        screen, &compact_pair_count,
+                        &exact_dispatch_groups) != 0);
+        TEST_ASSERT(compact_pair_count == 3u);
+        TEST_ASSERT(exact_dispatch_groups == 3u);
+    }
     TEST_ASSERT(stat_idx == got_idx);
     TEST_ASSERT(memcmp(&stat_value, &got_value, sizeof(float)) == 0);
 

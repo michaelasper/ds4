@@ -18537,7 +18537,16 @@ typedef struct {
     float    winner_value;
     int32_t  winner_index;
     uint32_t pad1;
+    /* Keep the complete v1 prefix ABI stable for parent-source overrides. */
+    uint32_t compact_pair_count;
+    uint32_t exact_dispatch_groups;
 } ds4_gpu_laguna_q8_lmhead_screen_stats_host;
+
+typedef struct {
+    uint32_t n_rows;
+    uint32_t n_blocks;
+    uint32_t pair_capacity;
+} ds4_gpu_laguna_q8_lmhead_compact_args;
 
 struct ds4_gpu_laguna_q8_lmhead_screen {
     const void *model_map;
@@ -18552,12 +18561,16 @@ struct ds4_gpu_laguna_q8_lmhead_screen {
     uint32_t collect_stats;
     uint64_t packed_bytes;
     double sidecopy_init_ms;
+    uint32_t use_v2;
+    uint32_t pair_capacity;
     ds4_gpu_tensor *packed;
     ds4_gpu_tensor *coarse;
     ds4_gpu_tensor *delta;
     ds4_gpu_tensor *candidate;
     ds4_gpu_tensor *exact_values;
     ds4_gpu_tensor *coarse_index;
+    ds4_gpu_tensor *pair_ids;
+    ds4_gpu_tensor *dispatch_args;
     ds4_gpu_tensor *stats;
 };
 
@@ -18570,6 +18583,8 @@ static void ds4_gpu_laguna_q8_lmhead_screen_free_partial(
     ds4_gpu_tensor_free(screen->candidate);
     ds4_gpu_tensor_free(screen->exact_values);
     ds4_gpu_tensor_free(screen->coarse_index);
+    ds4_gpu_tensor_free(screen->pair_ids);
+    ds4_gpu_tensor_free(screen->dispatch_args);
     ds4_gpu_tensor_free(screen->stats);
     free(screen);
 }
@@ -18588,6 +18603,55 @@ static int ds4_gpu_laguna_q8_lmhead_screen_pipelines_ready(void) {
                "kernel_laguna_q8_lmhead_argmax_candidates");
 }
 
+static int ds4_gpu_laguna_q8_lmhead_screen_v2_env_mode(void) {
+    const char *value = getenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2");
+    if (!value || value[0] == '\0' || strcmp(value, "0") == 0) return 0;
+    if (strcmp(value, "1") == 0) return 1;
+    fprintf(stderr,
+            "ds4: invalid DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2='%s'; "
+            "expected unset, empty, 0, or literal 1\n",
+            value);
+    return -1;
+}
+
+/* Fallback is opt-in separately from the strict v2 selector.  A v2 request
+ * otherwise has require semantics: silently dispatching the old full-grid
+ * exact stage would make a benchmark arm misrepresent what it tested. */
+static int ds4_gpu_laguna_q8_lmhead_screen_v2_fallback_requested(void) {
+    const char *value = getenv(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK");
+    if (!value || value[0] == '\0' || strcmp(value, "0") == 0) return 0;
+    if (strcmp(value, "1") == 0) return 1;
+    fprintf(stderr,
+            "ds4: invalid DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK='%s'; "
+            "expected unset, empty, 0, or literal 1\n",
+            value);
+    return -1;
+}
+
+static int ds4_gpu_laguna_q8_lmhead_indirect_dispatch_available(void) {
+    /* Keep a deterministic test hook for the unavailable-device contract;
+     * the Laguna runner deliberately targets Apple-Silicon GPU families that
+     * guarantee indirect dispatch rather than inferring support from an old
+     * macOS selector exposed by legacy Mac GPUs. */
+    const char *disabled = getenv(
+        "DS4_METAL_LAGUNA_Q8_LMHEAD_V2_DISABLE_INDIRECT");
+    if (disabled && strcmp(disabled, "1") == 0) return 0;
+    if (@available(macOS 11.0, *)) {
+        return [g_device supportsFamily:MTLGPUFamilyApple7] ? 1 : 0;
+    }
+    return 0;
+}
+
+static int ds4_gpu_laguna_q8_lmhead_screen_v2_pipelines_ready(void) {
+    return ds4_gpu_laguna_q8_lmhead_screen_pipelines_ready() &&
+           ds4_gpu_get_pipeline(
+               "kernel_laguna_q8_lmhead_compact_pairs") &&
+           ds4_gpu_get_mul_mv_pipeline(
+               "kernel_laguna_q8_lmhead_exact_compacted", 8) &&
+           ds4_gpu_laguna_q8_lmhead_indirect_dispatch_available();
+}
+
 ds4_gpu_laguna_q8_lmhead_screen *
 ds4_gpu_laguna_q8_lmhead_screen_create(
         const void *model_map,
@@ -18601,6 +18665,12 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
                 "ds4: Laguna Q8 lm-head screen cannot be prepared during an active command batch\n");
         return NULL;
     }
+    const int requested_v2 =
+        ds4_gpu_laguna_q8_lmhead_screen_v2_env_mode();
+    const int allow_v2_fallback =
+        ds4_gpu_laguna_q8_lmhead_screen_v2_fallback_requested();
+    if (requested_v2 < 0 || allow_v2_fallback < 0) return NULL;
+    int use_v2 = requested_v2 > 0;
     const int math_safe = g_metal_math_safe &&
         ds4_gpu_env_bool("DS4_METAL_MATH_SAFE") > 0;
     if (!model_map || model_size == 0 ||
@@ -18638,6 +18708,20 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
         fprintf(stderr, "ds4: Laguna Q8 lm-head screen weight range is invalid\n");
         return NULL;
     }
+    if (use_v2 && !ds4_gpu_laguna_q8_lmhead_screen_v2_pipelines_ready()) {
+        if (allow_v2_fallback > 0 &&
+            ds4_gpu_laguna_q8_lmhead_screen_pipelines_ready()) {
+            fprintf(stderr,
+                    "ds4: Laguna Q8 lm-head screen v2 unavailable; "
+                    "using explicit v1 fallback\n");
+            use_v2 = 0;
+        } else {
+            fprintf(stderr,
+                    "ds4: Laguna Q8 lm-head screen v2 requires GPU "
+                    "indirect dispatch and compact pipelines\n");
+            return NULL;
+        }
+    }
     if (!ds4_gpu_laguna_q8_lmhead_screen_pipelines_ready()) {
         fprintf(stderr,
                 "ds4: Laguna Q8 lm-head screen requested but a Metal pipeline is unavailable\n");
@@ -18664,17 +18748,26 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
          ds4_gpu_env_bool("DS4_TEST_LAGUNA_Q8_LMHEAD_SCREEN") > 0) ? 1u : 0u;
     const double init_t0 = ds4_gpu_now_ms();
     screen->packed_bytes = packed_bytes;
+    screen->use_v2 = use_v2 ? 1u : 0u;
+    screen->pair_capacity =
+        (uint32_t)((out_dim + 1u) / 2u);
     screen->packed = ds4_gpu_tensor_alloc(packed_bytes);
     screen->coarse = ds4_gpu_tensor_alloc(out_dim * sizeof(float));
     screen->delta = ds4_gpu_tensor_alloc(out_dim * sizeof(float));
     screen->candidate = ds4_gpu_tensor_alloc(out_dim * sizeof(uint8_t));
     screen->exact_values = ds4_gpu_tensor_alloc(out_dim * sizeof(float));
     screen->coarse_index = ds4_gpu_tensor_alloc(sizeof(int32_t));
+    if (screen->use_v2) {
+        screen->pair_ids = ds4_gpu_tensor_alloc(
+            (uint64_t)screen->pair_capacity * sizeof(uint32_t));
+        screen->dispatch_args = ds4_gpu_tensor_alloc(3u * sizeof(uint32_t));
+    }
     screen->stats = ds4_gpu_tensor_alloc(
         sizeof(ds4_gpu_laguna_q8_lmhead_screen_stats_host));
     if (!screen->packed || !screen->coarse || !screen->delta ||
         !screen->candidate || !screen->exact_values ||
-        !screen->coarse_index || !screen->stats) {
+        !screen->coarse_index || (screen->use_v2 &&
+        (!screen->pair_ids || !screen->dispatch_args)) || !screen->stats) {
         ds4_gpu_laguna_q8_lmhead_screen_free_partial(screen);
         return NULL;
     }
@@ -18718,16 +18811,27 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
 
     fprintf(stderr,
             "ds4: Laguna Q8 lm-head screen prepared (packed %.2f MiB, "
-            "%llu bytes, init %.3f ms)\n",
+            "%llu bytes, init %.3f ms, mode=%s)\n",
             (double)packed_bytes / (1024.0 * 1024.0),
             (unsigned long long)packed_bytes,
-            screen->sidecopy_init_ms);
+            screen->sidecopy_init_ms,
+            screen->use_v2 ? "v2-indirect" : "v1-full-grid");
     return screen;
 }
 
 void ds4_gpu_laguna_q8_lmhead_screen_destroy(
         ds4_gpu_laguna_q8_lmhead_screen *screen) {
     ds4_gpu_laguna_q8_lmhead_screen_free_partial(screen);
+}
+
+int ds4_gpu_laguna_q8_lmhead_screen_v2_available(void) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    return ds4_gpu_laguna_q8_lmhead_screen_v2_pipelines_ready();
+}
+
+int ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(
+        const ds4_gpu_laguna_q8_lmhead_screen *screen) {
+    return screen && screen->use_v2 != 0;
 }
 
 int ds4_gpu_laguna_q8_lmhead_screen_tensor(
@@ -18764,10 +18868,14 @@ int ds4_gpu_laguna_q8_lmhead_screen_tensor(
     id<MTLBuffer> candidatebuf = ds4_gpu_tensor_buffer(screen->candidate);
     id<MTLBuffer> valuesbuf = ds4_gpu_tensor_buffer(screen->exact_values);
     id<MTLBuffer> coarseidxbuf = ds4_gpu_tensor_buffer(screen->coarse_index);
+    id<MTLBuffer> pairidsbuf = screen->use_v2 ?
+        ds4_gpu_tensor_buffer(screen->pair_ids) : nil;
+    id<MTLBuffer> dispatchbuf = screen->use_v2 ?
+        ds4_gpu_tensor_buffer(screen->dispatch_args) : nil;
     id<MTLBuffer> statsbuf = ds4_gpu_tensor_buffer(screen->stats);
     if (!weightbuf || !xbuf || !outidxbuf || !packedbuf || !coarsebuf ||
         !deltabuf || !candidatebuf || !valuesbuf || !coarseidxbuf ||
-        !statsbuf) {
+        (screen->use_v2 && (!pairidsbuf || !dispatchbuf)) || !statsbuf) {
         return 0;
     }
 
@@ -18805,10 +18913,17 @@ int ds4_gpu_laguna_q8_lmhead_screen_tensor(
     id<MTLComputePipelineState> exact_pipeline =
         ds4_gpu_get_mul_mv_pipeline(
             "kernel_laguna_q8_lmhead_exact_candidates", 8);
+    id<MTLComputePipelineState> compact_pipeline = screen->use_v2 ?
+        ds4_gpu_get_pipeline("kernel_laguna_q8_lmhead_compact_pairs") : nil;
+    id<MTLComputePipelineState> exact_compact_pipeline = screen->use_v2 ?
+        ds4_gpu_get_mul_mv_pipeline(
+            "kernel_laguna_q8_lmhead_exact_compacted", 8) : nil;
     id<MTLComputePipelineState> reduce_pipeline =
         ds4_gpu_get_pipeline("kernel_laguna_q8_lmhead_argmax_candidates");
     if (!coarse_pipeline || !seed_pipeline || !candidate_pipeline ||
-        !exact_pipeline || !reduce_pipeline) {
+        !exact_pipeline || !reduce_pipeline ||
+        (screen->use_v2 && (!compact_pipeline || !exact_compact_pipeline ||
+                            !ds4_gpu_laguna_q8_lmhead_indirect_dispatch_available()))) {
         fprintf(stderr,
                 "ds4: Laguna Q8 lm-head screen pipeline became unavailable\n");
         return 0;
@@ -18900,25 +19015,69 @@ int ds4_gpu_laguna_q8_lmhead_screen_tensor(
                                   1, 1)
          threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
-    [enc setComputePipelineState:exact_pipeline];
-    [enc setBytes:&exact_args length:sizeof(exact_args) atIndex:0];
-    [enc setBuffer:weightbuf offset:(NSUInteger)inner_offset atIndex:1];
-    [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:2];
-    [enc setBuffer:valuesbuf offset:ds4_gpu_tensor_offset(screen->exact_values)
-           atIndex:3];
-    [enc setBuffer:candidatebuf offset:ds4_gpu_tensor_offset(screen->candidate)
-           atIndex:4];
-    [enc setBuffer:coarseidxbuf
-           offset:ds4_gpu_tensor_offset(screen->coarse_index) atIndex:5];
-    [enc setBuffer:statsbuf offset:ds4_gpu_tensor_offset(screen->stats)
-           atIndex:6];
-    [enc setBytes:&screen->collect_stats length:sizeof(screen->collect_stats)
-           atIndex:7];
-    [enc setThreadgroupMemoryLength:2u * 32u * sizeof(float) atIndex:0];
-    [enc dispatchThreadgroups:MTLSizeMake(
-                                  ((NSUInteger)n_rows + 1u) / 2u,
-                                  1, 1)
-         threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    if (screen->use_v2) {
+        ds4_gpu_laguna_q8_lmhead_compact_args compact_args = {
+            .n_rows = n_rows,
+            .n_blocks = n_blocks,
+            .pair_capacity = screen->pair_capacity,
+        };
+        [enc setComputePipelineState:compact_pipeline];
+        [enc setBytes:&compact_args length:sizeof(compact_args) atIndex:0];
+        [enc setBuffer:candidatebuf
+               offset:ds4_gpu_tensor_offset(screen->candidate) atIndex:1];
+        [enc setBuffer:pairidsbuf
+               offset:ds4_gpu_tensor_offset(screen->pair_ids) atIndex:2];
+        [enc setBuffer:dispatchbuf
+               offset:ds4_gpu_tensor_offset(screen->dispatch_args) atIndex:3];
+        [enc setBuffer:statsbuf offset:ds4_gpu_tensor_offset(screen->stats)
+               atIndex:4];
+        [enc setBytes:&screen->collect_stats length:sizeof(screen->collect_stats)
+               atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+
+        [enc setComputePipelineState:exact_compact_pipeline];
+        [enc setBytes:&exact_args length:sizeof(exact_args) atIndex:0];
+        [enc setBuffer:weightbuf offset:(NSUInteger)inner_offset atIndex:1];
+        [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:2];
+        [enc setBuffer:valuesbuf
+               offset:ds4_gpu_tensor_offset(screen->exact_values) atIndex:3];
+        [enc setBuffer:pairidsbuf
+               offset:ds4_gpu_tensor_offset(screen->pair_ids) atIndex:4];
+        [enc setBuffer:coarseidxbuf
+               offset:ds4_gpu_tensor_offset(screen->coarse_index) atIndex:5];
+        [enc setBuffer:statsbuf offset:ds4_gpu_tensor_offset(screen->stats)
+               atIndex:6];
+        [enc setBytes:&screen->collect_stats length:sizeof(screen->collect_stats)
+               atIndex:7];
+        [enc setThreadgroupMemoryLength:2u * 32u * sizeof(float) atIndex:0];
+        /* compact_pairs wrote exactly three u32s in this same serial
+         * encoder.  No host readback or CPU-derived group count is involved. */
+        [enc dispatchThreadgroupsWithIndirectBuffer:dispatchbuf
+                                indirectBufferOffset:
+                                    ds4_gpu_tensor_offset(screen->dispatch_args)
+                                threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    } else {
+        [enc setComputePipelineState:exact_pipeline];
+        [enc setBytes:&exact_args length:sizeof(exact_args) atIndex:0];
+        [enc setBuffer:weightbuf offset:(NSUInteger)inner_offset atIndex:1];
+        [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:2];
+        [enc setBuffer:valuesbuf offset:ds4_gpu_tensor_offset(screen->exact_values)
+               atIndex:3];
+        [enc setBuffer:candidatebuf offset:ds4_gpu_tensor_offset(screen->candidate)
+               atIndex:4];
+        [enc setBuffer:coarseidxbuf
+               offset:ds4_gpu_tensor_offset(screen->coarse_index) atIndex:5];
+        [enc setBuffer:statsbuf offset:ds4_gpu_tensor_offset(screen->stats)
+               atIndex:6];
+        [enc setBytes:&screen->collect_stats length:sizeof(screen->collect_stats)
+               atIndex:7];
+        [enc setThreadgroupMemoryLength:2u * 32u * sizeof(float) atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake(
+                                      ((NSUInteger)n_rows + 1u) / 2u,
+                                      1, 1)
+             threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    }
 
     [enc setComputePipelineState:reduce_pipeline];
     [enc setBuffer:valuesbuf offset:ds4_gpu_tensor_offset(screen->exact_values)
@@ -18977,6 +19136,23 @@ int ds4_gpu_laguna_q8_lmhead_screen_stats(
     if (exact_row_blocks) *exact_row_blocks = stats.exact_row_blocks;
     if (winner_index) *winner_index = stats.winner_index;
     if (winner_value) *winner_value = stats.winner_value;
+    return 1;
+}
+
+int ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
+        const ds4_gpu_laguna_q8_lmhead_screen *screen,
+        uint32_t *compact_pair_count,
+        uint32_t *exact_dispatch_groups) {
+    if (!screen || !screen->use_v2 || !screen->collect_stats ||
+        !screen->stats) return 0;
+    ds4_gpu_laguna_q8_lmhead_screen_stats_host stats;
+    if (!ds4_gpu_tensor_read(screen->stats, 0, &stats, sizeof(stats))) {
+        return 0;
+    }
+    if (compact_pair_count) *compact_pair_count = stats.compact_pair_count;
+    if (exact_dispatch_groups) {
+        *exact_dispatch_groups = stats.exact_dispatch_groups;
+    }
     return 1;
 }
 

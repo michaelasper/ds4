@@ -611,6 +611,23 @@ int ds4_gpu_laguna_q8_lmhead_screen_tensor(
         uint64_t              model_size,
         uint64_t              weight_offset,
         const ds4_gpu_tensor *x);
+/* The opt-in v2 arm uses a GPU-compacted NR0=2 pair list and a GPU-written
+ * indirect dispatch argument.  It is selected only by the literal
+ * DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2=1; malformed values are rejected.
+ * DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK=1 explicitly permits a v1
+ * fallback when the indirect path or its pipelines are unavailable. */
+int ds4_gpu_laguna_q8_lmhead_screen_v2_available(void);
+int ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(
+        const ds4_gpu_laguna_q8_lmhead_screen *screen);
+int ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
+        const ds4_gpu_laguna_q8_lmhead_screen *screen,
+        uint32_t *compact_pair_count,
+        uint32_t *exact_dispatch_groups);
+/* For v2 these are the logical compacted NR0=2 pair count and the number of
+ * indirect workgroups observed by the exact kernel.  The seed-pair workgroup
+ * records its no-op completion; non-seed workgroups record completion only
+ * after the stock exact helper returns.  Both are trace-only GPU stats and
+ * must be read after the containing command has completed. */
 /* Read only after the command containing screen_tensor has completed.  Stats
  * collection is captured at plan creation using ds4_gpu_env_bool (the
  * DS4_METAL_LAGUNA_Q8_LMHEAD_TRACE or focused-test flag); this function

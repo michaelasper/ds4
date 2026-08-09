@@ -52370,9 +52370,27 @@ static bool laguna_metal_gpu_argmax_debug_forces_full_logits(void) {
     return false;
 }
 
+static int laguna_metal_q8_lmhead_screen_v2_mode(void) {
+    const char *v2 = getenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2");
+    /* v2 is deliberately a strict selector: it can opt in the screen on its
+     * own, while malformed values fail before graph/KV state is touched. */
+    if (!v2 || v2[0] == '\0' || strcmp(v2, "0") == 0) return 0;
+    if (strcmp(v2, "1") == 0) return 1;
+    {
+        fprintf(stderr,
+                "ds4: invalid DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2='%s'; "
+                "expected unset, empty, 0, or literal 1\n",
+                v2);
+        return -1;
+    }
+}
+
 static bool laguna_metal_q8_lmhead_screen_requested(void) {
+    const int v2_mode = laguna_metal_q8_lmhead_screen_v2_mode();
+    if (v2_mode < 0) return false;
     return metal_graph_tp_env_flag(
-        "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN", false);
+               "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN", false) ||
+           v2_mode > 0;
 }
 
 /* The decode residual fusion is deliberately stricter than the other
@@ -52427,6 +52445,8 @@ static void laguna_graph_report_q8_lmhead_screen(
     uint64_t packed_bytes = 0;
     double sidecopy_init_ms = 0.0;
     uint32_t exact_row_blocks = 0;
+    uint32_t compact_pair_count = 0;
+    uint32_t exact_dispatch_groups = 0;
     int32_t winner_index = -1;
     float winner_value = 0.0f;
     if (ds4_gpu_laguna_q8_lmhead_screen_stats(
@@ -52440,13 +52460,21 @@ static void laguna_graph_report_q8_lmhead_screen(
             &exact_row_blocks,
             &winner_index,
             &winner_value)) {
+        const int v2 = ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(
+            g->lmhead_screen);
+        if (v2) {
+            (void)ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
+                g->lmhead_screen,
+                &compact_pair_count,
+                &exact_dispatch_groups);
+        }
         uint32_t winner_bits = 0;
         memcpy(&winner_bits, &winner_value, sizeof(winner_bits));
         fprintf(stderr,
                 "ds4: Laguna Q8 lm-head screen stats screen_calls=%llu "
                 "candidates=%u row_blocks=%u exact_row_blocks=%u "
                 "nonfinite=%u packed_bytes=%llu sidecopy_init_ms=%.3f "
-                "winner=%d value=%g winner_bits=0x%08x\n",
+                "winner=%d value=%g winner_bits=0x%08x",
                 (unsigned long long)screen_calls,
                 candidate_rows,
                 candidate_row_blocks,
@@ -52457,6 +52485,12 @@ static void laguna_graph_report_q8_lmhead_screen(
                 winner_index,
                 winner_value,
                 winner_bits);
+        if (v2) {
+            fprintf(stderr,
+                    " compact_pairs=%u exact_dispatch_groups=%u mode=v2-indirect",
+                    compact_pair_count, exact_dispatch_groups);
+        }
+        fputc('\n', stderr);
     }
 }
 #endif
@@ -52478,6 +52512,7 @@ static int generate_laguna_metal_argmax(
         return 1;
     }
 #if defined(__APPLE__)
+    if (laguna_metal_q8_lmhead_screen_v2_mode() < 0) return 1;
     if (!laguna_metal_decode_residual_norm_preflight()) return 1;
     const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
     const bool lmhead_screen_requested =

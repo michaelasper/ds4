@@ -83,6 +83,9 @@ struct ds4_metal_laguna_q8_lmhead_screen_stats {
     float      winner_value;
     int32_t    winner_index;
     uint32_t   pad1;
+    /* Keep the complete v1 prefix ABI stable for parent-source overrides. */
+    uint        compact_pair_count;
+    atomic_uint exact_dispatch_groups;
 };
 
 static inline bool laguna_q8_screen_nonfinite(float value) {
@@ -314,6 +317,64 @@ kernel void kernel_laguna_q8_lmhead_candidates(
     }
 }
 
+/* Compact admitted NR0=2 pairs without a CPU readback.  This is intentionally
+ * a single deterministic GPU thread rather than an atomic append: the
+ * candidate pass already did the expensive per-row proof, and a bounded
+ * 50,176-pair scan avoids introducing a trace-independent atomic hot spot.
+ * The same pass writes Metal's three-u32 indirect-dispatch argument. */
+struct ds4_metal_args_laguna_q8_lmhead_compact {
+    uint32_t n_rows;
+    uint32_t n_blocks;
+    uint32_t pair_capacity;
+};
+
+kernel void kernel_laguna_q8_lmhead_compact_pairs(
+        constant ds4_metal_args_laguna_q8_lmhead_compact &args [[buffer(0)]],
+        device const uchar *candidate [[buffer(1)]],
+        device uint *pair_ids [[buffer(2)]],
+        device uint *dispatch_args [[buffer(3)]],
+        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(4)]],
+        constant uint &collect_stats [[buffer(5)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid != 0u) return;
+
+    const uint n_pairs = (args.n_rows + 1u) / 2u;
+    uint count = 0u;
+    uint exact_rows = 0u;
+    for (uint pair = 0u; pair < n_pairs; pair++) {
+        const uint r0 = pair * 2u;
+        const bool active0 = candidate[r0] != 0u;
+        const bool active1 = r0 + 1u < args.n_rows &&
+            candidate[r0 + 1u] != 0u;
+        if (!active0 && !active1) continue;
+
+        /* n_pairs is the capacity for a row-bounded pair list.  Keep the
+         * guard beside the write so a malformed future shape can never make
+         * the indirect argument exceed the allocated list. */
+        if (count < args.pair_capacity) {
+            pair_ids[count] = pair;
+            count++;
+            /* The exact helper is NR0=2: admitting either row evaluates the
+             * whole pair (and the seed pair is evaluated once separately).
+             * Keep this physical traffic stat distinct from logical rows. */
+            exact_rows += r0 + 1u < args.n_rows ? 2u : 1u;
+        }
+    }
+
+    dispatch_args[0] = count;
+    dispatch_args[1] = 1u;
+    dispatch_args[2] = 1u;
+    if (collect_stats) {
+        stats->compact_pair_count = count;
+        atomic_store_explicit(&stats->exact_dispatch_groups,
+                              0u,
+                              memory_order_relaxed);
+        atomic_store_explicit(&stats->exact_row_blocks,
+                              exact_rows * args.n_blocks,
+                              memory_order_relaxed);
+    }
+}
+
 /* Exact values are only written for admitted rows.  Non-admitted rows may
  * retain arbitrary scratch bytes; the final reducer consults candidate first.
  * Calling the shared helper is intentional: it preserves the stock Q8
@@ -350,6 +411,48 @@ kernel void kernel_laguna_q8_lmhead_exact_candidates(
     }
     kernel_mul_mv_q8_0_f32_impl<2, constant ds4_metal_args_mul_mv &>(
         args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+}
+
+/* Exact NR0=2 work for one compacted pair.  The seed pair is represented in
+ * the compact list so the indirect group count is the logical compact pair
+ * count; its exact value was already produced by seed_exact and is reused. */
+kernel void kernel_laguna_q8_lmhead_exact_compacted(
+        constant ds4_metal_args_mul_mv &args [[buffer(0)]],
+        device const char *src0 [[buffer(1)]],
+        device const char *src1 [[buffer(2)]],
+        device char *dst [[buffer(3)]],
+        device const uint *pair_ids [[buffer(4)]],
+        device const int32_t *seed_idx [[buffer(5)]],
+        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(6)]],
+        constant uint &collect_stats [[buffer(7)]],
+        threadgroup char *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const uint pair = pair_ids[tgpig.x];
+    const uint r0 = pair * 2u;
+    if (r0 >= (uint)args.ne01) return;
+
+    const uint seed_pair = ((uint)seed_idx[0] / 2u) * 2u;
+    if (r0 == seed_pair) {
+        if (collect_stats && tiisg == 0u && sgitg == 0u) {
+            atomic_fetch_add_explicit(&stats->exact_dispatch_groups,
+                                      1u,
+                                      memory_order_relaxed);
+        }
+        return;
+    }
+
+    kernel_mul_mv_q8_0_f32_impl<2, constant ds4_metal_args_mul_mv &>(
+        args, src0, src1, dst, shmem,
+        uint3(pair, 0u, 0u), tiisg, sgitg);
+    if (collect_stats && tiisg == 0u && sgitg == 0u) {
+        atomic_fetch_add_explicit(&stats->exact_dispatch_groups,
+                                  1u,
+                                  memory_order_relaxed);
+    }
+    /* exact_row_blocks is written once by compaction.  This execution counter
+     * is trace-only, so the benchmark path still performs no stats atomics. */
 }
 
 kernel void kernel_laguna_q8_lmhead_argmax_candidates(
