@@ -548,6 +548,18 @@ int ds4_gpu_argmax_tensor(
         const ds4_gpu_tensor *logits,
         uint32_t                n_vocab);
 
+#ifdef __APPLE__
+/* Laguna raw-generation prototype: one threadgroup reads an F32 logit row and
+ * writes one int32 winner. This is deliberately separate from the generic
+ * multi-dispatch top-k path and is not used by session/public-logits or
+ * verifier APIs. */
+int ds4_gpu_laguna_argmax_available(void);
+int ds4_gpu_laguna_argmax_tensor(
+        ds4_gpu_tensor       *out_idx,
+        const ds4_gpu_tensor *logits,
+        uint32_t              n_vocab);
+#endif
+
 #ifdef DS4_ROCM_BUILD
 int ds4_gpu_argmax_rows_tensor(
         ds4_gpu_tensor       *out_idx,

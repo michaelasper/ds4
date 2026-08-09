@@ -5899,6 +5899,130 @@ static void test_dflash_capture_nonfinite_sanitize(void) {
     ds4_gpu_tensor_free(dst);
 }
 
+#if defined(__APPLE__)
+static int test_laguna_argmax_host(const float *values, uint32_t n) {
+    int best = 0;
+    float best_value = -1.0e30f;
+    for (uint32_t i = 0; i < n; i++) {
+        const float value = values[i];
+        uint32_t bits;
+        memcpy(&bits, &value, sizeof(bits));
+        const bool is_nan =
+            (bits & 0x7f800000u) == 0x7f800000u &&
+            (bits & 0x007fffffu) != 0u;
+        if (!is_nan && value > best_value) {
+            best_value = value;
+            best = (int)i;
+        }
+    }
+    return best;
+}
+
+static void test_metal_laguna_gpu_argmax(void) {
+    static const uint32_t sizes[] = {
+        1u, 3u, 7u, 31u, 257u, 511u, 100003u, 100351u, 100352u,
+    };
+    static const uint32_t nan_bits[] = {
+        0x7fc12345u, 0x7fa00001u, 0xffc12345u, 0xffa00001u,
+    };
+    const uint32_t pos_inf_bits = 0x7f800000u;
+    const uint32_t neg_inf_bits = 0xff800000u;
+    float nan_values[sizeof(nan_bits) / sizeof(nan_bits[0])];
+    float pos_inf;
+    float neg_inf;
+    for (size_t i = 0; i < sizeof(nan_bits) / sizeof(nan_bits[0]); i++) {
+        memcpy(&nan_values[i], &nan_bits[i], sizeof(nan_values[i]));
+    }
+    memcpy(&pos_inf, &pos_inf_bits, sizeof(pos_inf));
+    memcpy(&neg_inf, &neg_inf_bits, sizeof(neg_inf));
+
+    const int available = ds4_gpu_laguna_argmax_available();
+    if (!available) {
+        fprintf(stderr,
+                "ds4-test: Laguna GPU argmax pipeline unavailable; skipped\n");
+        return;
+    }
+
+    for (uint32_t ci = 0; ci < 7u; ci++) {
+        for (size_t si = 0; si < sizeof(sizes) / sizeof(sizes[0]); si++) {
+            const uint32_t n = sizes[si];
+            const uint64_t bytes = (uint64_t)n * sizeof(float);
+            float *values = malloc((size_t)bytes);
+            ds4_gpu_tensor *logits = ds4_gpu_tensor_alloc(bytes);
+            ds4_gpu_tensor *out = ds4_gpu_tensor_alloc(sizeof(int32_t));
+            TEST_ASSERT(values != NULL);
+            TEST_ASSERT(logits != NULL);
+            TEST_ASSERT(out != NULL);
+            if (!values || !logits || !out) {
+                free(values);
+                ds4_gpu_tensor_free(logits);
+                ds4_gpu_tensor_free(out);
+                continue;
+            }
+
+            for (uint32_t i = 0; i < n; i++) values[i] = -1.0e30f;
+            if (ci == 0u && n > 1u) {
+                values[n - 1u] = -1.0000001e30f;
+            } else if (ci == 1u) {
+                for (uint32_t i = 0; i < n; i++) values[i] = -17.0f;
+                if (n > 2u) {
+                    values[n / 3u] = 5.0f;
+                    values[n - 1u] = 5.0f;
+                } else {
+                    values[n - 1u] = 5.0f;
+                }
+            } else if (ci == 2u) {
+                for (uint32_t i = 0; i < n; i++) {
+                    values[i] = nan_values[i %
+                        (sizeof(nan_values) / sizeof(nan_values[0]))];
+                }
+                if (n > 1u) values[n - 1u] = 4.0f;
+            } else if (ci == 3u) {
+                for (uint32_t i = 0; i < n; i++) {
+                    values[i] = nan_values[i %
+                        (sizeof(nan_values) / sizeof(nan_values[0]))];
+                }
+            } else if (ci == 4u) {
+                for (uint32_t i = 0; i < n; i++) values[i] = neg_inf;
+                if (n > 2u) {
+                    values[n / 3u] = pos_inf;
+                    values[n - 1u] = pos_inf;
+                } else {
+                    values[n - 1u] = pos_inf;
+                }
+            } else if (ci == 5u) {
+                for (uint32_t i = 0; i < n; i++) values[i] = neg_inf;
+            } else if (ci == 6u) {
+                uint32_t state = 0x9e3779b9u ^ (uint32_t)si * 0x45d9f3bu;
+                for (uint32_t i = 0; i < n; i++) {
+                    state = state * 1664525u + 1013904223u;
+                    values[i] = ((float)(state >> 8) / 16777216.0f) * 200.0f - 100.0f;
+                }
+                if (n > 3u) {
+                    values[1] = nan_values[si %
+                        (sizeof(nan_values) / sizeof(nan_values[0]))];
+                    values[n / 2u] = -1.0e30f;
+                    values[n - 2u] = -1.0000001e30f;
+                    values[n - 1u] = pos_inf;
+                }
+            }
+
+            const int expected = test_laguna_argmax_host(values, n);
+            int32_t actual = -99;
+            TEST_ASSERT(ds4_gpu_tensor_write(logits, 0, values, bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(out, 0, &actual, sizeof(actual)) != 0);
+            TEST_ASSERT(ds4_gpu_laguna_argmax_tensor(out, logits, n) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(out, 0, &actual, sizeof(actual)) != 0);
+            TEST_ASSERT(actual == expected);
+
+            free(values);
+            ds4_gpu_tensor_free(logits);
+            ds4_gpu_tensor_free(out);
+        }
+    }
+}
+#endif
+
 static void test_metal_kernel_group(void) {
     test_dflash_capture_nonfinite_sanitize();
     test_metal_f16_matvec_fast_nr0_4();
@@ -5909,6 +6033,7 @@ static void test_metal_kernel_group(void) {
     test_dspark_cache_window_crop();
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
+    test_metal_laguna_gpu_argmax();
     test_metal_glm_qmv_r1_exact();
     test_metal_q8_0_output_nr4_exact();
     test_metal_f16_compressor_pair_state_store_exact();
