@@ -928,6 +928,16 @@ kernel void kernel_glm_q3_K_pair_swiglu_f32(
         (uint64_t)token * args.mid_token_stride +
         (uint64_t)slot * args.mid_dim;
     const int expert = selected[selected_off];
+    if (expert < 0 || (uint)expert >= args.n_total_expert) {
+        if (tiisg == 0u) {
+            for (short row = 0;
+                 row < N_R0_Q3_K && row0 + (uint)row < args.mid_dim;
+                 row++) {
+                mid[mid_base + row0 + (uint)row] = 0.0f;
+            }
+        }
+        return;
+    }
     if (!ds4_tp_owns_expert(expert, args.n_total_expert,
                             args.tp_rank, args.tp_world)) {
         return;
@@ -991,6 +1001,12 @@ kernel void kernel_glm_q3_K_pair_swiglu_r1_f32(
         (uint64_t)token * args.mid_token_stride +
         (uint64_t)slot * args.mid_dim;
     const int expert = selected[selected_off];
+    if (expert < 0 || (uint)expert >= args.n_total_expert) {
+        if (tiisg == 0u) {
+            mid[mid_base + row0] = 0.0f;
+        }
+        return;
+    }
     if (!ds4_tp_owns_expert(expert, args.n_total_expert,
                             args.tp_rank, args.tp_world)) {
         return;
@@ -2226,6 +2242,9 @@ kernel void kernel_glm_q3_K_down_f32(
     float2 sum = {0.0f, 0.0f};
     for (uint slot = 0; slot < args.n_expert_used; slot++) {
         const int expert = selected[selected_base + slot];
+        if (expert < 0 || (uint)expert >= args.n_total_expert) {
+            continue;
+        }
         if (!ds4_tp_owns_expert(expert, args.n_total_expert,
                                 args.tp_rank, args.tp_world)) {
             continue;
@@ -2279,6 +2298,9 @@ kernel void kernel_glm_q3_K_down_r1_f32(
     float2 sum = {0.0f, 0.0f};
     for (uint slot = 0; slot < args.n_expert_used; slot++) {
         const int expert = selected[selected_base + slot];
+        if (expert < 0 || (uint)expert >= args.n_total_expert) {
+            continue;
+        }
         if (!ds4_tp_owns_expert(expert, args.n_total_expert,
                                 args.tp_rank, args.tp_world)) {
             continue;

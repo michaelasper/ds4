@@ -4330,7 +4330,7 @@ static void test_metal_glm_qmv_r1_case(uint32_t type) {
     const uint32_t n_total_expert = 2u;
     const uint32_t n_expert = 2u;
     const uint32_t in_dim = 512u;
-    const uint32_t mid_dim = 256u;
+    const uint32_t mid_dim = 512u;
     const uint32_t out_dim = 257u;
     const uint32_t blocks = in_dim / 256u;
     const uint32_t block_bytes =
@@ -4406,8 +4406,9 @@ static void test_metal_glm_qmv_r1_case(uint32_t type) {
         x_host[k] = 0.125f + (float)((k * 19u + (k >> 3u) * 7u) % 97u) /
                    128.0f;
     }
+    /* Exercise two distinct resident experts with nontrivial route weights. */
     selected_host[0] = 0;
-    selected_host[1] = -1;
+    selected_host[1] = 1;
     weights_host[0] = 0.625f;
     weights_host[1] = 0.375f;
     for (uint32_t i = 0; i < n_expert * mid_dim; i++) {
@@ -4473,11 +4474,6 @@ static void test_metal_glm_qmv_r1_case(uint32_t type) {
                     out, 0, out_r1,
                     (uint64_t)out_dim * sizeof(float)) != 0);
 
-    if (env_saved) {
-        test_restore_env("DS4_METAL_GLM_QMV_R1", saved_r1);
-        saved_r1 = NULL;
-        env_saved = false;
-    }
     {
         const test_float_compare_stats mid_stats = test_compare_float_bits(
             mid_baseline, mid_r1, (size_t)n_expert * mid_dim);
@@ -4493,6 +4489,77 @@ static void test_metal_glm_qmv_r1_case(uint32_t type) {
                 mid_stats.max_abs, out_stats.max_abs);
         TEST_ASSERT(mid_stats.mismatch_count == 0);
         TEST_ASSERT(out_stats.mismatch_count == 0);
+    }
+
+    /* Keep env_saved active until cleanup so an assertion in either this
+     * section or the valid comparison still restores the caller's setting.
+     * Invalid IDs are a separate bounds contract: pair kernels zero their
+     * corresponding mid rows, and the down kernel ignores those slots.  Use
+     * both sides of the valid range and nonzero sentinels so stale data cannot
+     * make this check pass accidentally. */
+    selected_host[0] = -1;
+    selected_host[1] = (int32_t)n_total_expert;
+    for (uint32_t i = 0; i < n_expert * mid_dim; i++) mid_init[i] = 17.25f;
+    for (uint32_t i = 0; i < out_dim; i++) out_init[i] = -9.5f;
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    selected, 0, selected_host,
+                    (uint64_t)n_expert * sizeof(int32_t)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    mid, 0, mid_init,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    out, 0, out_init, (uint64_t)out_dim * sizeof(float)) != 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_GLM_QMV_R1") == 0);
+    TEST_ASSERT(ds4_gpu_glm_routed_moe_one_tensor(
+                    out, mid, model, model_size,
+                    gate_offset, up_offset, down_offset,
+                    type, type, type,
+                    gate_expert_bytes, row_bytes,
+                    gate_expert_bytes, row_bytes,
+                    down_expert_bytes, row_bytes,
+                    in_dim, mid_dim, out_dim,
+                    selected, weights,
+                    n_total_expert, n_expert, 0u, x, true) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    mid, 0, mid_baseline,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    out, 0, out_baseline,
+                    (uint64_t)out_dim * sizeof(float)) != 0);
+    for (uint32_t i = 0; i < n_expert * mid_dim; i++) {
+        TEST_ASSERT(mid_baseline[i] == 0.0f);
+    }
+    for (uint32_t i = 0; i < out_dim; i++) {
+        TEST_ASSERT(out_baseline[i] == 0.0f);
+    }
+
+    TEST_ASSERT(setenv("DS4_METAL_GLM_QMV_R1", "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    mid, 0, mid_init,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    out, 0, out_init, (uint64_t)out_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_glm_routed_moe_one_tensor(
+                    out, mid, model, model_size,
+                    gate_offset, up_offset, down_offset,
+                    type, type, type,
+                    gate_expert_bytes, row_bytes,
+                    gate_expert_bytes, row_bytes,
+                    down_expert_bytes, row_bytes,
+                    in_dim, mid_dim, out_dim,
+                    selected, weights,
+                    n_total_expert, n_expert, 0u, x, true) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    mid, 0, mid_r1,
+                    (uint64_t)n_expert * mid_dim * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    out, 0, out_r1,
+                    (uint64_t)out_dim * sizeof(float)) != 0);
+    for (uint32_t i = 0; i < n_expert * mid_dim; i++) {
+        TEST_ASSERT(mid_r1[i] == 0.0f);
+    }
+    for (uint32_t i = 0; i < out_dim; i++) {
+        TEST_ASSERT(out_r1[i] == 0.0f);
     }
 
 cleanup:
