@@ -108,7 +108,7 @@ struct ds4_metal_args_glm_router_select_one {
     uint32_t n_expert;
     uint32_t n_expert_used;
     float    expert_weight_scale;
-    uint32_t pad0;
+    uint32_t stats_enabled;
 };
 
 struct ds4_metal_args_glm_kv_lora_rms_norm {
@@ -497,6 +497,14 @@ static inline bool ds4_glm_router_better(
         int32_t                  b) {
     const float sa = scores[(uint)a];
     const float sb = scores[(uint)b];
+    return sa > sb || (sa == sb && a < b);
+}
+
+static inline bool ds4_glm_router_better_values(
+        float   sa,
+        int32_t a,
+        float   sb,
+        int32_t b) {
     return sa > sb || (sa == sb && a < b);
 }
 
@@ -4633,6 +4641,157 @@ kernel void kernel_glm_router_select_one(
         }
         sum = max(sum, 6.103515625e-5f);
         token_weights[tid] = token_probs[(uint)token_selected[tid]] / sum * args.expert_weight_scale;
+    }
+}
+
+// Opt-in decode router selector for the production GLM-5.2 shape.  The first
+// SIMD-group owns all 256 experts (8 per lane), reduces one local winner at a
+// time, and therefore avoids the 256-thread bitonic sort for the usual
+// n_expert=256, n_expert_used=10 case.  The complete score/probability row is
+// staged before choosing the path.  Any non-finite probability or biased score
+// takes the exact stock bitonic body below, without CPU readback or a partial
+// selected/weight write.  Keeping the stock body in this kernel also makes the
+// opt-in safe for unusual test inputs and future model variants.
+kernel void kernel_glm_router_select_one_simd(
+        constant ds4_metal_args_glm_router_select_one & args,
+        device const float *logits,
+        device const float *bias,
+        device int32_t *selected,
+        device float *weights,
+        device float *probs,
+        device atomic_uint *stats,
+        threadgroup float *scratch [[threadgroup(0)]],
+        uint token [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]]) {
+    threadgroup float *sel_scores = scratch;
+    threadgroup int32_t *idx = (threadgroup int32_t *)(scratch + 256);
+    threadgroup uint *valid = (threadgroup uint *)(scratch + 512);
+
+    const uint n_expert = min(args.n_expert, 256u);
+    const bool active = tid < n_expert;
+    device const float *token_logits = logits + (uint64_t)token * args.n_expert;
+    device int32_t *token_selected =
+        selected + (uint64_t)token * args.n_expert_used;
+    device float *token_weights =
+        weights + (uint64_t)token * args.n_expert_used;
+    device float *token_probs =
+        probs + (uint64_t)token * args.n_expert;
+
+    const float p = active ? ds4_glm_router_sigmoid(token_logits[tid]) : 0.0f;
+    const float score = active ? p + bias[tid] : -INFINITY;
+    if (active) token_probs[tid] = p;
+    sel_scores[tid] = score;
+    idx[tid] = (int32_t)tid;
+    valid[tid] = active && (!isfinite(p) || !isfinite(score)) ? 1u : 0u;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup_barrier(mem_flags::mem_device);
+
+    /* A single scalar reduction is deliberately used here: it is outside the
+     * finite fast path's top-k loop and keeps all fallback decisions uniform
+     * before any selected or weight output is touched. */
+    if (tid == 0) {
+        uint any_invalid = 0u;
+        for (uint i = 0; i < 256u; i++) any_invalid |= valid[i];
+        valid[0] = any_invalid;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint k_used = min(args.n_expert_used, n_expert);
+    const bool fallback = valid[0] != 0u ||
+        n_expert != 256u || args.n_expert_used != 10u;
+    if (args.stats_enabled != 0u && tid == 0u) {
+        atomic_fetch_add_explicit(stats + (fallback ? 1u : 0u),
+                                  1u, memory_order_relaxed);
+    }
+    if (fallback) {
+        for (uint k = 2; k <= 256; k <<= 1) {
+            for (uint j = k >> 1; j > 0; j >>= 1) {
+                const uint other = tid ^ j;
+                if (other > tid) {
+                    const int32_t a = idx[tid];
+                    const int32_t b = idx[other];
+                    const bool descending = (tid & k) == 0;
+                    const bool swap = descending
+                        ? ds4_glm_router_better(sel_scores, b, a)
+                        : ds4_glm_router_better(sel_scores, a, b);
+                    if (swap) {
+                        idx[tid] = b;
+                        idx[other] = a;
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+        }
+
+        if (tid < k_used) token_selected[tid] = idx[tid];
+        threadgroup_barrier(mem_flags::mem_device);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < k_used) {
+            float sum = 0.0f;
+            for (uint i = 0; i < k_used; i++) {
+                sum += token_probs[(uint)token_selected[i]];
+            }
+            sum = max(sum, 6.103515625e-5f);
+            token_weights[tid] =
+                token_probs[(uint)token_selected[tid]] / sum *
+                args.expert_weight_scale;
+        }
+        return;
+    }
+
+    /* Exactly one SIMD-group is active here.  All 256 threads participated in
+     * the staging/fallback barriers above, so the rest can return without a
+     * second synchronization. */
+    if (tid >= 32u) return;
+
+    float local_scores[8];
+    int32_t local_ids[8];
+    for (uint j = 0; j < 8u; j++) {
+        const uint expert = tid * 8u + j;
+        local_scores[j] = sel_scores[expert];
+        local_ids[j] = (int32_t)expert;
+    }
+
+    int32_t chosen[10];
+    for (uint round = 0; round < 10u; round++) {
+        float winner_score = local_scores[0];
+        int32_t winner_id = local_ids[0];
+        for (uint j = 1; j < 8u; j++) {
+            if (ds4_glm_router_better_values(
+                    local_scores[j], local_ids[j], winner_score, winner_id)) {
+                winner_score = local_scores[j];
+                winner_id = local_ids[j];
+            }
+        }
+
+        for (ushort step = 16; step > 0; step >>= 1) {
+            const float peer_score = simd_shuffle_xor(winner_score, step);
+            const int32_t peer_id = simd_shuffle_xor(winner_id, step);
+            if (ds4_glm_router_better_values(
+                    peer_score, peer_id, winner_score, winner_id)) {
+                winner_score = peer_score;
+                winner_id = peer_id;
+            }
+        }
+
+        chosen[round] = winner_id;
+        for (uint j = 0; j < 8u; j++) {
+            if (local_ids[j] == winner_id) {
+                local_scores[j] = -INFINITY;
+                local_ids[j] = -1;
+            }
+        }
+    }
+
+    if (tid < k_used) {
+        token_selected[tid] = chosen[tid];
+        float sum = 0.0f;
+        for (uint i = 0; i < 10u; i++) {
+            sum += token_probs[(uint)chosen[i]];
+        }
+        sum = max(sum, 6.103515625e-5f);
+        token_weights[tid] =
+            token_probs[(uint)chosen[tid]] / sum * args.expert_weight_scale;
     }
 }
 

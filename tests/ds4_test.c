@@ -7782,6 +7782,501 @@ static void test_metal_router_simd_finalize_exact(void) {
     free(model_raw);
 }
 
+/* An old DS4_METAL_DSV4_MISC_SOURCE is a deliberate source-level override,
+ * not a promise that the opt-in Laguna selector exists in that source.  Keep
+ * this check separate so the default --metal-kernels group never turns on a
+ * kernel that an override does not provide. */
+static void test_metal_glm_router_simd_topk_exact_suite(void);
+
+static void test_metal_glm_router_simd_topk_source_override(void) {
+    const char *source = getenv("DS4_METAL_DSV4_MISC_SOURCE");
+    if (!source || !source[0]) return;
+
+    const char *enable_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK";
+    const char *trace_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE";
+    const char *legacy_enable_env = "DS4_METAL_ENABLE_GLM_ROUTER_SIMD_TOPK";
+    const char *legacy_disable_env = "DS4_METAL_DISABLE_GLM_ROUTER_SIMD_TOPK";
+    char *saved_enable = test_save_env(enable_env);
+    char *saved_trace = test_save_env(trace_env);
+    char *saved_legacy_enable = test_save_env(legacy_enable_env);
+    char *saved_legacy_disable = test_save_env(legacy_disable_env);
+
+    TEST_ASSERT(unsetenv(enable_env) == 0);
+    TEST_ASSERT(unsetenv(trace_env) == 0);
+    TEST_ASSERT(unsetenv(legacy_enable_env) == 0);
+    TEST_ASSERT(unsetenv(legacy_disable_env) == 0);
+    /* The override must be loaded before probing for the optional function.
+     * This also makes a current-source override distinguishable from an old
+     * source that predates kernel_glm_router_select_one_simd. */
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_router_simd_topk_preflight(
+        256u, 10u, 2.5f) == 0);
+
+    TEST_ASSERT(setenv(enable_env, "1", 1) == 0);
+    const int mode = ds4_gpu_laguna_router_simd_topk_preflight(
+        256u, 10u, 2.5f);
+    if (mode > 0) {
+        fprintf(stderr,
+                "ds4-test: Laguna router SIMD top-k current source override "
+                "env-off=stock env-on=available source=%s\n",
+                source);
+        test_metal_glm_router_simd_topk_exact_suite();
+    } else {
+        TEST_ASSERT(mode < 0);
+        fprintf(stderr,
+                "ds4-test: Laguna router SIMD top-k old source override "
+                "env-off=stock env-on=fail-closed source=%s\n",
+                source);
+    }
+
+    test_restore_env(enable_env, saved_enable);
+    test_restore_env(trace_env, saved_trace);
+    test_restore_env(legacy_enable_env, saved_legacy_enable);
+    test_restore_env(legacy_disable_env, saved_legacy_disable);
+}
+
+static void test_metal_glm_router_simd_topk_exact_suite(void) {
+    typedef struct {
+        const char *name;
+        uint32_t n_expert;
+        uint32_t n_used;
+        uint32_t pattern;
+        const char *enable_value;
+        float expert_weight_scale;
+        bool expect_failure;
+    } router_case;
+    static const router_case cases[] = {
+        { "random-finite", 256u, 10u, 0u, "1",       2.5f, false },
+        { "ties",          256u, 10u, 1u, "1",       2.5f, false },
+        { "all-equal",     256u, 10u, 2u, "1",       2.5f, false },
+        { "infinities",    256u, 10u, 3u, "1",       2.5f, false },
+        { "nan-fallback",  256u, 10u, 4u, "1",       2.5f, false },
+        { "bias-inf",      256u, 10u, 5u, "1",       2.5f, false },
+        { "signed-zero",   256u, 10u, 6u, "1",       2.5f, false },
+        { "shape-reject",  255u, 10u, 0u, "1",       2.5f, true },
+        { "k-reject",      256u, 9u,  0u, "1",       2.5f, true },
+        { "scale-reject",  256u, 10u, 0u, "1",       1.5f, true },
+        { "literal-zero",  256u, 10u, 0u, "0",       2.5f, false },
+        { "literal-empty", 256u, 10u, 0u, "",        2.5f, false },
+        { "literal-true",  256u, 10u, 0u, "true",    2.5f, true },
+        { "literal-yes",   256u, 10u, 0u, "yes",     2.5f, true },
+        { "literal-bad",   256u, 10u, 0u, "enabled", 2.5f, true },
+    };
+    const uint32_t max_expert = 256u;
+    const uint32_t max_used = 10u;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t logits_bytes = (uint64_t)max_expert * sizeof(float);
+    const uint64_t selected_bytes = (uint64_t)max_used * sizeof(int32_t);
+    const uint64_t weights_bytes = (uint64_t)max_used * sizeof(float);
+    const char *enable_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK";
+    const char *trace_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE";
+    const char *legacy_enable_env = "DS4_METAL_ENABLE_GLM_ROUTER_SIMD_TOPK";
+    const char *legacy_disable_env = "DS4_METAL_DISABLE_GLM_ROUTER_SIMD_TOPK";
+
+    void *model_raw = NULL;
+    ds4_gpu_tensor *logits = NULL;
+    ds4_gpu_tensor *ref_selected = NULL;
+    ds4_gpu_tensor *test_selected = NULL;
+    ds4_gpu_tensor *ref_weights = NULL;
+    ds4_gpu_tensor *test_weights = NULL;
+    ds4_gpu_tensor *ref_probs = NULL;
+    ds4_gpu_tensor *test_probs = NULL;
+    float *logits_host = NULL;
+    int32_t *ref_selected_host = NULL;
+    int32_t *test_selected_host = NULL;
+    float *ref_weights_host = NULL;
+    float *test_weights_host = NULL;
+    float *ref_probs_host = NULL;
+    float *test_probs_host = NULL;
+
+    TEST_ASSERT(posix_memalign(&model_raw, (size_t)page, (size_t)page) == 0);
+    logits = ds4_gpu_tensor_alloc(logits_bytes);
+    ref_selected = ds4_gpu_tensor_alloc(selected_bytes);
+    test_selected = ds4_gpu_tensor_alloc(selected_bytes);
+    ref_weights = ds4_gpu_tensor_alloc(weights_bytes);
+    test_weights = ds4_gpu_tensor_alloc(weights_bytes);
+    ref_probs = ds4_gpu_tensor_alloc(logits_bytes);
+    test_probs = ds4_gpu_tensor_alloc(logits_bytes);
+    logits_host = malloc((size_t)logits_bytes);
+    ref_selected_host = malloc((size_t)selected_bytes);
+    test_selected_host = malloc((size_t)selected_bytes);
+    ref_weights_host = malloc((size_t)weights_bytes);
+    test_weights_host = malloc((size_t)weights_bytes);
+    ref_probs_host = malloc((size_t)logits_bytes);
+    test_probs_host = malloc((size_t)logits_bytes);
+    TEST_ASSERT(model_raw && logits && ref_selected && test_selected &&
+                ref_weights && test_weights && ref_probs && test_probs &&
+                logits_host && ref_selected_host && test_selected_host &&
+                ref_weights_host && test_weights_host && ref_probs_host &&
+                test_probs_host);
+
+    char *saved_enable = test_save_env(enable_env);
+    char *saved_trace = test_save_env(trace_env);
+    char *saved_legacy_enable = test_save_env(legacy_enable_env);
+    char *saved_legacy_disable = test_save_env(legacy_disable_env);
+    if (model_raw && logits && ref_selected && test_selected && ref_weights &&
+        test_weights && ref_probs && test_probs && logits_host &&
+        ref_selected_host && test_selected_host && ref_weights_host &&
+        test_weights_host && ref_probs_host && test_probs_host) {
+        memset(model_raw, 0, (size_t)page);
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, page) != 0);
+        ds4_gpu_set_quality(false);
+        TEST_ASSERT(setenv(trace_env, "1", 1) == 0);
+        TEST_ASSERT(unsetenv(legacy_enable_env) == 0);
+        TEST_ASSERT(unsetenv(legacy_disable_env) == 0);
+        ds4_gpu_laguna_router_simd_topk_stats_reset();
+
+        for (size_t ci = 0; ci < sizeof(cases) / sizeof(cases[0]); ci++) {
+            const router_case *c = &cases[ci];
+            float *bias = (float *)model_raw;
+            for (uint32_t i = 0; i < max_expert; i++) {
+                bias[i] = 0.0f;
+                const int value =
+                    (int)((i * 47u + (i ^ (i >> 3u)) * 13u) % 257u) - 128;
+                logits_host[i] = (float)value / 32.0f;
+            }
+            if (c->pattern == 1u) {
+                for (uint32_t i = 0; i < max_expert; i++) {
+                    logits_host[i] = -4.0f - (float)(i % 17u) / 64.0f;
+                }
+                static const uint32_t tied[] = {
+                    7u, 19u, 43u, 71u, 103u, 149u, 211u, 239u,
+                };
+                for (size_t i = 0; i < sizeof(tied) / sizeof(tied[0]); i++) {
+                    logits_host[tied[i]] = 1.0f;
+                }
+            } else if (c->pattern == 2u) {
+                for (uint32_t i = 0; i < max_expert; i++) logits_host[i] = 0.0f;
+            } else if (c->pattern == 3u) {
+                const uint32_t pinf = 0x7f800000u;
+                const uint32_t ninf = 0xff800000u;
+                memcpy(&logits_host[0], &pinf, sizeof(pinf));
+                memcpy(&logits_host[1], &ninf, sizeof(ninf));
+                memcpy(&logits_host[2], &pinf, sizeof(pinf));
+                memcpy(&logits_host[3], &ninf, sizeof(ninf));
+            } else if (c->pattern == 4u) {
+                const uint32_t qnan = 0x7fc00000u;
+                memcpy(&logits_host[17], &qnan, sizeof(qnan));
+            } else if (c->pattern == 5u) {
+                const uint32_t pinf = 0x7f800000u;
+                memcpy(&bias[23], &pinf, sizeof(pinf));
+            } else if (c->pattern == 6u) {
+                for (uint32_t i = 0; i < max_expert; i++) {
+                    const uint32_t zero = (i & 1u) ? 0x80000000u : 0u;
+                    memcpy(&logits_host[i], &zero, sizeof(zero));
+                }
+            }
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                logits, 0, logits_host, logits_bytes) != 0);
+
+            TEST_ASSERT(unsetenv(enable_env) == 0);
+            TEST_ASSERT(ds4_gpu_glm_router_select_tensor(
+                ref_selected, ref_weights, ref_probs,
+                model_raw, page, 0, logits,
+                c->n_expert, c->n_used, c->expert_weight_scale) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                ref_selected, 0, ref_selected_host, selected_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                ref_weights, 0, ref_weights_host, weights_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                ref_probs, 0, ref_probs_host, logits_bytes) != 0);
+
+            TEST_ASSERT(setenv(enable_env, c->enable_value, 1) == 0);
+            memset(test_selected_host, 0xa5, (size_t)selected_bytes);
+            memset(test_weights_host, 0xa5, (size_t)weights_bytes);
+            memset(test_probs_host, 0xa5, (size_t)logits_bytes);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                test_selected, 0, test_selected_host, selected_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                test_weights, 0, test_weights_host, weights_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                test_probs, 0, test_probs_host, logits_bytes) != 0);
+            const int result = ds4_gpu_glm_router_select_tensor(
+                test_selected, test_weights, test_probs,
+                model_raw, page, 0, logits,
+                c->n_expert, c->n_used, c->expert_weight_scale);
+            if (c->expect_failure) {
+                TEST_ASSERT(result == 0);
+                TEST_ASSERT(ds4_gpu_tensor_read(
+                    test_selected, 0, test_selected_host, selected_bytes) != 0);
+                TEST_ASSERT(ds4_gpu_tensor_read(
+                    test_weights, 0, test_weights_host, weights_bytes) != 0);
+                TEST_ASSERT(ds4_gpu_tensor_read(
+                    test_probs, 0, test_probs_host, logits_bytes) != 0);
+                for (uint32_t i = 0; i < max_used * sizeof(int32_t); i++) {
+                    TEST_ASSERT(((const uint8_t *)test_selected_host)[i] == 0xa5);
+                }
+                for (uint32_t i = 0; i < max_used * sizeof(float); i++) {
+                    TEST_ASSERT(((const uint8_t *)test_weights_host)[i] == 0xa5);
+                }
+                for (uint32_t i = 0; i < max_expert * sizeof(float); i++) {
+                    TEST_ASSERT(((const uint8_t *)test_probs_host)[i] == 0xa5);
+                }
+                continue;
+            }
+            TEST_ASSERT(result != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                test_selected, 0, test_selected_host, selected_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                test_weights, 0, test_weights_host, weights_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                test_probs, 0, test_probs_host, logits_bytes) != 0);
+
+            const size_t selected_mismatch = memcmp(
+                ref_selected_host, test_selected_host,
+                (size_t)c->n_used * sizeof(int32_t)) != 0;
+            const test_float_compare_stats weight_stats = test_compare_float_bits(
+                ref_weights_host, test_weights_host, c->n_used);
+            const test_float_compare_stats prob_stats = test_compare_float_bits(
+                ref_probs_host, test_probs_host, c->n_expert);
+            fprintf(stderr,
+                    "ds4-test: Laguna router SIMD top-k exactness case=%s "
+                    "selected=%zu weights=%zu/%u probs=%zu/%u max_ulp=%u/%u\n",
+                    c->name,
+                    selected_mismatch,
+                    weight_stats.mismatch_count, c->n_used,
+                    prob_stats.mismatch_count, c->n_expert,
+                    weight_stats.max_ulp, prob_stats.max_ulp);
+            TEST_ASSERT(selected_mismatch == 0);
+            TEST_ASSERT(weight_stats.mismatch_count == 0);
+            TEST_ASSERT(prob_stats.mismatch_count == 0);
+        }
+
+        uint32_t optimized_rows = 0;
+        uint32_t fallback_rows = 0;
+        uint64_t encoded_rows = 0;
+        uint64_t encoded_dispatches = 0;
+        TEST_ASSERT(ds4_gpu_laguna_router_simd_topk_stats_after_wait(
+            &optimized_rows, &fallback_rows,
+            &encoded_rows, &encoded_dispatches) != 0);
+        fprintf(stderr,
+                "ds4-test: Laguna router SIMD top-k single stats "
+                "optimized=%u fallback=%u encoded_rows=%llu "
+                "encoded_dispatches=%llu\n",
+                optimized_rows, fallback_rows,
+                (unsigned long long)encoded_rows,
+                (unsigned long long)encoded_dispatches);
+        TEST_ASSERT(optimized_rows == 5u);
+        TEST_ASSERT(fallback_rows == 2u);
+        TEST_ASSERT(encoded_rows == 7u);
+        TEST_ASSERT(optimized_rows + fallback_rows == encoded_rows);
+        TEST_ASSERT(encoded_dispatches == 7u);
+
+        /* A legacy flag is an explicit conflict, never a silent alias. */
+        TEST_ASSERT(unsetenv(enable_env) == 0);
+        TEST_ASSERT(setenv(legacy_enable_env, "1", 1) == 0);
+        TEST_ASSERT(ds4_gpu_glm_router_select_tensor(
+            test_selected, test_weights, test_probs,
+            model_raw, page, 0, logits, 256u, 10u, 2.5f) == 0);
+        TEST_ASSERT(unsetenv(legacy_enable_env) == 0);
+        TEST_ASSERT(setenv(legacy_disable_env, "1", 1) == 0);
+        TEST_ASSERT(ds4_gpu_glm_router_select_tensor(
+            test_selected, test_weights, test_probs,
+            model_raw, page, 0, logits, 256u, 10u, 2.5f) == 0);
+        TEST_ASSERT(unsetenv(legacy_disable_env) == 0);
+
+        /* Exercise the public batch entry point with two finite rows and one
+         * NaN row.  The extra bytes are guards against over-wide writes. */
+        const uint32_t batch_tokens = 3u;
+        const uint64_t guard = 64u;
+        const uint64_t batch_logits_required =
+            (uint64_t)batch_tokens * max_expert * sizeof(float);
+        const uint64_t batch_selected_required =
+            (uint64_t)batch_tokens * max_used * sizeof(int32_t);
+        const uint64_t batch_weights_required =
+            (uint64_t)batch_tokens * max_used * sizeof(float);
+        ds4_gpu_tensor *batch_logits = ds4_gpu_tensor_alloc(
+            batch_logits_required + guard);
+        ds4_gpu_tensor *batch_ref_selected = ds4_gpu_tensor_alloc(
+            batch_selected_required + guard);
+        ds4_gpu_tensor *batch_test_selected = ds4_gpu_tensor_alloc(
+            batch_selected_required + guard);
+        ds4_gpu_tensor *batch_ref_weights = ds4_gpu_tensor_alloc(
+            batch_weights_required + guard);
+        ds4_gpu_tensor *batch_test_weights = ds4_gpu_tensor_alloc(
+            batch_weights_required + guard);
+        ds4_gpu_tensor *batch_ref_probs = ds4_gpu_tensor_alloc(
+            batch_logits_required + guard);
+        ds4_gpu_tensor *batch_test_probs = ds4_gpu_tensor_alloc(
+            batch_logits_required + guard);
+        uint8_t *batch_logits_host = malloc(
+            (size_t)(batch_logits_required + guard));
+        uint8_t *batch_ref_selected_host = malloc(
+            (size_t)(batch_selected_required + guard));
+        uint8_t *batch_test_selected_host = malloc(
+            (size_t)(batch_selected_required + guard));
+        uint8_t *batch_ref_weights_host = malloc(
+            (size_t)(batch_weights_required + guard));
+        uint8_t *batch_test_weights_host = malloc(
+            (size_t)(batch_weights_required + guard));
+        uint8_t *batch_ref_probs_host = malloc(
+            (size_t)(batch_logits_required + guard));
+        uint8_t *batch_test_probs_host = malloc(
+            (size_t)(batch_logits_required + guard));
+        TEST_ASSERT(batch_logits && batch_ref_selected && batch_test_selected &&
+                    batch_ref_weights && batch_test_weights &&
+                    batch_ref_probs && batch_test_probs &&
+                    batch_logits_host && batch_ref_selected_host &&
+                    batch_test_selected_host && batch_ref_weights_host &&
+                    batch_test_weights_host && batch_ref_probs_host &&
+                    batch_test_probs_host);
+        if (batch_logits && batch_ref_selected && batch_test_selected &&
+            batch_ref_weights && batch_test_weights && batch_ref_probs &&
+            batch_test_probs && batch_logits_host && batch_ref_selected_host &&
+            batch_test_selected_host && batch_ref_weights_host &&
+            batch_test_weights_host && batch_ref_probs_host &&
+            batch_test_probs_host) {
+            float *batch_logits_f32 = (float *)batch_logits_host;
+            for (uint32_t row = 0; row < batch_tokens; row++) {
+                for (uint32_t expert = 0; expert < max_expert; expert++) {
+                    const int value = (int)((row * 71u + expert * 29u) % 257u) - 128;
+                    batch_logits_f32[(uint64_t)row * max_expert + expert] =
+                        (float)value / 32.0f;
+                }
+            }
+            const uint32_t qnan = 0x7fc00000u;
+            memcpy(&batch_logits_f32[max_expert + 17u], &qnan, sizeof(qnan));
+            memset(batch_logits_host + batch_logits_required, 0xa5, (size_t)guard);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                batch_logits, 0, batch_logits_host,
+                batch_logits_required + guard) != 0);
+            memset(batch_ref_selected_host, 0xa5,
+                   (size_t)(batch_selected_required + guard));
+            memset(batch_ref_weights_host, 0xa5,
+                   (size_t)(batch_weights_required + guard));
+            memset(batch_ref_probs_host, 0xa5,
+                   (size_t)(batch_logits_required + guard));
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                batch_ref_selected, 0, batch_ref_selected_host,
+                batch_selected_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                batch_ref_weights, 0, batch_ref_weights_host,
+                batch_weights_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                batch_ref_probs, 0, batch_ref_probs_host,
+                batch_logits_required + guard) != 0);
+            TEST_ASSERT(unsetenv(enable_env) == 0);
+            TEST_ASSERT(ds4_gpu_glm_router_select_batch_tensor(
+                batch_ref_selected, batch_ref_weights, batch_ref_probs,
+                model_raw, page, 0, batch_logits, 256u, 10u, 2.5f,
+                batch_tokens) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                batch_ref_selected, 0, batch_ref_selected_host,
+                batch_selected_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                batch_ref_weights, 0, batch_ref_weights_host,
+                batch_weights_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                batch_ref_probs, 0, batch_ref_probs_host,
+                batch_logits_required + guard) != 0);
+
+            memset(batch_test_selected_host, 0xa5,
+                   (size_t)(batch_selected_required + guard));
+            memset(batch_test_weights_host, 0xa5,
+                   (size_t)(batch_weights_required + guard));
+            memset(batch_test_probs_host, 0xa5,
+                   (size_t)(batch_logits_required + guard));
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                batch_test_selected, 0, batch_test_selected_host,
+                batch_selected_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                batch_test_weights, 0, batch_test_weights_host,
+                batch_weights_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                batch_test_probs, 0, batch_test_probs_host,
+                batch_logits_required + guard) != 0);
+            TEST_ASSERT(setenv(enable_env, "1", 1) == 0);
+            ds4_gpu_laguna_router_simd_topk_stats_reset();
+            TEST_ASSERT(ds4_gpu_glm_router_select_batch_tensor(
+                batch_test_selected, batch_test_weights, batch_test_probs,
+                model_raw, page, 0, batch_logits, 256u, 10u, 2.5f,
+                batch_tokens) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                batch_test_selected, 0, batch_test_selected_host,
+                batch_selected_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                batch_test_weights, 0, batch_test_weights_host,
+                batch_weights_required + guard) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                batch_test_probs, 0, batch_test_probs_host,
+                batch_logits_required + guard) != 0);
+            TEST_ASSERT(memcmp(batch_ref_selected_host, batch_test_selected_host,
+                               (size_t)batch_selected_required) == 0);
+            TEST_ASSERT(test_compare_float_bits(
+                (const float *)batch_ref_weights_host,
+                (const float *)batch_test_weights_host,
+                (size_t)batch_tokens * max_used).mismatch_count == 0);
+            TEST_ASSERT(test_compare_float_bits(
+                (const float *)batch_ref_probs_host,
+                (const float *)batch_test_probs_host,
+                (size_t)batch_tokens * max_expert).mismatch_count == 0);
+            for (uint64_t i = 0; i < guard; i++) {
+                TEST_ASSERT(batch_test_selected_host[batch_selected_required + i] == 0xa5);
+                TEST_ASSERT(batch_test_weights_host[batch_weights_required + i] == 0xa5);
+                TEST_ASSERT(batch_test_probs_host[batch_logits_required + i] == 0xa5);
+            }
+            TEST_ASSERT(ds4_gpu_laguna_router_simd_topk_stats_after_wait(
+                &optimized_rows, &fallback_rows,
+                &encoded_rows, &encoded_dispatches) != 0);
+            fprintf(stderr,
+                    "ds4-test: Laguna router SIMD top-k batch stats "
+                    "optimized=%u fallback=%u encoded_rows=%llu "
+                    "encoded_dispatches=%llu scale=2.5\n",
+                    optimized_rows, fallback_rows,
+                    (unsigned long long)encoded_rows,
+                    (unsigned long long)encoded_dispatches);
+            TEST_ASSERT(optimized_rows == 2u);
+            TEST_ASSERT(fallback_rows == 1u);
+            TEST_ASSERT(encoded_rows == batch_tokens);
+            TEST_ASSERT(optimized_rows + fallback_rows == encoded_rows);
+            TEST_ASSERT(encoded_dispatches == 1u);
+        }
+        free(batch_test_probs_host);
+        free(batch_ref_probs_host);
+        free(batch_test_weights_host);
+        free(batch_ref_weights_host);
+        free(batch_test_selected_host);
+        free(batch_ref_selected_host);
+        free(batch_logits_host);
+        ds4_gpu_tensor_free(batch_test_probs);
+        ds4_gpu_tensor_free(batch_ref_probs);
+        ds4_gpu_tensor_free(batch_test_weights);
+        ds4_gpu_tensor_free(batch_ref_weights);
+        ds4_gpu_tensor_free(batch_test_selected);
+        ds4_gpu_tensor_free(batch_ref_selected);
+        ds4_gpu_tensor_free(batch_logits);
+    }
+
+    test_restore_env(enable_env, saved_enable);
+    test_restore_env(trace_env, saved_trace);
+    test_restore_env(legacy_enable_env, saved_legacy_enable);
+    test_restore_env(legacy_disable_env, saved_legacy_disable);
+    free(test_probs_host);
+    free(ref_probs_host);
+    free(test_weights_host);
+    free(ref_weights_host);
+    free(test_selected_host);
+    free(ref_selected_host);
+    free(logits_host);
+    ds4_gpu_tensor_free(test_probs);
+    ds4_gpu_tensor_free(ref_probs);
+    ds4_gpu_tensor_free(test_weights);
+    ds4_gpu_tensor_free(ref_weights);
+    ds4_gpu_tensor_free(test_selected);
+    ds4_gpu_tensor_free(ref_selected);
+    ds4_gpu_tensor_free(logits);
+    free(model_raw);
+}
+
+static void test_metal_glm_router_simd_topk_exact(void) {
+    const char *source = getenv("DS4_METAL_DSV4_MISC_SOURCE");
+    if (source && source[0]) {
+        test_metal_glm_router_simd_topk_source_override();
+        return;
+    }
+    test_metal_glm_router_simd_topk_exact_suite();
+}
+
 static void test_metal_router_weights_batch_exact(void) {
     typedef struct {
         const char *name;
@@ -8405,6 +8900,7 @@ static void test_metal_kernel_group(void) {
     test_metal_output_hc_weights4_exact();
     test_metal_hc_rms_scale_project_f16_exact();
     test_metal_router_simd_finalize_exact();
+    test_metal_glm_router_simd_topk_exact();
     test_metal_router_weights_batch_exact();
 #endif
 }
@@ -10284,6 +10780,9 @@ static const ds4_test_entry test_entries[] = {
     {"--metal-glm-qmv-r1", "metal-glm-qmv-r1",
      "resident decode-only GLM QMV one-row-per-SIMD exactness",
      test_metal_glm_qmv_r1_exact, false},
+    {"--metal-glm-router-simd-topk", "metal-glm-router-simd-topk",
+     "exact finite-domain GLM/Laguna router SIMD top-k selector",
+     test_metal_glm_router_simd_topk_exact, true},
 #endif
     {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence, false},
     {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness, false},
@@ -10321,6 +10820,8 @@ static void test_print_help(const char *prog) {
     puts("  DS4_TEST_SSD_STREAMING_COLD=1  Skip streaming hot expert preload.");
     puts("  DS4_METAL_DISABLE_STREAMING_COLD_DECODE_PREFILL=1  Force canonical streamed cold prefill.");
     puts("  DS4_METAL_GLM_QMV_R1=1  Enable resident decode-only one-row-per-SIMD GLM QMV.");
+    puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK=1  Enable exact finite-domain Laguna router top-k SIMD selector.");
+    puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE=1  Collect optimized/fallback selector row counters.");
     puts("  DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED=1  Enable ordinary Laguna prefill paired Q/K norm/RoPE.");
     puts("  DS4_TEST_LONG_PROMPT=FILE  Rendered long-context story fact prompt.");
     puts("  DS4_TEST_VECTOR_FILE=FILE  Official fixture. Default: flash-0731/official.vec.");

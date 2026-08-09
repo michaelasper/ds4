@@ -37762,6 +37762,17 @@ struct ds4_engine {
     int            placement_session_count_hint;
 };
 
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+static bool laguna_metal_router_simd_topk_preflight(
+        const ds4_engine *engine,
+        const char       *operation,
+        char             *err,
+        size_t            errlen);
+static bool laguna_metal_router_simd_topk_trace_enabled(void);
+static void laguna_metal_router_simd_topk_trace_reset(void);
+static void laguna_metal_router_simd_topk_trace_report(const char *operation);
+#endif
+
 static uint64_t ds4_engine_dynamic_expert_cache_bytes(
         const ds4_engine *e) {
     if (!e || !e->ssd_streaming) return 0;
@@ -50887,12 +50898,19 @@ static bool laguna_graph_forward_token(
         uint32_t              pos,
         const ds4_laguna_feature_capture *capture,
         float                *logits_out) {
+#ifdef __APPLE__
+    if (!laguna_metal_router_simd_topk_preflight(
+            NULL, "Laguna decode", NULL, 0)) return false;
+#endif
     if (!g || !model || !weights || token < 0 ||
         token >= (int)DS4_N_VOCAB || pos >= g->ctx_size) {
         return false;
     }
 
 #ifdef __APPLE__
+    const bool router_simd_topk_trace =
+        laguna_metal_router_simd_topk_trace_enabled();
+    laguna_metal_router_simd_topk_trace_reset();
     bool decode_residual_norm_completion_waited = false;
     const int decode_residual_norm_mode =
         laguna_metal_decode_residual_norm_mode();
@@ -51520,6 +51538,11 @@ static bool laguna_graph_forward_token(
                                  logits_out,
                                  (uint64_t)DS4_N_VOCAB * sizeof(float)) != 0;
     }
+#ifdef __APPLE__
+    if (router_simd_topk_trace) {
+        laguna_metal_router_simd_topk_trace_report("Laguna decode");
+    }
+#endif
     return ok;
 }
 
@@ -51655,10 +51678,19 @@ static bool laguna_graph_forward_batch(
         ds4_session_progress_fn display_progress,
         void                 *display_progress_ud,
         int                   display_total) {
+#ifdef __APPLE__
+    if (!laguna_metal_router_simd_topk_preflight(
+            NULL, "Laguna prefill/speculative batch", NULL, 0)) return false;
+#endif
     if (!g || !model || !weights || !tokens || n_tokens == 0 ||
         n_tokens > g->prefill_cap || pos0 > g->ctx_size - n_tokens) {
         return false;
     }
+#ifdef __APPLE__
+    const bool router_simd_topk_trace =
+        laguna_metal_router_simd_topk_trace_enabled();
+    laguna_metal_router_simd_topk_trace_reset();
+#endif
     if (row_argmax_out &&
         (n_tokens > DS4_DFLASH_BLOCK_SIZE ||
          !laguna_graph_ensure_spec_scratch(g))) {
@@ -52323,6 +52355,12 @@ static bool laguna_graph_forward_batch(
                                                       true);
     }
     ds4_gpu_set_tensor_matmul_suppressed(false);
+#ifdef __APPLE__
+    if (router_simd_topk_trace && !defer_completion) {
+        laguna_metal_router_simd_topk_trace_report(
+            "Laguna prefill/speculative batch");
+    }
+#endif
     return ok;
 }
 
@@ -52421,6 +52459,84 @@ static bool laguna_metal_decode_residual_norm_preflight(void) {
     return true;
 }
 
+/* Graph-level gate for the opt-in Laguna router selector.  This must run at
+ * the public graph boundary, before a command batch, capture, KV/cache write,
+ * or session timeline mutation can happen.  The low-level router entry points
+ * repeat the check defensively because diagnostics can call them directly. */
+static bool laguna_metal_router_simd_topk_preflight(
+        const ds4_engine *engine,
+        const char       *operation,
+        char             *err,
+        size_t            errlen) {
+    const int mode = ds4_gpu_laguna_router_simd_topk_preflight(
+        DS4_N_EXPERT,
+        DS4_N_EXPERT_USED,
+        DS4_EXPERT_WEIGHT_SCALE);
+    if (mode < 0) {
+        if (err && errlen) {
+            snprintf(err, errlen,
+                     "%s Laguna router SIMD top-k preflight failed",
+                     operation ? operation : "graph operation");
+        }
+        return false;
+    }
+    if (mode > 0 && engine &&
+        (!ds4_backend_uses_graph(engine->backend) || !engine->metal_ready)) {
+        fprintf(stderr,
+                "ds4: Laguna router SIMD top-k requires a ready Metal graph "
+                "backend; refusing explicit opt-in fallback\n");
+        if (err && errlen) {
+            snprintf(err, errlen,
+                     "%s Laguna router SIMD top-k requires a ready Metal graph backend",
+                     operation ? operation : "graph operation");
+        }
+        return false;
+    }
+    return true;
+}
+
+/* The router trace is intentionally opt-in and is kept out of timed runs.
+ * The Metal kernel only enables its atomic row counters for the same literal
+ * value, so a trace-off run pays neither the atomic updates nor these waits. */
+static bool laguna_metal_router_simd_topk_trace_enabled(void) {
+    const char *value = getenv("DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE");
+    return value && strcmp(value, "1") == 0;
+}
+
+static void laguna_metal_router_simd_topk_trace_reset(void) {
+    if (laguna_metal_router_simd_topk_trace_enabled()) {
+        ds4_gpu_laguna_router_simd_topk_stats_reset();
+    }
+}
+
+static void laguna_metal_router_simd_topk_trace_report(const char *operation) {
+    if (!laguna_metal_router_simd_topk_trace_enabled()) return;
+
+    uint32_t optimized_rows = 0;
+    uint32_t fallback_rows = 0;
+    uint64_t encoded_rows = 0;
+    uint64_t encoded_dispatches = 0;
+    if (!ds4_gpu_laguna_router_simd_topk_stats_after_wait(
+            &optimized_rows,
+            &fallback_rows,
+            &encoded_rows,
+            &encoded_dispatches)) {
+        fprintf(stderr,
+                "ds4: %s Laguna router SIMD top-k trace read failed\n",
+                operation ? operation : "graph operation");
+        return;
+    }
+    fprintf(stderr,
+            "ds4: %s Laguna router SIMD top-k trace "
+            "optimized=%u fallback=%u encoded_rows=%llu "
+            "encoded_dispatches=%llu\n",
+            operation ? operation : "graph operation",
+            optimized_rows,
+            fallback_rows,
+            (unsigned long long)encoded_rows,
+            (unsigned long long)encoded_dispatches);
+}
+
 #endif
 
 static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
@@ -52512,6 +52628,8 @@ static int generate_laguna_metal_argmax(
         return 1;
     }
 #if defined(__APPLE__)
+    if (!laguna_metal_router_simd_topk_preflight(
+            NULL, "Laguna generation", NULL, 0)) return 1;
     if (laguna_metal_q8_lmhead_screen_v2_mode() < 0) return 1;
     if (!laguna_metal_decode_residual_norm_preflight()) return 1;
     const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
@@ -57742,6 +57860,10 @@ int ds4_engine_generate_argmax(
         void              *emit_ud,
         ds4_session_progress_fn progress,
         void              *progress_ud) {
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_router_simd_topk_preflight(
+            e, "generation", NULL, 0)) return 1;
+#endif
     const ds4_model *model = &e->model;
     const ds4_vocab *vocab = &e->vocab;
     const ds4_weights *weights = &e->weights;
@@ -63356,6 +63478,10 @@ static int ds4_session_tp_register(ds4_session *s) {
 
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     if (!out || !e || ctx_size <= 0) return 1;
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_router_simd_topk_preflight(
+            e, "session create", NULL, 0)) return 1;
+#endif
     if (e->backend == DS4_BACKEND_CPU) {
         if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
             DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
@@ -64244,6 +64370,10 @@ int ds4_session_eval_layer_slice(ds4_session *s,
         if (errlen) snprintf(err, errlen, "missing layer-slice session");
         return 1;
     }
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_router_simd_topk_preflight(
+            s->engine, "session layer slice", err, errlen)) return 1;
+#endif
     const uint32_t executable_layers = ds4_model_normal_layer_count();
     if (executable_layers == 0 ||
         layer_start > layer_end ||
@@ -64771,6 +64901,10 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
  * once its matching prefill completes, surfacing worker-side failures
  * here instead of as a gate timeout mid-decode. */
 int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (s && !laguna_metal_router_simd_topk_preflight(
+            s->engine, "session sync", err, errlen)) return 1;
+#endif
     const bool mirror = ds4_session_tp_leader(s);
     if (mirror && prompt && prompt->len > 0) {
         if (!ds4_tp_send_sync(s->engine->tp.ctx, s->tp_session_id,
@@ -66922,6 +67056,10 @@ static int ds4_session_eval_probe_tp(ds4_session *s, int token, bool probe_mtp,
 }
 
 int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (s && !laguna_metal_router_simd_topk_preflight(
+            s->engine, "session eval", err, errlen)) return 1;
+#endif
     bool probe_mtp = true;
 #ifndef DS4_NO_GPU
     if (s && s->engine && s->engine->support_kind == DS4_SUPPORT_DSPARK) {
@@ -67708,6 +67846,10 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
         return 1;
     }
     ds4_engine *e = first->engine;
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_router_simd_topk_preflight(
+            e, "session batch eval", err, errlen)) return 1;
+#endif
     for (int i = 0; i < count; i++) {
         ds4_session *s = items[i].session;
         if (!s || s->engine != e) {
@@ -67810,6 +67952,13 @@ int ds4_sessions_eval_batch_with_prefill(
             }
         }
     }
+
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_router_simd_topk_preflight(
+            prefill_session->engine, "session mixed prefill/eval", err, errlen)) {
+        return 1;
+    }
+#endif
 
 #ifndef DS4_NO_GPU
     if (prefill_session->engine->backend == DS4_BACKEND_CUDA) {
@@ -71649,6 +71798,19 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                                         int *accepted, int accepted_cap,
                                         char *err, size_t errlen) {
     if (!s || max_tokens <= 0 || accepted_cap <= 0) return 0;
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_router_simd_topk_preflight(
+            s->engine, "speculative eval", err, errlen)) return -1;
+    const bool laguna_router_simd_topk_trace =
+        ds4_session_is_laguna(s) &&
+        laguna_metal_router_simd_topk_trace_enabled();
+    if (laguna_router_simd_topk_trace) {
+        /* DFlash may stage a support-model command stream before its target
+         * batch. Reset at this public boundary; the graph batch itself also
+         * resets defensively before an ordinary non-deferred invocation. */
+        laguna_metal_router_simd_topk_trace_reset();
+    }
+#endif
     if (s->distributed) {
         if (!accepted) return 0;
         if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
@@ -71715,7 +71877,7 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
             return -1;
         }
 #endif
-        return ds4_session_eval_dflash_speculative_argmax(
+        const int rc = ds4_session_eval_dflash_speculative_argmax(
             s,
             first_token,
             max_tokens,
@@ -71724,6 +71886,16 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
             accepted_cap,
             err,
             errlen);
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+        if (laguna_router_simd_topk_trace) {
+            /* The DFlash helper waits before reading/rolling back the target
+             * graph, so this report is safe even when its first target batch
+             * was encoded with deferred completion. */
+            laguna_metal_router_simd_topk_trace_report(
+                "Laguna speculative eval");
+        }
+#endif
+        return rc;
     }
     if (ds4_session_is_glm(s) && ds4_engine_glm_mtp_spec_enabled(e)) {
         int cycle_cap = accepted_cap;

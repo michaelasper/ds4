@@ -217,6 +217,7 @@ static NSUInteger g_dsv4_hc_producer_last_mix_offset;
 static id<MTLBuffer> g_dsv4_hc_producer_last_completion;
 static id<MTLComputePipelineState> g_dsv4_router_weights_one_pipeline;
 static id<MTLComputePipelineState> g_glm_router_select_one_pipeline;
+static id<MTLComputePipelineState> g_glm_router_select_one_simd_pipeline;
 static id<MTLComputePipelineState> g_glm_kv_lora_rms_norm_pipeline;
 static id<MTLComputePipelineState> g_glm_k_b_project_pipeline;
 static id<MTLComputePipelineState> g_glm_store_compact_kv_pipeline;
@@ -383,6 +384,7 @@ static id<MTLBuffer> g_compressor_store_score_buffer;
 static id<MTLBuffer> g_embed_rows_buffer;
 static id<MTLBuffer> g_router_selection_buffer;
 static id<MTLBuffer> g_router_weight_sum_buffer;
+static id<MTLBuffer> g_glm_router_simd_topk_stats_buffer;
 static id<MTLBuffer> g_indexer_head_scores_buffer;
 static id<MTLBuffer> g_indexer_topk_buffer;
 static id<MTLBuffer> g_indexed_topk_buffer;
@@ -6234,7 +6236,7 @@ typedef struct {
     uint32_t n_expert;
     uint32_t n_expert_used;
     float    expert_weight_scale;
-    uint32_t pad0;
+    uint32_t stats_enabled;
 } ds4_gpu_glm_router_select_one_args;
 
 typedef struct {
@@ -10737,6 +10739,7 @@ void ds4_gpu_cleanup(void) {
         g_dsv4_completion_cache = nil;
         g_dsv4_router_weights_one_pipeline = nil;
         g_glm_router_select_one_pipeline = nil;
+        g_glm_router_select_one_simd_pipeline = nil;
         g_glm_kv_lora_rms_norm_pipeline = nil;
         g_glm_k_b_project_pipeline = nil;
         g_glm_store_compact_kv_pipeline = nil;
@@ -10830,6 +10833,7 @@ void ds4_gpu_cleanup(void) {
         g_embed_rows_buffer = nil;
         g_router_selection_buffer = nil;
         g_router_weight_sum_buffer = nil;
+        g_glm_router_simd_topk_stats_buffer = nil;
         g_indexer_head_scores_buffer = nil;
         g_indexer_topk_buffer = nil;
         g_indexed_topk_buffer = nil;
@@ -22076,13 +22080,11 @@ int ds4_gpu_matmul_f32_decode_rows_exact_tensor(
         id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
         id<MTLBuffer> outbuf = ds4_gpu_tensor_buffer(out);
         uint64_t inner_offset = 0;
-        id<MTLBuffer> wbuf =
-            ds4_gpu_wrap_f32_decode_model_range(model_map,
-                                                model_size,
-                                                weight_offset,
-                                                weight_bytes,
-                                                1u,
-                                                &inner_offset);
+        id<MTLBuffer> wbuf = ds4_gpu_wrap_model_range(model_map,
+                                                       model_size,
+                                                       weight_offset,
+                                                       weight_bytes,
+                                                       &inner_offset);
         if (!xbuf || !outbuf || !wbuf) return 0;
 
         ds4_gpu_q8_0_matvec_args args =
@@ -22509,11 +22511,6 @@ int ds4_gpu_add_rms_norm_weight_rows_tensor(
             return 0;
         }
 
-        const bool exact_decode_weight_view =
-            rows == 1u &&
-            row_bytes <= (1ull << 20) &&
-            getenv("DS4_METAL_ENABLE_DECODE_NORM_EXACT_VIEWS") != NULL &&
-            getenv("DS4_METAL_DISABLE_DECODE_NORM_EXACT_VIEWS") == NULL;
         uint64_t inner_offset = 0;
         id<MTLBuffer> wbuf = ds4_gpu_wrap_model_range(model_map,
                                                        model_size,
@@ -35457,9 +35454,8 @@ int ds4_gpu_laguna_attn_output_residual_f16_tensor(
         }
 
         uint64_t weight_inner = 0;
-        id<MTLBuffer> weightbuf = ds4_gpu_wrap_f32_decode_model_range(
-            model_map, model_size, weight_offset, weight_bytes, 1,
-            &weight_inner);
+        id<MTLBuffer> weightbuf = ds4_gpu_wrap_model_range(
+            model_map, model_size, weight_offset, weight_bytes, &weight_inner);
         ds4_gpu_mv_dispatch dispatch =
             ds4_gpu_make_plain_mv_dispatch(in_dim, 0);
         id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mv_pipeline(
@@ -38929,6 +38925,124 @@ int ds4_gpu_glm_attention_indexed_batch_lora_valid_tensor(
                                                                  true);
 }
 
+static int g_glm_router_simd_topk_reported;
+static uint64_t g_glm_router_simd_topk_encoded_rows;
+static uint64_t g_glm_router_simd_topk_encoded_dispatches;
+
+/* The Laguna selector deliberately does not use ds4_gpu_env_bool(): an
+ * accidental spelling or an old flag must never silently select a different
+ * router.  Empty/unset/0 are off, literal 1 is on, and every other value is a
+ * fatal opt-in error. */
+static int ds4_gpu_laguna_router_simd_topk_env_mode(void) {
+    const char *value = getenv("DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK");
+    const char *legacy_enable = getenv("DS4_METAL_ENABLE_GLM_ROUTER_SIMD_TOPK");
+    const char *legacy_disable = getenv("DS4_METAL_DISABLE_GLM_ROUTER_SIMD_TOPK");
+    if (legacy_enable || legacy_disable) {
+        fprintf(stderr,
+                "ds4: fatal: obsolete GLM router SIMD top-k environment "
+                "flags conflict with DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK\n");
+        return -1;
+    }
+    if (!value || value[0] == '\0' || strcmp(value, "0") == 0) return 0;
+    if (strcmp(value, "1") == 0) return 1;
+    fprintf(stderr,
+            "ds4: fatal: DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK must be unset, "
+            "0, or literal 1 (got %s)\n",
+            value);
+    return -1;
+}
+
+static id<MTLBuffer> ds4_gpu_laguna_router_simd_topk_stats_buffer(void) {
+    if (!g_glm_router_simd_topk_stats_buffer && g_device) {
+        g_glm_router_simd_topk_stats_buffer =
+            [g_device newBufferWithLength:2u * sizeof(uint32_t)
+                                  options:MTLResourceStorageModeShared];
+    }
+    return g_glm_router_simd_topk_stats_buffer;
+}
+
+static bool ds4_gpu_laguna_router_simd_topk_trace_enabled(void) {
+    return getenv("DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE") != NULL &&
+           strcmp(getenv("DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE"), "1") == 0;
+}
+
+/* Returns 1 only when the opt-in path is fully available, 0 for ordinary
+ * env-off operation, and -1 for an explicit opt-in contract violation. */
+static int ds4_gpu_laguna_router_simd_topk_validate(
+        uint32_t n_expert,
+        uint32_t n_expert_used,
+        float    expert_weight_scale) {
+    const int mode = ds4_gpu_laguna_router_simd_topk_env_mode();
+    if (mode <= 0) return mode;
+    if (n_expert != 256u || n_expert_used != 10u) {
+        fprintf(stderr,
+                "ds4: fatal: Laguna router SIMD top-k requires n_expert=256 "
+                "and n_expert_used=10 (got %u/%u)\n",
+                n_expert, n_expert_used);
+        return -1;
+    }
+    if (expert_weight_scale != 2.5f) {
+        fprintf(stderr,
+                "ds4: fatal: Laguna router SIMD top-k requires "
+                "expert_weight_scale=2.5 (got %.9g)\n",
+                expert_weight_scale);
+        return -1;
+    }
+
+    /* Keep env-off completely quiet and side-effect free.  An explicit
+     * request, however, is an availability probe and must initialize Metal
+     * before asking the library for the optional PSO; source overrides are
+     * otherwise indistinguishable from an uninitialized device. */
+    if (!g_initialized && !ds4_gpu_init()) {
+        fprintf(stderr,
+                "ds4: fatal: Laguna router SIMD top-k Metal initialization failed\n");
+        return -1;
+    }
+
+    /* The source may be overridden for diagnostics.  Keep this optional
+     * pipeline lazy so env-off old-source runs remain quiet and stock. */
+    if (!g_glm_router_select_one_simd_pipeline) {
+        g_glm_router_select_one_simd_pipeline =
+            ds4_gpu_get_pipeline("kernel_glm_router_select_one_simd");
+    }
+    if (!g_glm_router_select_one_simd_pipeline) {
+        fprintf(stderr,
+                "ds4: fatal: Laguna router SIMD top-k kernel/PSO unavailable\n");
+        return -1;
+    }
+    if (g_glm_router_select_one_simd_pipeline.threadExecutionWidth != 32u ||
+        g_glm_router_select_one_simd_pipeline.maxTotalThreadsPerThreadgroup < 256u) {
+        fprintf(stderr,
+                "ds4: fatal: Laguna router SIMD top-k requires TEW=32 and "
+                "maxThreads>=256 (got TEW=%lu maxThreads=%lu)\n",
+                (unsigned long)g_glm_router_select_one_simd_pipeline.threadExecutionWidth,
+                (unsigned long)g_glm_router_select_one_simd_pipeline.maxTotalThreadsPerThreadgroup);
+        return -1;
+    }
+    if (!ds4_gpu_laguna_router_simd_topk_stats_buffer()) {
+        fprintf(stderr,
+                "ds4: fatal: Laguna router SIMD top-k stats buffer unavailable\n");
+        return -1;
+    }
+    return 1;
+}
+
+int ds4_gpu_laguna_router_simd_topk_preflight(
+        uint32_t n_expert,
+        uint32_t n_expert_used,
+        float    expert_weight_scale) {
+    return ds4_gpu_laguna_router_simd_topk_validate(
+        n_expert, n_expert_used, expert_weight_scale);
+}
+
+static void ds4_gpu_laguna_router_simd_topk_report_once(void) {
+    if (g_glm_router_simd_topk_reported) return;
+    fprintf(stderr,
+            "ds4: Laguna router SIMD top-k selector enabled "
+            "(n_expert=256 n_used=10 tew=32; nonfinite rows use stock fallback)\n");
+    g_glm_router_simd_topk_reported = 1;
+}
+
 int ds4_gpu_glm_router_select_tensor(
         ds4_gpu_tensor       *selected,
         ds4_gpu_tensor       *weights,
@@ -38983,10 +39097,21 @@ int ds4_gpu_glm_router_select_tensor(
                                      &bias_inner);
         if (!biasbuf) return 0;
 
+        const int simd_topk_mode =
+            ds4_gpu_laguna_router_simd_topk_validate(
+                n_expert, n_expert_used, expert_weight_scale);
+        if (simd_topk_mode < 0) return 0;
+        const bool use_simd_topk = simd_topk_mode > 0;
         id<MTLComputePipelineState> pipeline =
-            ds4_gpu_hot_pipeline(g_glm_router_select_one_pipeline,
-                                 "kernel_glm_router_select_one");
+            ds4_gpu_hot_pipeline(
+                use_simd_topk ? g_glm_router_select_one_simd_pipeline
+                              : g_glm_router_select_one_pipeline,
+                use_simd_topk ? "kernel_glm_router_select_one_simd"
+                              : "kernel_glm_router_select_one");
         if (!pipeline) return 0;
+        if (use_simd_topk) {
+            ds4_gpu_laguna_router_simd_topk_report_once();
+        }
 
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
@@ -38996,7 +39121,8 @@ int ds4_gpu_glm_router_select_tensor(
             .n_expert = n_expert,
             .n_expert_used = n_expert_used,
             .expert_weight_scale = expert_weight_scale,
-            .pad0 = 0,
+            .stats_enabled = use_simd_topk &&
+                ds4_gpu_laguna_router_simd_topk_trace_enabled() ? 1u : 0u,
         };
 
         id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
@@ -39007,10 +39133,22 @@ int ds4_gpu_glm_router_select_tensor(
         [enc setBuffer:selectedbuf offset:ds4_gpu_tensor_offset(selected) atIndex:3];
         [enc setBuffer:weightsbuf offset:ds4_gpu_tensor_offset(weights) atIndex:4];
         [enc setBuffer:probsbuf offset:ds4_gpu_tensor_offset(probs) atIndex:5];
-        [enc setThreadgroupMemoryLength:256u * sizeof(float) + 256u * sizeof(int32_t) atIndex:0];
+        if (use_simd_topk) {
+            [enc setBuffer:ds4_gpu_laguna_router_simd_topk_stats_buffer()
+                   offset:0 atIndex:6];
+        }
+        [enc setThreadgroupMemoryLength:use_simd_topk
+                ? 512u * sizeof(float) + 256u * sizeof(uint32_t)
+                : 256u * sizeof(float) + 256u * sizeof(int32_t)
+                atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
+
+        if (use_simd_topk) {
+            g_glm_router_simd_topk_encoded_rows++;
+            g_glm_router_simd_topk_encoded_dispatches++;
+        }
 
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM router select")) return 0;
     }
@@ -39067,10 +39205,21 @@ int ds4_gpu_glm_router_select_batch_tensor(
                                                          &bias_inner);
         if (!biasbuf) return 0;
 
+        const int simd_topk_mode =
+            ds4_gpu_laguna_router_simd_topk_validate(
+                n_expert, n_expert_used, expert_weight_scale);
+        if (simd_topk_mode < 0) return 0;
+        const bool use_simd_topk = simd_topk_mode > 0;
         id<MTLComputePipelineState> pipeline =
-            ds4_gpu_hot_pipeline(g_glm_router_select_one_pipeline,
-                                 "kernel_glm_router_select_one");
+            ds4_gpu_hot_pipeline(
+                use_simd_topk ? g_glm_router_select_one_simd_pipeline
+                              : g_glm_router_select_one_pipeline,
+                use_simd_topk ? "kernel_glm_router_select_one_simd"
+                              : "kernel_glm_router_select_one");
         if (!pipeline) return 0;
+        if (use_simd_topk) {
+            ds4_gpu_laguna_router_simd_topk_report_once();
+        }
 
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
@@ -39080,7 +39229,8 @@ int ds4_gpu_glm_router_select_batch_tensor(
             .n_expert = n_expert,
             .n_expert_used = n_expert_used,
             .expert_weight_scale = expert_weight_scale,
-            .pad0 = 0,
+            .stats_enabled = use_simd_topk &&
+                ds4_gpu_laguna_router_simd_topk_trace_enabled() ? 1u : 0u,
         };
 
         id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
@@ -39091,15 +39241,64 @@ int ds4_gpu_glm_router_select_batch_tensor(
         [enc setBuffer:selectedbuf offset:ds4_gpu_tensor_offset(selected) atIndex:3];
         [enc setBuffer:weightsbuf offset:ds4_gpu_tensor_offset(weights) atIndex:4];
         [enc setBuffer:probsbuf offset:ds4_gpu_tensor_offset(probs) atIndex:5];
-        [enc setThreadgroupMemoryLength:256u * sizeof(float) + 256u * sizeof(int32_t) atIndex:0];
+        if (use_simd_topk) {
+            [enc setBuffer:ds4_gpu_laguna_router_simd_topk_stats_buffer()
+                   offset:0 atIndex:6];
+        }
+        [enc setThreadgroupMemoryLength:use_simd_topk
+                ? 512u * sizeof(float) + 256u * sizeof(uint32_t)
+                : 256u * sizeof(float) + 256u * sizeof(int32_t)
+                atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)n_tokens, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
+
+        if (use_simd_topk) {
+            g_glm_router_simd_topk_encoded_rows += n_tokens;
+            g_glm_router_simd_topk_encoded_dispatches++;
+        }
 
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM batch router select")) return 0;
     }
 
     return 1;
+}
+
+void ds4_gpu_laguna_router_simd_topk_stats_reset(void) {
+    g_glm_router_simd_topk_encoded_rows = 0;
+    g_glm_router_simd_topk_encoded_dispatches = 0;
+    id<MTLBuffer> stats = ds4_gpu_laguna_router_simd_topk_stats_buffer();
+    if (!stats) return;
+    uint32_t *values = (uint32_t *)[stats contents];
+    values[0] = 0u;
+    values[1] = 0u;
+}
+
+int ds4_gpu_laguna_router_simd_topk_stats(
+        uint32_t *optimized_rows,
+        uint32_t *fallback_rows,
+        uint64_t *encoded_rows,
+        uint64_t *encoded_dispatches) {
+    if (!optimized_rows || !fallback_rows ||
+        !encoded_rows || !encoded_dispatches) return 0;
+    id<MTLBuffer> stats = ds4_gpu_laguna_router_simd_topk_stats_buffer();
+    if (!stats) return 0;
+    const uint32_t *values = (const uint32_t *)[stats contents];
+    *optimized_rows = values[0];
+    *fallback_rows = values[1];
+    *encoded_rows = g_glm_router_simd_topk_encoded_rows;
+    *encoded_dispatches = g_glm_router_simd_topk_encoded_dispatches;
+    return 1;
+}
+
+int ds4_gpu_laguna_router_simd_topk_stats_after_wait(
+        uint32_t *optimized_rows,
+        uint32_t *fallback_rows,
+        uint64_t *encoded_rows,
+        uint64_t *encoded_dispatches) {
+    if (!ds4_gpu_synchronize()) return 0;
+    return ds4_gpu_laguna_router_simd_topk_stats(
+        optimized_rows, fallback_rows, encoded_rows, encoded_dispatches);
 }
 
 static bool ds4_gpu_glm_gate_pair_type_supported(

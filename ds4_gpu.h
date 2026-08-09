@@ -2633,6 +2633,35 @@ int ds4_gpu_glm_router_select_batch_tensor(
         float                   expert_weight_scale,
         uint32_t                n_tokens);
 
+/* Laguna S2.1 decode-router SIMD top-k graph preflight.  Returns 0 when the
+ * public opt-in is off, 1 when the exact 256/10/2.5 path is available, and
+ * -1 for a malformed/conflicting request or unavailable source/PSO.  Env-off
+ * and malformed requests do not initialize Metal.  An explicit literal-1
+ * request may initialize Metal and lazily compile the optional PSO, but does
+ * not open command batches or mutate graph/KV state. */
+int ds4_gpu_laguna_router_simd_topk_preflight(
+        uint32_t n_expert,
+        uint32_t n_expert_used,
+        float    expert_weight_scale);
+
+/* Laguna S2.1 decode-router SIMD top-k diagnostics.  These are diagnostics
+ * only: reset before a completed graph/dispatch, then use the *_after_wait
+ * form (or otherwise wait for the graph) before reading.  optimized is the
+ * finite fast-path row count and fallback is the in-kernel stock-bitonic row
+ * count.  encoded_rows/encoded_dispatches count work recorded into command
+ * encoders; they are not GPU-completion timestamps. */
+void ds4_gpu_laguna_router_simd_topk_stats_reset(void);
+int ds4_gpu_laguna_router_simd_topk_stats(
+        uint32_t *optimized_rows,
+        uint32_t *fallback_rows,
+        uint64_t *encoded_rows,
+        uint64_t *encoded_dispatches);
+int ds4_gpu_laguna_router_simd_topk_stats_after_wait(
+        uint32_t *optimized_rows,
+        uint32_t *fallback_rows,
+        uint64_t *encoded_rows,
+        uint64_t *encoded_dispatches);
+
 int ds4_gpu_glm_routed_moe_one_tensor(
         ds4_gpu_tensor       *out,
         ds4_gpu_tensor       *mid,
