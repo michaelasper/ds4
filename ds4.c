@@ -42,6 +42,7 @@
 
 #include "ds4.h"
 #include "lgn.h"
+#include "lgn_dflash.h"
 #include "lgn_model.h"
 
 /* GPU gate constants used by the retained internal Metal helper paths.  The
@@ -476,10 +477,6 @@ enum {
     DS4_MAX_INDEXER_TOP_K    = 2048,
     DS4_MAX_HC               = 4,
     DS4_MAX_HC_SINKHORN_ITER = 20,
-    DS4_DFLASH_N_LAYER        = 6,
-    DS4_DFLASH_N_AUX          = 6,
-    DS4_DFLASH_BLOCK_SIZE     = 16,
-    DS4_DFLASH_CACHE_CAP      = 512,
 };
 
 static ds4_shape g_ds4_shape = {
@@ -1843,19 +1840,19 @@ static uint64_t align_up(uint64_t value, uint64_t alignment) {
  */
 
 enum {
-    GGUF_VALUE_UINT8   = 0,
-    GGUF_VALUE_INT8    = 1,
-    GGUF_VALUE_UINT16  = 2,
-    GGUF_VALUE_INT16   = 3,
-    GGUF_VALUE_UINT32  = 4,
-    GGUF_VALUE_INT32   = 5,
-    GGUF_VALUE_FLOAT32 = 6,
-    GGUF_VALUE_BOOL    = 7,
-    GGUF_VALUE_STRING  = 8,
-    GGUF_VALUE_ARRAY   = 9,
-    GGUF_VALUE_UINT64  = 10,
-    GGUF_VALUE_INT64   = 11,
-    GGUF_VALUE_FLOAT64 = 12,
+    GGUF_VALUE_UINT8   = LGN_GGUF_VALUE_UINT8,
+    GGUF_VALUE_INT8    = LGN_GGUF_VALUE_INT8,
+    GGUF_VALUE_UINT16  = LGN_GGUF_VALUE_UINT16,
+    GGUF_VALUE_INT16   = LGN_GGUF_VALUE_INT16,
+    GGUF_VALUE_UINT32  = LGN_GGUF_VALUE_UINT32,
+    GGUF_VALUE_INT32   = LGN_GGUF_VALUE_INT32,
+    GGUF_VALUE_FLOAT32 = LGN_GGUF_VALUE_FLOAT32,
+    GGUF_VALUE_BOOL    = LGN_GGUF_VALUE_BOOL,
+    GGUF_VALUE_STRING  = LGN_GGUF_VALUE_STRING,
+    GGUF_VALUE_ARRAY   = LGN_GGUF_VALUE_ARRAY,
+    GGUF_VALUE_UINT64  = LGN_GGUF_VALUE_UINT64,
+    GGUF_VALUE_INT64   = LGN_GGUF_VALUE_INT64,
+    GGUF_VALUE_FLOAT64 = LGN_GGUF_VALUE_FLOAT64,
 };
 
 typedef struct {
@@ -1898,20 +1895,20 @@ static const gguf_type_info gguf_types[] = {
 };
 
 enum {
-    DS4_TENSOR_F32      = 0,
-    DS4_TENSOR_F16      = 1,
-    DS4_TENSOR_Q4_0     = 2,
-    DS4_TENSOR_Q8_0     = 8,
-    DS4_TENSOR_Q2_K     = 10,
-    DS4_TENSOR_Q3_K     = 11,
-    DS4_TENSOR_Q4_K     = 12,
-    DS4_TENSOR_Q5_K     = 13,
-    DS4_TENSOR_Q6_K     = 14,
-    DS4_TENSOR_Q8_K     = 15,
-    DS4_TENSOR_IQ2_XXS  = 16,
-    DS4_TENSOR_I32      = 26,
-    DS4_TENSOR_BF16     = 30,
-    DS4_TENSOR_MXFP4    = 39,
+    DS4_TENSOR_F32      = LGN_TENSOR_F32,
+    DS4_TENSOR_F16      = LGN_TENSOR_F16,
+    DS4_TENSOR_Q4_0     = LGN_TENSOR_Q4_0,
+    DS4_TENSOR_Q8_0     = LGN_TENSOR_Q8_0,
+    DS4_TENSOR_Q2_K     = LGN_TENSOR_Q2_K,
+    DS4_TENSOR_Q3_K     = LGN_TENSOR_Q3_K,
+    DS4_TENSOR_Q4_K     = LGN_TENSOR_Q4_K,
+    DS4_TENSOR_Q5_K     = LGN_TENSOR_Q5_K,
+    DS4_TENSOR_Q6_K     = LGN_TENSOR_Q6_K,
+    DS4_TENSOR_Q8_K     = LGN_TENSOR_Q8_K,
+    DS4_TENSOR_IQ2_XXS  = LGN_TENSOR_IQ2_XXS,
+    DS4_TENSOR_I32      = LGN_TENSOR_I32,
+    DS4_TENSOR_BF16     = LGN_TENSOR_BF16,
+    DS4_TENSOR_MXFP4    = LGN_TENSOR_MXFP4,
 };
 
 static uint64_t scalar_value_size(uint32_t type) {
@@ -2073,34 +2070,6 @@ static bool model_get_u64_compat(const ds4_model *m, const char *key, uint64_t *
         uint32_t v = 0;
         if (!cursor_u32(&c, &v)) return false;
         *out = v;
-        return true;
-    }
-    return false;
-}
-
-static bool model_get_f32_compat(const ds4_model *m, const char *key, float *out) {
-    ds4_kv *kv = model_find_kv(m, key);
-    if (!kv) return false;
-    ds4_cursor c = cursor_at(m, kv->value_pos);
-    if (kv->type == GGUF_VALUE_FLOAT32) {
-        return cursor_read(&c, out, sizeof(*out));
-    }
-    if (kv->type == GGUF_VALUE_FLOAT64) {
-        double v = 0.0;
-        if (!cursor_read(&c, &v, sizeof(v))) return false;
-        *out = (float)v;
-        return true;
-    }
-    if (kv->type == GGUF_VALUE_UINT32) {
-        uint32_t v = 0;
-        if (!cursor_u32(&c, &v)) return false;
-        *out = (float)v;
-        return true;
-    }
-    if (kv->type == GGUF_VALUE_INT32) {
-        int32_t v = 0;
-        if (!cursor_read(&c, &v, sizeof(v))) return false;
-        *out = (float)v;
         return true;
     }
     return false;
@@ -3990,32 +3959,6 @@ typedef struct {
     ds4_dspark_stage_weights stage[DS4_DSPARK_MAX_STAGES];
 } ds4_dspark_weights;
 
-typedef struct {
-    ds4_tensor *attn_norm;
-    ds4_tensor *attn_q;
-    ds4_tensor *attn_k;
-    ds4_tensor *attn_v;
-    ds4_tensor *attn_gate;
-    ds4_tensor *attn_q_norm;
-    ds4_tensor *attn_k_norm;
-    ds4_tensor *attn_output;
-    ds4_tensor *ffn_norm;
-    ds4_tensor *ffn_gate;
-    ds4_tensor *ffn_up;
-    ds4_tensor *ffn_down;
-} ds4_dflash_layer_weights;
-
-typedef struct {
-    ds4_tensor *aux_norm;
-    ds4_tensor *fc;
-    ds4_tensor *encoder_output_norm;
-    ds4_tensor *output_norm;
-    ds4_dflash_layer_weights layer[DS4_DFLASH_N_LAYER];
-    uint32_t target_layers[DS4_DFLASH_N_AUX];
-    uint32_t block_size;
-    uint32_t mask_token_id;
-} ds4_dflash_weights;
-
 /* =========================================================================
  * Fixed Weight Binding and Model Validation.
  * =========================================================================
@@ -4026,47 +3969,8 @@ typedef struct {
  * lookup.  Shape validation is intentionally strict.
  */
 
-static uint32_t required_u32(const ds4_model *m, const char *key) {
-    uint32_t v = 0;
-    if (!model_get_u32(m, key, &v)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
-        exit(1);
-    }
-    return v;
-}
-
-static uint64_t required_u64_compat(const ds4_model *m, const char *key) {
-    uint64_t v = 0;
-    if (!model_get_u64_compat(m, key, &v)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
-        exit(1);
-    }
-    return v;
-}
-
-static float required_f32(const ds4_model *m, const char *key) {
-    float v = 0.0f;
-    if (!model_get_f32_compat(m, key, &v)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
-        exit(1);
-    }
-    return v;
-}
-
 static ds4_tensor *required_tensor(const ds4_model *m, const char *name) {
-    ds4_tensor *t = model_find_tensor(m, name);
-    if (!t) {
-        fprintf(stderr, "ds4: required tensor is missing: %s\n", name);
-        exit(1);
-    }
-    return t;
-}
-
-static ds4_tensor *required_tensorf(const ds4_model *m, const char *fmt, uint32_t layer) {
-    char name[128];
-    int n = snprintf(name, sizeof(name), fmt, layer);
-    if (n < 0 || (size_t)n >= sizeof(name)) ds4_die("tensor name is too long");
-    return required_tensor(m, name);
+    return lgn_model_required_tensor(m, name);
 }
 
 static ds4_tensor *tensor_by_mtp_stage_suffix(
@@ -4939,30 +4843,6 @@ static void config_validate_laguna_model(const ds4_model *m) {
     lgn_model_validate_config(m);
 }
 
-/* Generic metadata diagnostics remain local for retained DFlash support;
- * Laguna's exact profile checks live in lgn_model.c. */
-static void config_expect_u32(const char *name, uint32_t got, uint32_t expected) {
-    if (got == expected) return;
-    fprintf(stderr, "ds4: expected %s=%u for %s, got %u\n",
-            name, expected, DS4_MODEL_SHAPE_NAME, got);
-    exit(1);
-}
-
-static void config_expect_u64(const char *name, uint64_t got, uint64_t expected) {
-    if (got == expected) return;
-    fprintf(stderr, "ds4: expected %s=%" PRIu64 " for %s, got %" PRIu64 "\n",
-            name, expected, DS4_MODEL_SHAPE_NAME, got);
-    exit(1);
-}
-
-static void config_expect_f32(const char *name, float got, float expected) {
-    const float scale = fabsf(expected) > 1.0f ? fabsf(expected) : 1.0f;
-    if (fabsf(got - expected) <= scale * 1.0e-6f) return;
-    fprintf(stderr, "ds4: expected %s=%.9g for %s, got %.9g\n",
-            name, (double)expected, DS4_MODEL_SHAPE_NAME, (double)got);
-    exit(1);
-}
-
 /* Architecture admission is deliberately side-effect free.  Keep this
  * predicate ahead of every family validator: those validators select global
  * shape state, and a non-Laguna GGUF must never reach the legacy branches. */
@@ -5556,310 +5436,6 @@ static void mtp_weights_bind(ds4_mtp_weights *w, const ds4_model *m) {
     l->ffn_down_shexp  = required_tensor(m, "mtp.0.ffn_down_shexp.weight");
 
     mtp_weights_validate_layout(w);
-}
-
-static void dflash_weights_validate_layout(const ds4_dflash_weights *w) {
-    const uint64_t q_dim =
-        (uint64_t)DS4_SHAPE_LAGUNA_S21.n_head *
-        DS4_SHAPE_LAGUNA_S21.n_head_dim;
-    const uint64_t kv_dim =
-        (uint64_t)DS4_SHAPE_LAGUNA_S21.n_head_kv *
-        DS4_SHAPE_LAGUNA_S21.n_head_dim;
-    const uint32_t matrix_type = w->fc->type;
-
-    if (matrix_type != DS4_TENSOR_BF16 &&
-        !tensor_type_is_dense_quant(matrix_type)) {
-        fprintf(stderr,
-                "ds4: DFlash matrices have unsupported type %s\n",
-                tensor_type_name(matrix_type));
-        exit(1);
-    }
-
-    tensor_expect_layout(w->aux_norm, DS4_TENSOR_F32, 2,
-                         DS4_SHAPE_LAGUNA_S21.n_embd,
-                         DS4_DFLASH_N_AUX, 0);
-    tensor_expect_layout(w->fc, matrix_type, 2,
-                         (uint64_t)DS4_DFLASH_N_AUX *
-                             DS4_SHAPE_LAGUNA_S21.n_embd,
-                         DS4_SHAPE_LAGUNA_S21.n_embd, 0);
-    tensor_expect_layout(w->encoder_output_norm, DS4_TENSOR_F32, 1,
-                         DS4_SHAPE_LAGUNA_S21.n_embd, 0, 0);
-    tensor_expect_layout(w->output_norm, DS4_TENSOR_F32, 1,
-                         DS4_SHAPE_LAGUNA_S21.n_embd, 0, 0);
-
-    for (uint32_t il = 0; il < DS4_DFLASH_N_LAYER; il++) {
-        const ds4_dflash_layer_weights *l = &w->layer[il];
-        tensor_expect_layout(l->attn_norm, DS4_TENSOR_F32, 1,
-                             DS4_SHAPE_LAGUNA_S21.n_embd, 0, 0);
-        tensor_expect_layout(l->attn_q, matrix_type, 2,
-                             DS4_SHAPE_LAGUNA_S21.n_embd, q_dim, 0);
-        tensor_expect_layout(l->attn_k, matrix_type, 2,
-                             DS4_SHAPE_LAGUNA_S21.n_embd, kv_dim, 0);
-        tensor_expect_layout(l->attn_v, matrix_type, 2,
-                             DS4_SHAPE_LAGUNA_S21.n_embd, kv_dim, 0);
-        tensor_expect_layout(l->attn_gate, matrix_type, 2,
-                             DS4_SHAPE_LAGUNA_S21.n_embd,
-                             DS4_SHAPE_LAGUNA_S21.n_head, 0);
-        tensor_expect_layout(l->attn_q_norm, DS4_TENSOR_F32, 1,
-                             DS4_SHAPE_LAGUNA_S21.n_head_dim, 0, 0);
-        tensor_expect_layout(l->attn_k_norm, DS4_TENSOR_F32, 1,
-                             DS4_SHAPE_LAGUNA_S21.n_head_dim, 0, 0);
-        tensor_expect_layout(l->attn_output, matrix_type, 2,
-                             q_dim, DS4_SHAPE_LAGUNA_S21.n_embd, 0);
-        tensor_expect_layout(l->ffn_norm, DS4_TENSOR_F32, 1,
-                             DS4_SHAPE_LAGUNA_S21.n_embd, 0, 0);
-        tensor_expect_layout(l->ffn_gate, matrix_type, 2,
-                             DS4_SHAPE_LAGUNA_S21.n_embd,
-                             DS4_SHAPE_LAGUNA_S21.n_ff_dense, 0);
-        tensor_expect_layout(l->ffn_up, matrix_type, 2,
-                             DS4_SHAPE_LAGUNA_S21.n_embd,
-                             DS4_SHAPE_LAGUNA_S21.n_ff_dense, 0);
-        tensor_expect_layout(l->ffn_down, matrix_type, 2,
-                             DS4_SHAPE_LAGUNA_S21.n_ff_dense,
-                             DS4_SHAPE_LAGUNA_S21.n_embd, 0);
-    }
-}
-
-static void dflash_weights_bind(ds4_dflash_weights *w,
-                                const ds4_model *m) {
-    memset(w, 0, sizeof(*w));
-
-    w->aux_norm = required_tensor(m, "enc.aux_norm.weight");
-    w->fc = required_tensor(m, "fc.weight");
-    w->encoder_output_norm =
-        required_tensor(m, "enc.output_norm.weight");
-    w->output_norm = required_tensor(m, "output_norm.weight");
-    for (uint32_t il = 0; il < DS4_DFLASH_N_LAYER; il++) {
-        ds4_dflash_layer_weights *l = &w->layer[il];
-        l->attn_norm = required_tensorf(
-            m, "blk.%u.attn_norm.weight", il);
-        l->attn_q = required_tensorf(m, "blk.%u.attn_q.weight", il);
-        l->attn_k = required_tensorf(m, "blk.%u.attn_k.weight", il);
-        l->attn_v = required_tensorf(m, "blk.%u.attn_v.weight", il);
-        l->attn_gate = required_tensorf(
-            m, "blk.%u.attn_gate.weight", il);
-        l->attn_q_norm = required_tensorf(
-            m, "blk.%u.attn_q_norm.weight", il);
-        l->attn_k_norm = required_tensorf(
-            m, "blk.%u.attn_k_norm.weight", il);
-        l->attn_output = required_tensorf(
-            m, "blk.%u.attn_output.weight", il);
-        l->ffn_norm = required_tensorf(
-            m, "blk.%u.ffn_norm.weight", il);
-        l->ffn_gate = required_tensorf(
-            m, "blk.%u.ffn_gate.weight", il);
-        l->ffn_up = required_tensorf(m, "blk.%u.ffn_up.weight", il);
-        l->ffn_down = required_tensorf(
-            m, "blk.%u.ffn_down.weight", il);
-    }
-
-    config_expect_u32("DFlash block_count",
-                      required_u32(m, "dflash.block_count"),
-                      DS4_DFLASH_N_LAYER);
-    config_expect_u64("DFlash context_length",
-                      required_u64_compat(m, "dflash.context_length"),
-                      1048576u);
-    config_expect_u32("DFlash embedding_length",
-                      required_u32(m, "dflash.embedding_length"),
-                      DS4_SHAPE_LAGUNA_S21.n_embd);
-    config_expect_u32("DFlash feed_forward_length",
-                      required_u32(m, "dflash.feed_forward_length"),
-                      DS4_SHAPE_LAGUNA_S21.n_ff_dense);
-    config_expect_u32("DFlash attention.head_count",
-                      required_u32(m, "dflash.attention.head_count"),
-                      DS4_SHAPE_LAGUNA_S21.n_head);
-    config_expect_u32("DFlash attention.head_count_kv",
-                      required_u32(m, "dflash.attention.head_count_kv"),
-                      DS4_SHAPE_LAGUNA_S21.n_head_kv);
-    config_expect_u32("DFlash attention.key_length",
-                      required_u32(m, "dflash.attention.key_length"),
-                      DS4_SHAPE_LAGUNA_S21.n_head_dim);
-    config_expect_u32("DFlash attention.value_length",
-                      required_u32(m, "dflash.attention.value_length"),
-                      DS4_SHAPE_LAGUNA_S21.n_value_dim);
-    config_expect_u32("DFlash rope.dimension_count",
-                      required_u32(m, "dflash.rope.dimension_count"),
-                      DS4_SHAPE_LAGUNA_S21.n_rot_swa);
-    config_expect_u32("DFlash attention.sliding_window",
-                      required_u32(m, "dflash.attention.sliding_window"),
-                      DS4_DFLASH_CACHE_CAP);
-    static const char *const swa_pattern_keys[] = {
-        "dflash.attention.sliding_window_pattern",
-    };
-    uint32_t swa_pattern[DS4_DFLASH_N_LAYER] = {0};
-    uint32_t n_swa_pattern = 0;
-    if (!model_get_u32_array_any(
-            m, swa_pattern_keys, 1,
-            swa_pattern, DS4_DFLASH_N_LAYER, &n_swa_pattern) ||
-        n_swa_pattern != DS4_DFLASH_N_LAYER) {
-        ds4_die("DFlash sliding_window_pattern must contain six entries");
-    }
-    for (uint32_t il = 0; il < DS4_DFLASH_N_LAYER; il++) {
-        config_expect_u32("DFlash sliding-window layer",
-                          swa_pattern[il], 1);
-    }
-    config_expect_f32("DFlash rope.freq_base",
-                      required_f32(m, "dflash.rope.freq_base"),
-                      500000.0f);
-    config_expect_f32("DFlash attention.layer_norm_rms_epsilon",
-                      required_f32(
-                          m, "dflash.attention.layer_norm_rms_epsilon"),
-                      DS4_SHAPE_LAGUNA_S21.rms_eps);
-
-    w->block_size = required_u32(m, "dflash.block_size");
-    config_expect_u32("DFlash block_size",
-                      w->block_size, DS4_DFLASH_BLOCK_SIZE);
-    int mask_token = -1;
-    if (!model_get_token_id(m, "tokenizer.ggml.mask_token_id",
-                            &mask_token) ||
-        mask_token < 0) {
-        ds4_die("DFlash tokenizer.ggml.mask_token_id is missing");
-    }
-    w->mask_token_id = (uint32_t)mask_token;
-    config_expect_u32("DFlash mask token", w->mask_token_id, 12);
-
-    static const char *const target_keys[] = {
-        "dflash.target_layers",
-    };
-    uint32_t n_target = 0;
-    if (!model_get_u32_array_any(
-            m, target_keys, 1,
-            w->target_layers, DS4_DFLASH_N_AUX, &n_target) ||
-        n_target != DS4_DFLASH_N_AUX) {
-        ds4_die("DFlash target_layers must contain six layer indices");
-    }
-    static const uint32_t expected_targets[DS4_DFLASH_N_AUX] = {
-        2, 11, 20, 30, 39, 48,
-    };
-    for (uint32_t i = 0; i < DS4_DFLASH_N_AUX; i++) {
-        if (w->target_layers[i] != expected_targets[i]) {
-            fprintf(stderr,
-                    "ds4: DFlash target_layers[%u]=%u, expected %u\n",
-                    i, w->target_layers[i], expected_targets[i]);
-            exit(1);
-        }
-    }
-
-    ds4_str decoder = {0};
-    if (!model_get_string(m, "dflash.decoder_arch", &decoder) ||
-        !ds4_streq(decoder, "laguna")) {
-        ds4_die("DFlash support model must declare decoder_arch=laguna");
-    }
-    ds4_str rope_scaling = {0};
-    if (!model_get_string(m, "dflash.rope.scaling.type",
-                          &rope_scaling) ||
-        !ds4_streq(rope_scaling, "none")) {
-        ds4_die("DFlash support model must use rope.scaling.type=none");
-    }
-
-    dflash_weights_validate_layout(w);
-}
-
-typedef struct {
-    const uint16_t *src;
-    uint16_t *dst;
-} ds4_dflash_convert_ctx;
-
-static void dflash_convert_bf16_rows(void *opaque,
-                                    uint64_t begin,
-                                    uint64_t end) {
-    ds4_dflash_convert_ctx *ctx = opaque;
-    uint64_t i = begin;
-#if defined(__ARM_NEON) && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
-    for (; i + 8u <= end; i += 8u) {
-        const uint16x8_t b = vld1q_u16(ctx->src + i);
-        uint32x4_t lo = vmovl_u16(vget_low_u16(b));
-        uint32x4_t hi = vmovl_high_u16(b);
-        lo = vshlq_n_u32(lo, 16);
-        hi = vshlq_n_u32(hi, 16);
-        const float16x4_t hlo =
-            vcvt_f16_f32(vreinterpretq_f32_u32(lo));
-        const float16x4_t hhi =
-            vcvt_f16_f32(vreinterpretq_f32_u32(hi));
-        vst1q_u16(ctx->dst + i,
-                  vcombine_u16(vreinterpret_u16_f16(hlo),
-                               vreinterpret_u16_f16(hhi)));
-    }
-#endif
-    for (; i < end; i++) {
-        const uint32_t bits = (uint32_t)ctx->src[i] << 16;
-        float value = 0.0f;
-        memcpy(&value, &bits, sizeof(value));
-        ctx->dst[i] = f32_to_f16(value);
-    }
-}
-
-static void *dflash_prepare_f16_map(const ds4_model *m) {
-    if (!m || !m->map || m->size == 0 ||
-        m->size > (uint64_t)SIZE_MAX) {
-        return NULL;
-    }
-#if defined(MAP_ANONYMOUS)
-    const int anon_flag = MAP_ANONYMOUS;
-#else
-    const int anon_flag = MAP_ANON;
-#endif
-    uint8_t *shadow = mmap(NULL,
-                           (size_t)m->size,
-                           PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | anon_flag,
-                           -1,
-                           0);
-    if (shadow == MAP_FAILED) {
-        fprintf(stderr,
-                "ds4: could not allocate %.2f GiB for DFlash F16 weights: %s\n",
-                (double)m->size / 1073741824.0,
-                strerror(errno));
-        return NULL;
-    }
-
-    const double t0 = now_sec();
-    uint64_t converted = 0;
-    uint64_t copied = 0;
-    for (uint64_t i = 0; i < m->n_tensors; i++) {
-        const ds4_tensor *t = &m->tensors[i];
-        if (t->abs_offset > m->size ||
-            t->bytes > m->size - t->abs_offset) {
-            fprintf(stderr,
-                    "ds4: DFlash tensor %.*s is outside its GGUF mapping\n",
-                    (int)t->name.len, t->name.ptr);
-            munmap(shadow, (size_t)m->size);
-            return NULL;
-        }
-        if (t->type == DS4_TENSOR_F32) {
-            memcpy(shadow + t->abs_offset,
-                   m->map + t->abs_offset,
-                   (size_t)t->bytes);
-            copied += t->bytes;
-            continue;
-        }
-        if (t->type != DS4_TENSOR_BF16 ||
-            t->bytes != t->elements * sizeof(uint16_t)) {
-            fprintf(stderr,
-                    "ds4: DFlash tensor %.*s has unsupported type %s\n",
-                    (int)t->name.len, t->name.ptr,
-                    tensor_type_name(t->type));
-            munmap(shadow, (size_t)m->size);
-            return NULL;
-        }
-        ds4_dflash_convert_ctx ctx = {
-            .src = (const uint16_t *)(m->map + t->abs_offset),
-            .dst = (uint16_t *)(shadow + t->abs_offset),
-        };
-        ds4_parallel_for_min_rows(t->elements,
-                                  dflash_convert_bf16_rows,
-                                  &ctx,
-                                  1u << 18);
-        converted += t->bytes;
-    }
-
-    fprintf(stderr,
-            "ds4: DFlash BF16 support converted to F16 in %.2f s "
-            "(%.2f GiB matrices + %.2f MiB F32 metadata weights)\n",
-            now_sec() - t0,
-            (double)converted / 1073741824.0,
-            (double)copied / 1048576.0);
-    return shadow;
 }
 
 static ds4_tensor *dspark_bind_tensor(
@@ -48508,7 +48084,7 @@ static bool dflash_graph_matmul(
     if (!out || !e || !weight || !x || weight->ndim < 2) {
         return false;
     }
-    if (weight->type == DS4_TENSOR_BF16 && e->dflash_f16_map) {
+    if (weight->type == LGN_TENSOR_BF16 && e->dflash_f16_map) {
         return ds4_gpu_matmul_f16_tensor(out,
                                          e->dflash_f16_map,
                                          e->dflash_f16_map_size,
@@ -48554,15 +48130,6 @@ static bool dflash_graph_matmul(
     return false;
 }
 
-static const void *dflash_graph_weight_map(const ds4_engine *e) {
-    return e->dflash_f16_map ? e->dflash_f16_map : e->dflash_model.map;
-}
-
-static uint64_t dflash_graph_weight_map_size(const ds4_engine *e) {
-    return e->dflash_f16_map ?
-        e->dflash_f16_map_size : e->dflash_model.size;
-}
-
 static bool dflash_graph_encode_inject(
         ds4_dflash_gpu_graph *g,
         const ds4_engine     *e,
@@ -48576,8 +48143,10 @@ static bool dflash_graph_encode_inject(
     const uint32_t embd = DS4_SHAPE_LAGUNA_S21.n_embd;
     const uint32_t n_head_kv = DS4_SHAPE_LAGUNA_S21.n_head_kv;
     const uint32_t head_dim = DS4_SHAPE_LAGUNA_S21.n_head_dim;
-    const void *weight_map = dflash_graph_weight_map(e);
-    const uint64_t weight_map_size = dflash_graph_weight_map_size(e);
+    const void *weight_map = lgn_dflash_weight_map(
+        &e->dflash_model, e->dflash_f16_map);
+    const uint64_t weight_map_size = lgn_dflash_weight_map_size(
+        &e->dflash_model, e->dflash_f16_map, e->dflash_f16_map_size);
 
     bool ok = ds4_gpu_commands_active() ||
               ds4_gpu_begin_commands() != 0;
@@ -48724,8 +48293,10 @@ static bool dflash_graph_draft_block(
     const uint32_t q_dim = n_head * head_dim;
     const uint32_t kv_dim = n_head_kv * head_dim;
     const uint32_t ff = DS4_SHAPE_LAGUNA_S21.n_ff_dense;
-    const void *weight_map = dflash_graph_weight_map(e);
-    const uint64_t weight_map_size = dflash_graph_weight_map_size(e);
+    const void *weight_map = lgn_dflash_weight_map(
+        &e->dflash_model, e->dflash_f16_map);
+    const uint64_t weight_map_size = lgn_dflash_weight_map_size(
+        &e->dflash_model, e->dflash_f16_map, e->dflash_f16_map_size);
 
     bool ok = ds4_gpu_commands_active() ||
               ds4_gpu_begin_commands() != 0;
@@ -59474,9 +59045,10 @@ static int ds4_engine_open_internal(ds4_engine **out,
             *out = NULL;
             return 1;
         }
-        dflash_weights_bind(&e->dflash_weights, &e->dflash_model);
-        if (e->dflash_weights.fc->type == DS4_TENSOR_BF16) {
-            e->dflash_f16_map = dflash_prepare_f16_map(&e->dflash_model);
+        lgn_dflash_weights_bind(&e->dflash_weights, &e->dflash_model);
+        if (e->dflash_weights.fc->type == LGN_TENSOR_BF16) {
+            e->dflash_f16_map =
+                lgn_dflash_prepare_f16_map(&e->dflash_model);
             if (!e->dflash_f16_map) {
                 ds4_engine_close(e);
                 *out = NULL;
@@ -59490,7 +59062,7 @@ static int ds4_engine_open_internal(ds4_engine **out,
                 "(weights=%s, draft=%d, p-min=%.2f, block=%u, "
                 "cache=%u)\n",
                 support_path,
-                tensor_type_name(e->dflash_weights.fc->type),
+                lgn_model_tensor_type_name(e->dflash_weights.fc->type),
                 e->dflash_draft_tokens,
                 e->dflash_p_min,
                 e->dflash_weights.block_size,
@@ -59760,14 +59332,18 @@ static int ds4_engine_open_internal(ds4_engine **out,
         }
         const bool support_model_runtime_ready = e->dflash_ready;
         const ds4_model *support_model = &e->dflash_model;
-        const void *support_model_map =
-            e->dflash_f16_map ?
-                e->dflash_f16_map : support_model->map;
+        const void *support_model_map = lgn_dflash_weight_map(
+            support_model, e->dflash_f16_map);
+        const uint64_t support_model_map_size = lgn_dflash_weight_map_size(
+            support_model, e->dflash_f16_map, e->dflash_f16_map_size);
         if (support_model_runtime_ready &&
             !ds4_gpu_set_model_map_range(support_model_map,
-                                           support_model->size,
+                                           support_model_map_size,
                                            support_model->tensor_data_pos,
-                                           support_model->size - support_model->tensor_data_pos,
+                                           support_model_map_size >
+                                                   support_model->tensor_data_pos ?
+                                               support_model_map_size -
+                                                   support_model->tensor_data_pos : 0,
                                            support_model->max_tensor_bytes))
         {
             fprintf(stderr,
@@ -59810,9 +59386,8 @@ static int ds4_engine_open_internal(ds4_engine **out,
             /* A BF16 DFlash support map is an anonymous F16 shadow, so it has
              * no backing descriptor; quantized support weights stay file-backed
              * through the independent DFlash model descriptor. */
-            const int support_model_fd =
-                e->dflash_f16_map ?
-                    -1 : support_model->fd;
+            const int support_model_fd = lgn_dflash_weight_map_fd(
+                support_model, e->dflash_f16_map);
             (void)ds4_gpu_set_model_fd_for_map(
                 support_model_fd,
                 support_model_map);
@@ -59989,9 +59564,7 @@ void ds4_engine_close(ds4_engine *e) {
     }
     ds4_gpu_cleanup();
 #endif
-    if (e->dflash_f16_map && e->dflash_f16_map_size != 0) {
-        munmap(e->dflash_f16_map, (size_t)e->dflash_f16_map_size);
-    }
+    lgn_dflash_release_f16_map(e->dflash_f16_map, e->dflash_f16_map_size);
     ds4_ssd_memory_lock_release(&e->simulated_memory);
     ds4_release_instance_lock();
     free(e->directional_steering_dirs);

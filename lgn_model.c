@@ -16,25 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum {
-    LGN_GGUF_VALUE_UINT32 = 4,
-    LGN_GGUF_VALUE_INT32  = 5,
-    LGN_GGUF_VALUE_FLOAT32 = 6,
-    LGN_GGUF_VALUE_BOOL   = 7,
-    LGN_GGUF_VALUE_STRING = 8,
-    LGN_GGUF_VALUE_ARRAY  = 9,
-    LGN_GGUF_VALUE_UINT64 = 10,
-    LGN_GGUF_VALUE_FLOAT64 = 12,
-
-    LGN_TENSOR_F32   = 0,
-    LGN_TENSOR_F16   = 1,
-    LGN_TENSOR_Q8_0  = 8,
-    LGN_TENSOR_Q2_K  = 10,
-    LGN_TENSOR_Q3_K  = 11,
-    LGN_TENSOR_Q4_K  = 12,
-    LGN_TENSOR_Q6_K  = 14,
-};
-
 static const ds4_shape LGN_SHAPE_LAGUNA_S21 = {
     .name = "Laguna S 2.1",
     .family = DS4_MODEL_FAMILY_LAGUNA,
@@ -85,12 +66,6 @@ typedef struct {
     uint64_t size;
     uint64_t pos;
 } lgn_cursor;
-
-typedef struct {
-    uint32_t type;
-    uint64_t len;
-    uint64_t data_pos;
-} lgn_array_ref;
 
 static void lgn_die(const char *message) {
     fprintf(stderr, "ds4: %s\n", message);
@@ -152,27 +127,73 @@ static ds4_kv *lgn_model_find_kv(const ds4_model *m, const char *key) {
     return NULL;
 }
 
-static bool lgn_model_get_string(const ds4_model *m,
-                                 const char *key,
-                                 ds4_str *out) {
+bool lgn_model_get_string(const ds4_model *m,
+                          const char *key,
+                          ds4_str *out) {
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_STRING) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     return lgn_cursor_string(&c, out);
 }
 
-static bool lgn_model_get_u32(const ds4_model *m,
-                              const char *key,
-                              uint32_t *out) {
+bool lgn_model_get_u32(const ds4_model *m,
+                       const char *key,
+                       uint32_t *out) {
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_UINT32) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     return lgn_cursor_u32(&c, out);
 }
 
-static bool lgn_model_get_u64_compat(const ds4_model *m,
-                                     const char *key,
-                                     uint64_t *out) {
+bool lgn_model_get_token_id(const ds4_model *m,
+                            const char *key,
+                            int *out) {
+    ds4_kv *kv = lgn_model_find_kv(m, key);
+    if (!kv || !out) return false;
+
+    lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
+    switch (kv->type) {
+    case LGN_GGUF_VALUE_UINT32: {
+        uint32_t value = 0;
+        if (!lgn_cursor_u32(&c, &value) || value > (uint32_t)INT_MAX) {
+            return false;
+        }
+        *out = (int)value;
+        return true;
+    }
+    case LGN_GGUF_VALUE_INT32: {
+        int32_t value = 0;
+        if (!lgn_cursor_read(&c, &value, sizeof(value)) || value < 0) {
+            return false;
+        }
+        *out = (int)value;
+        return true;
+    }
+    case LGN_GGUF_VALUE_UINT64: {
+        uint64_t value = 0;
+        if (!lgn_cursor_u64(&c, &value) || value > (uint64_t)INT_MAX) {
+            return false;
+        }
+        *out = (int)value;
+        return true;
+    }
+    case LGN_GGUF_VALUE_INT64: {
+        int64_t value = 0;
+        if (!lgn_cursor_read(&c, &value, sizeof(value)) || value < 0 ||
+            value > (int64_t)INT_MAX) {
+            return false;
+        }
+        *out = (int)value;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool lgn_model_get_u64_compat(const ds4_model *m,
+                              const char *key,
+                              uint64_t *out) {
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -186,9 +207,9 @@ static bool lgn_model_get_u64_compat(const ds4_model *m,
     return false;
 }
 
-static bool lgn_model_get_f32_compat(const ds4_model *m,
-                                     const char *key,
-                                     float *out) {
+bool lgn_model_get_f32_compat(const ds4_model *m,
+                              const char *key,
+                              float *out) {
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -216,9 +237,9 @@ static bool lgn_model_get_f32_compat(const ds4_model *m,
     return false;
 }
 
-static bool lgn_model_get_bool(const ds4_model *m,
-                               const char *key,
-                               bool *out) {
+bool lgn_model_get_bool(const ds4_model *m,
+                        const char *key,
+                        bool *out) {
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_BOOL) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -228,9 +249,9 @@ static bool lgn_model_get_bool(const ds4_model *m,
     return true;
 }
 
-static bool lgn_model_get_array(const ds4_model *m,
-                                const char *key,
-                                lgn_array_ref *out) {
+bool lgn_model_get_array(const ds4_model *m,
+                         const char *key,
+                         lgn_model_array *out) {
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_ARRAY || !out) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -241,12 +262,61 @@ static bool lgn_model_get_array(const ds4_model *m,
     return true;
 }
 
-static ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name) {
+bool lgn_model_get_u32_array(const ds4_model *m,
+                             const char *key,
+                             uint32_t *out,
+                             uint32_t cap,
+                             uint32_t *n_out) {
+    if (n_out) *n_out = 0;
+    if (!out || cap == 0 || !n_out) return false;
+
+    lgn_model_array array = {0};
+    if (!lgn_model_get_array(m, key, &array) ||
+        (array.type != LGN_GGUF_VALUE_UINT32 &&
+         array.type != LGN_GGUF_VALUE_INT32) ||
+        array.len > cap) {
+        return false;
+    }
+
+    lgn_cursor c = lgn_cursor_at(m, array.data_pos);
+    for (uint64_t i = 0; i < array.len; i++) {
+        if (array.type == LGN_GGUF_VALUE_UINT32) {
+            if (!lgn_cursor_u32(&c, &out[i])) return false;
+        } else {
+            int32_t value = 0;
+            if (!lgn_cursor_read(&c, &value, sizeof(value)) || value < 0) {
+                return false;
+            }
+            out[i] = (uint32_t)value;
+        }
+    }
+    *n_out = (uint32_t)array.len;
+    return true;
+}
+
+ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name) {
     if (!m || !name) return NULL;
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         if (lgn_streq(m->tensors[i].name, name)) return &m->tensors[i];
     }
     return NULL;
+}
+
+ds4_tensor *lgn_model_required_tensor(const ds4_model *m, const char *name) {
+    ds4_tensor *tensor = lgn_model_find_tensor(m, name);
+    if (!tensor) lgn_die_missing("tensor", name);
+    return tensor;
+}
+
+ds4_tensor *lgn_model_required_tensorf(const ds4_model *m,
+                                       const char *format,
+                                       uint32_t layer) {
+    char name[128];
+    const int n = snprintf(name, sizeof(name), format, layer);
+    if (n < 0 || (size_t)n >= sizeof(name)) {
+        lgn_die("tensor name is too long");
+    }
+    return lgn_model_required_tensor(m, name);
 }
 
 static ds4_tensor *lgn_required_tensor(const ds4_model *m, const char *name) {
@@ -264,34 +334,57 @@ static ds4_tensor *lgn_required_tensorf(const ds4_model *m,
     return lgn_required_tensor(m, name);
 }
 
-static const char *lgn_tensor_type_name(uint32_t type) {
+const char *lgn_model_tensor_type_name(uint32_t type) {
     switch (type) {
     case LGN_TENSOR_F32:  return "f32";
     case LGN_TENSOR_F16:  return "f16";
-    case 2:               return "q4_0";
+    case LGN_TENSOR_Q4_0: return "q4_0";
+    case LGN_TENSOR_Q4_1: return "q4_1";
+    case LGN_TENSOR_Q5_0: return "q5_0";
+    case LGN_TENSOR_Q5_1: return "q5_1";
     case LGN_TENSOR_Q2_K: return "q2_k";
     case LGN_TENSOR_Q3_K: return "q3_k";
     case LGN_TENSOR_Q4_K: return "q4_k";
-    case 13:              return "q5_k";
+    case LGN_TENSOR_Q5_K: return "q5_k";
     case LGN_TENSOR_Q6_K: return "q6_k";
     case LGN_TENSOR_Q8_0: return "q8_0";
-    case 15:              return "q8_k";
-    case 16:              return "iq2_xxs";
-    case 30:              return "bf16";
-    case 39:              return "mxfp4";
+    case LGN_TENSOR_Q8_K: return "q8_k";
+    case LGN_TENSOR_Q8_1: return "q8_1";
+    case LGN_TENSOR_IQ2_XXS: return "iq2_xxs";
+    case LGN_TENSOR_IQ2_XS: return "iq2_xs";
+    case LGN_TENSOR_IQ3_XXS: return "iq3_xxs";
+    case LGN_TENSOR_IQ1_S: return "iq1_s";
+    case LGN_TENSOR_IQ4_NL: return "iq4_nl";
+    case LGN_TENSOR_IQ3_S: return "iq3_s";
+    case LGN_TENSOR_IQ2_S: return "iq2_s";
+    case LGN_TENSOR_IQ4_XS: return "iq4_xs";
+    case LGN_TENSOR_I8: return "i8";
+    case LGN_TENSOR_I16: return "i16";
+    case LGN_TENSOR_I32: return "i32";
+    case LGN_TENSOR_I64: return "i64";
+    case LGN_TENSOR_F64: return "f64";
+    case LGN_TENSOR_IQ1_M: return "iq1_m";
+    case LGN_TENSOR_BF16: return "bf16";
+    case LGN_TENSOR_MXFP4: return "mxfp4";
     default:              return "unknown";
     }
 }
 
 static bool lgn_tensor_is_routed_expert_type(uint32_t type) {
     return type == LGN_TENSOR_Q8_0 ||
-           type == 16 ||
+           type == LGN_TENSOR_IQ2_XXS ||
            type == LGN_TENSOR_Q2_K ||
            type == LGN_TENSOR_Q3_K ||
            type == LGN_TENSOR_Q4_K ||
-           type == 13 ||
+           type == LGN_TENSOR_Q5_K ||
            type == LGN_TENSOR_Q6_K ||
-           type == 39;
+           type == LGN_TENSOR_MXFP4;
+}
+
+bool lgn_model_tensor_type_is_dense_quant(uint32_t type) {
+    return type == LGN_TENSOR_Q8_0 ||
+           type == LGN_TENSOR_Q4_K ||
+           type == LGN_TENSOR_Q4_0;
 }
 
 static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
@@ -306,8 +399,8 @@ static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
                 "ds4: tensor %.*s has type %s, expected %s\n",
                 (int)tensor->name.len,
                 tensor->name.ptr,
-                lgn_tensor_type_name(tensor->type),
-                lgn_tensor_type_name(type));
+                lgn_model_tensor_type_name(tensor->type),
+                lgn_model_tensor_type_name(type));
         exit(1);
     }
     if (tensor->ndim != ndim) {
@@ -331,6 +424,15 @@ static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
                 i < 3u ? want[i] : 0u);
         exit(1);
     }
+}
+
+void lgn_model_validate_tensor_layout(const ds4_tensor *tensor,
+                                      uint32_t type,
+                                      uint32_t ndim,
+                                      uint64_t d0,
+                                      uint64_t d1,
+                                      uint64_t d2) {
+    lgn_tensor_expect_layout(tensor, type, ndim, d0, d1, d2);
 }
 
 static void lgn_config_expect_u32(const char *name,
@@ -478,7 +580,7 @@ void lgn_model_validate_config(const ds4_model *m) {
     lgn_config_expect_u32("expert_gating_func", expert_gating_func, 2);
     lgn_config_expect_u32("leading_dense_block_count", n_leading_dense, s->n_leading_dense);
 
-    lgn_array_ref heads = {0};
+    lgn_model_array heads = {0};
     if (!lgn_model_get_array(m, "laguna.attention.head_count", &heads) ||
         (heads.type != LGN_GGUF_VALUE_UINT32 && heads.type != LGN_GGUF_VALUE_INT32) ||
         heads.len != s->n_layer) {
@@ -605,7 +707,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
         fprintf(stderr,
                 "ds4: unsupported Laguna quantization layout marker %s; "
                 "expected legacy Q4_K/F16 or Q8_0 signal weights\n",
-                lgn_tensor_type_name(layout_marker->type));
+                lgn_model_tensor_type_name(layout_marker->type));
         exit(1);
     }
 
@@ -682,7 +784,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
             layer_routed_type != LGN_TENSOR_Q2_K) {
             fprintf(stderr,
                     "ds4: Laguna routed experts for layer %u have unsupported type %s\n",
-                    il, lgn_tensor_type_name(layer_routed_type));
+                    il, lgn_model_tensor_type_name(layer_routed_type));
             exit(1);
         }
         if (!lgn_tensor_is_routed_expert_type(layer_routed_type)) {
@@ -701,8 +803,8 @@ void lgn_weights_validate_layout(const ds4_weights *w,
                     "ds4: Laguna routed down tensor for layer %u has type %s, "
                     "incompatible with %s gate/up experts\n",
                     il,
-                    lgn_tensor_type_name(l->ffn_down_exps->type),
-                    lgn_tensor_type_name(layer_routed_type));
+                    lgn_model_tensor_type_name(l->ffn_down_exps->type),
+                    lgn_model_tensor_type_name(layer_routed_type));
             exit(1);
         }
         lgn_tensor_expect_layout(l->ffn_down_exps, l->ffn_down_exps->type,
@@ -720,7 +822,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
             shared_down_type != LGN_TENSOR_Q6_K) {
             fprintf(stderr,
                     "ds4: Laguna shared down tensor for layer %u has unsupported type %s\n",
-                    il, lgn_tensor_type_name(shared_down_type));
+                    il, lgn_model_tensor_type_name(shared_down_type));
             exit(1);
         }
         lgn_tensor_expect_layout(l->ffn_down_shexp, shared_down_type,

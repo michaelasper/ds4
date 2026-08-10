@@ -24,6 +24,56 @@ enum {
     LGN_MODEL_MAX_DIMS  = 8u,
 };
 
+/* GGUF scalar and tensor codes are shared by the private model modules.  Keep
+ * these in the facade rather than making each model-specific binder carry a
+ * second copy of the wire-format numbers. */
+enum {
+    LGN_GGUF_VALUE_UINT8   = 0,
+    LGN_GGUF_VALUE_INT8    = 1,
+    LGN_GGUF_VALUE_UINT16  = 2,
+    LGN_GGUF_VALUE_INT16   = 3,
+    LGN_GGUF_VALUE_UINT32  = 4,
+    LGN_GGUF_VALUE_INT32   = 5,
+    LGN_GGUF_VALUE_FLOAT32 = 6,
+    LGN_GGUF_VALUE_BOOL    = 7,
+    LGN_GGUF_VALUE_STRING  = 8,
+    LGN_GGUF_VALUE_ARRAY   = 9,
+    LGN_GGUF_VALUE_UINT64  = 10,
+    LGN_GGUF_VALUE_INT64   = 11,
+    LGN_GGUF_VALUE_FLOAT64 = 12,
+
+    LGN_TENSOR_F32     = 0,
+    LGN_TENSOR_F16     = 1,
+    LGN_TENSOR_Q4_0    = 2,
+    LGN_TENSOR_Q4_1    = 3,
+    LGN_TENSOR_Q5_0    = 6,
+    LGN_TENSOR_Q5_1    = 7,
+    LGN_TENSOR_Q8_0    = 8,
+    LGN_TENSOR_Q8_1    = 9,
+    LGN_TENSOR_Q2_K    = 10,
+    LGN_TENSOR_Q3_K    = 11,
+    LGN_TENSOR_Q4_K    = 12,
+    LGN_TENSOR_Q5_K    = 13,
+    LGN_TENSOR_Q6_K    = 14,
+    LGN_TENSOR_Q8_K    = 15,
+    LGN_TENSOR_IQ2_XXS = 16,
+    LGN_TENSOR_IQ2_XS  = 17,
+    LGN_TENSOR_IQ3_XXS = 18,
+    LGN_TENSOR_IQ1_S   = 19,
+    LGN_TENSOR_IQ4_NL  = 20,
+    LGN_TENSOR_IQ3_S   = 21,
+    LGN_TENSOR_IQ2_S   = 22,
+    LGN_TENSOR_IQ4_XS  = 23,
+    LGN_TENSOR_I8      = 24,
+    LGN_TENSOR_I16     = 25,
+    LGN_TENSOR_I32     = 26,
+    LGN_TENSOR_I64     = 27,
+    LGN_TENSOR_F64     = 28,
+    LGN_TENSOR_IQ1_M   = 29,
+    LGN_TENSOR_BF16    = 30,
+    LGN_TENSOR_MXFP4   = 39,
+};
+
 typedef enum {
     DS4_MODEL_FAMILY_DEEPSEEK4 = 0,
     DS4_MODEL_FAMILY_GLM_DSA   = 1,
@@ -96,6 +146,12 @@ typedef struct {
     uint32_t type;
     uint64_t value_pos;
 } ds4_kv;
+
+typedef struct {
+    uint32_t type;
+    uint64_t len;
+    uint64_t data_pos;
+} lgn_model_array;
 
 typedef struct ds4_tensor {
     ds4_str name;
@@ -198,6 +254,50 @@ typedef struct ds4_weights {
 const ds4_shape *lgn_model_shape(void);
 uint32_t lgn_model_layer_head_count(uint32_t il);
 bool lgn_model_layer_is_swa(uint32_t il);
+
+/* Read-only GGUF metadata/tensor accessors for private model binders.  The
+ * returned strings and tensors borrow the model mapping and remain valid until
+ * the owning ds4_model is closed. */
+bool lgn_model_get_string(const ds4_model *m,
+                          const char *key,
+                          ds4_str *out);
+bool lgn_model_get_u32(const ds4_model *m,
+                       const char *key,
+                       uint32_t *out);
+bool lgn_model_get_token_id(const ds4_model *m,
+                            const char *key,
+                            int *out);
+bool lgn_model_get_u64_compat(const ds4_model *m,
+                              const char *key,
+                              uint64_t *out);
+bool lgn_model_get_f32_compat(const ds4_model *m,
+                              const char *key,
+                              float *out);
+bool lgn_model_get_bool(const ds4_model *m,
+                        const char *key,
+                        bool *out);
+bool lgn_model_get_array(const ds4_model *m,
+                         const char *key,
+                         lgn_model_array *out);
+bool lgn_model_get_u32_array(const ds4_model *m,
+                             const char *key,
+                             uint32_t *out,
+                             uint32_t cap,
+                             uint32_t *n_out);
+
+ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name);
+ds4_tensor *lgn_model_required_tensor(const ds4_model *m, const char *name);
+ds4_tensor *lgn_model_required_tensorf(const ds4_model *m,
+                                       const char *format,
+                                       uint32_t layer);
+const char *lgn_model_tensor_type_name(uint32_t type);
+bool lgn_model_tensor_type_is_dense_quant(uint32_t type);
+void lgn_model_validate_tensor_layout(const ds4_tensor *tensor,
+                                      uint32_t type,
+                                      uint32_t ndim,
+                                      uint64_t d0,
+                                      uint64_t d1,
+                                      uint64_t d2);
 
 bool lgn_model_is_laguna(const ds4_model *m, ds4_str *arch_out);
 void lgn_model_require_laguna_architecture(const ds4_model *m);

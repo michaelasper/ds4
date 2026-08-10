@@ -1,4 +1,5 @@
 #include "../lgn.h"
+#include "../lgn_dflash.h"
 #include "../lgn_model.h"
 
 #include <stdio.h>
@@ -211,6 +212,61 @@ static void test_model_admission(void) {
           "Laguna model admission rejects non-Laguna architecture");
     CHECK(!lgn_model_is_laguna(NULL, NULL),
           "Laguna model admission rejects a missing model");
+}
+
+static void test_dflash_profile_and_binding(void) {
+    const lgn_dflash_profile *profile = lgn_dflash_profile_get();
+    CHECK(profile != NULL, "DFlash profile is available");
+    CHECK(lgn_dflash_profile_matches_laguna(),
+          "DFlash decoder profile matches Laguna dimensions");
+    CHECK(profile->n_layer == 6u && profile->n_aux == 6u,
+          "DFlash profile layer and auxiliary counts");
+    CHECK(profile->block_size == 16u && profile->cache_cap == 512u,
+          "DFlash profile block and cache limits");
+    CHECK(profile->n_embd == 3072u && profile->n_head == 72u &&
+              profile->n_head_kv == 8u && profile->n_head_dim == 128u,
+          "DFlash profile attention dimensions");
+    CHECK(profile->context_length == UINT64_C(1048576) &&
+              profile->mask_token_id == 12u,
+          "DFlash profile context and mask token");
+    static const uint32_t expected_targets[] = { 2u, 11u, 20u, 30u, 39u, 48u };
+    CHECK(memcmp(profile->target_layers,
+                 expected_targets,
+                 sizeof(expected_targets)) == 0,
+          "DFlash profile target layer list");
+
+    ds4_tensor tensor = {0};
+    lgn_dflash_weights weights;
+    memset(&weights, 0, sizeof(weights));
+    weights.aux_norm = &tensor;
+    weights.fc = &tensor;
+    weights.encoder_output_norm = &tensor;
+    weights.output_norm = &tensor;
+    weights.block_size = profile->block_size;
+    weights.mask_token_id = profile->mask_token_id;
+    memcpy(weights.target_layers,
+           profile->target_layers,
+           sizeof(weights.target_layers));
+    for (uint32_t il = 0; il < profile->n_layer; il++) {
+        lgn_dflash_layer_weights *layer = &weights.layer[il];
+        layer->attn_norm = &tensor;
+        layer->attn_q = &tensor;
+        layer->attn_k = &tensor;
+        layer->attn_v = &tensor;
+        layer->attn_gate = &tensor;
+        layer->attn_q_norm = &tensor;
+        layer->attn_k_norm = &tensor;
+        layer->attn_output = &tensor;
+        layer->ffn_norm = &tensor;
+        layer->ffn_gate = &tensor;
+        layer->ffn_up = &tensor;
+        layer->ffn_down = &tensor;
+    }
+    CHECK(lgn_dflash_binding_eligible(&weights),
+          "complete DFlash binding is eligible");
+    weights.layer[3].ffn_up = NULL;
+    CHECK(!lgn_dflash_binding_eligible(&weights),
+          "incomplete DFlash layer binding is rejected");
 }
 
 typedef struct {
@@ -466,6 +522,7 @@ int main(void) {
     test_s21_topology();
     test_s21_model_profile();
     test_model_admission();
+    test_dflash_profile_and_binding();
     test_laguna_pretokenizer();
     if (failures != 0) {
         fprintf(stderr, "test-lgn: %d failure(s)\n", failures);
