@@ -40539,7 +40539,12 @@ static bool ds4_gpu_glm_routed_moe_batch_grouped_available(
     if (!fast_default) {
         return false;
     }
-    if (n_tokens < 96u) return false;
+    /* Diagnostic threshold: the grouped batch pays off well before 96 tokens
+     * on some parts, so let the benchmark machine explore down to the
+     * 32-token structural floor of the routed mul_mm_id kernels. */
+    const uint64_t min_tokens = ds4_gpu_env_u64(
+        "DS4_METAL_GLM_GROUPED_MOE_MIN_TOKENS", 96u, 32u, 4096u);
+    if (n_tokens < min_tokens) return false;
 
     return ds4_gpu_get_pipeline(ds4_gpu_mul_mm_id_map0_name(n_expert)) != nil &&
            ds4_gpu_routed_mm_pipeline(gate_type) != nil &&
