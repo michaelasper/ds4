@@ -56249,6 +56249,11 @@ int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
     return 0;
 }
 
+/* Defined with the session sampling helpers further down; declared here so the
+ * checkpoint payload path can materialize a deferred gpu_sample logits row
+ * before serializing it (no-op unless a deferred readback is pending). */
+static inline void ds4_session_ensure_logits(ds4_session *s);
+
 int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen) {
     if (!s || !fp || !s->checkpoint_valid) {
         payload_set_err(err, errlen, "session has no valid checkpoint to save");
@@ -56271,6 +56276,10 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
                             "failed to synchronize accelerator before Laguna snapshot");
             return 1;
         }
+        /* The payload serializes s->logits; a gpu_sample decode may still hold
+         * the row GPU-resident with the readback deferred.  Materialize it now
+         * so the checkpoint never stores a stale logits row. */
+        ds4_session_ensure_logits(s);
 
         ds4_laguna_gpu_graph *g = &s->laguna_graph;
         const uint32_t checkpoint_len = (uint32_t)s->checkpoint.len;
