@@ -59,13 +59,11 @@ in this system.
 
 - Run the default suite:
   `make test`.
-- Run `tests/test_gpu_args_cli.sh` explicitly after changing executable option
-  parsing or multi-GPU placement. Invalid values and device/budget count
-  mismatches must reach the shared GPU parser in all three binaries; an
-  `unknown option` response from a binary that advertises the flag is a
-  release blocker. On CUDA, also start `ds4-server` once with
-  `--gpu-vram auto` and the intended `--gpu-devices` list and preserve the
-  resolved layout line.
+- Run `tests/test_laguna_cli_options.sh` explicitly after changing public
+  executable option parsing or help. The CLI and server must retain their
+  Laguna Metal and DFlash options, while unsupported backend, streaming,
+  distributed, and legacy speculative flags fail with the Laguna-only product
+  diagnostic before a model is opened.
 - Run the vector checks explicitly after any tokenizer, template, KV, kernel,
   quantization, or prompt-rendering change:
   `DS4_TEST_MODEL=/path/to/0731.gguf

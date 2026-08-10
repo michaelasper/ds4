@@ -63,7 +63,7 @@ METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 UNSUPPORTED_TARGETS := cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm \
 	test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch
 
-.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dspark-acceptance dspark-verify-depth mtp-verify-depth $(UNSUPPORTED_TARGETS)
+.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dspark-acceptance dspark-verify-depth mtp-verify-depth $(UNSUPPORTED_TARGETS)
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -106,11 +106,11 @@ $(UNSUPPORTED_TARGETS):
 	@echo "error: make $@ is unsupported; this build requires Darwin/Apple Metal" >&2
 	@exit 2
 
-ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
+ds4: ds4_cli.o ds4_help.o linenoise.o $(CORE_OBJS) | check-metal-sources
+	$(CC) $(CFLAGS) -o $@ ds4_cli.o ds4_help.o linenoise.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
+ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) | check-metal-sources
+	$(CC) $(CFLAGS) -o $@ ds4_server.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) $(METAL_LDLIBS)
 
 ds4-bench: ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
@@ -281,10 +281,12 @@ test-legacy: test-lgn ds4_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	./tests/test_layer_pack
 	./tests/test_engine_mgpu_placement
 	./tests/test_gpu_args
-	./tests/test_gpu_args_cli.sh
 	./tests/test_sampling
 
-test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal ds4_test ds4 ds4-server ds4-bench ds4-eval
+test-laguna-cli-options: ds4 ds4-server tests/test_laguna_cli_options.sh
+	./tests/test_laguna_cli_options.sh
+
+test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options ds4_test ds4 ds4-server ds4-bench ds4-eval
 	@set -eu; \
 	./ds4_test --laguna-architecture --laguna-selector-parser --server; \
 	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \

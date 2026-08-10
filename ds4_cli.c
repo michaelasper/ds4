@@ -1,6 +1,5 @@
 #include "ds4.h"
 #include "ds4_distributed.h"
-#include "ds4_gpu_args.h"
 #include "ds4_tp.h"
 #include "ds4_help.h"
 #include "linenoise.h"
@@ -86,7 +85,6 @@ typedef struct {
     int imatrix_max_tokens;
     ds4_think_mode think_mode;
     bool head_test;
-    bool first_token_test;
     bool metal_graph_test;
     bool metal_graph_full_test;
     bool metal_graph_prompt_test;
@@ -98,10 +96,6 @@ typedef struct {
     cli_generation_options gen;
     char *prompt_owned;
     bool inspect;
-    /* CLI flag wiring: raw argv values for --gpu-vram and --gpu-devices.
-     * Resolved post-parse via parse_gpu_vram_arg(). */
-    const char *gpu_vram_arg;
-    const char *gpu_devices_arg;
 } cli_config;
 
 static volatile sig_atomic_t cli_interrupted;
@@ -217,31 +211,47 @@ static float parse_float_range(const char *s, const char *opt, float min, float 
     return v;
 }
 
+static bool cli_option_is_unsupported(const char *arg) {
+    static const char *const options[] = {
+        "--cpu", "--cuda", "--rocm", "--gpu-vram", "--gpu-devices",
+        "--cuda-tensor-parallel",
+        "--ssd-streaming", "--ssd-streaming-cold",
+        "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
+        "--ssd-streaming-preload-experts", "--simulate-used-memory",
+        "--prefill-chunk", "--power",
+        "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
+        "--mtp", "--mtp-draft", "--mtp-margin", "--glm-mtp",
+        "--glm-mtp-timing", "--dspark", "--dspark-confidence",
+        "--dspark-strict", "--role", "--layers", "--listen",
+        "--coordinator", "--dist-prefill-chunk", "--dist-prefill-window",
+        "--dist-activation-bits", "--dist-replay-check", "--debug",
+        "--tensor-parallel", "--transport", "--rdma-device",
+        "--rdma-gid-index", "--tensor-parallel-token-prefill", "--debug-hash",
+        "--first-token-test",
+    };
+    for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+        if (!strcmp(arg, options[i])) return true;
+    }
+    return false;
+}
+
+static void cli_reject_unsupported_option(const char *arg) {
+    fprintf(stderr,
+            "ds4: unsupported option %s; this product supports Laguna S2.1 on Apple Metal only\n",
+            arg);
+    exit(2);
+}
+
 static ds4_backend parse_backend(const char *s) {
     if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
-#ifdef DS4_ROCM_BUILD
-    if (!strcmp(s, "rocm")) return DS4_BACKEND_CUDA;
-#else
-    if (!strcmp(s, "cuda")) return DS4_BACKEND_CUDA;
-#endif
-    if (!strcmp(s, "cpu")) return DS4_BACKEND_CPU;
-    fprintf(stderr, "ds4: invalid backend: %s\n", s);
-#ifdef DS4_ROCM_BUILD
-    fprintf(stderr, "ds4: valid backends are: metal, rocm, cpu\n");
-#else
-    fprintf(stderr, "ds4: valid backends are: metal, cuda, cpu\n");
-#endif
+    fprintf(stderr,
+            "ds4: unsupported option --backend %s; this product supports Laguna S2.1 on Apple Metal only\n",
+            s);
     exit(2);
 }
 
 static ds4_backend default_backend(void) {
-#ifdef DS4_NO_GPU
-    return DS4_BACKEND_CPU;
-#elif defined(__APPLE__)
     return DS4_BACKEND_METAL;
-#else
-    return DS4_BACKEND_CUDA;
-#endif
 }
 
 static void log_context_memory(ds4_backend backend,
@@ -1214,13 +1224,9 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
     }
 
     const bool diagnostic = cfg->gen.dump_tokens ||
-                            cfg->gen.head_test ||
-                            cfg->gen.first_token_test;
+                            cfg->gen.head_test;
     if (cfg->gen.head_test) {
         rc = ds4_engine_head_test(engine, &prompt);
-    }
-    if (rc == 0 && cfg->gen.first_token_test) {
-        rc = ds4_engine_first_token_test(engine, &prompt);
     }
     if (cfg->gen.dump_tokens) {
         ds4_engine_dump_tokens(engine, &prompt);
@@ -1285,18 +1291,9 @@ static void print_repl_help(void) {
     puts("  /think-max     Use Think Max only when context is at least 393216 tokens.");
     puts("  /nothink       Disable thinking mode.");
     puts("  /ctx N         Set context size for following prompts.");
-    puts("  /power N       Set GPU duty cycle percentage, 1..100.");
     puts("  /read FILE     Read a prompt from FILE and run it.");
     puts("  /quit, /exit   Leave the prompt.");
     puts("  Ctrl+C         Stop generation and return to the prompt.");
-}
-
-static bool parse_power_percent(const char *arg, int *out) {
-    char *end = NULL;
-    long v = strtol(arg, &end, 10);
-    if (!arg[0] || *end != '\0' || v < 1 || v > 100) return false;
-    *out = (int)v;
-    return true;
 }
 
 static void history_file_path(char *buf, size_t len) {
@@ -1648,21 +1645,6 @@ static int run_repl(ds4_engine *engine, cli_config *cfg) {
             cfg->gen.think_mode = DS4_THINK_NONE;
             repl_chat_apply_think_prefix(engine, &chat, DS4_THINK_NONE);
             puts("Thinking mode: none.");
-        } else if (!strncmp(cmd, "/power", 6) && (cmd[6] == '\0' || isspace((unsigned char)cmd[6]))) {
-            char *arg = trim_inplace(cmd + 6);
-            if (!arg[0]) {
-                printf("Power: %d%%.\n", ds4_session_power(chat.session));
-            } else {
-                int power = 0;
-                if (!parse_power_percent(arg, &power)) {
-                    fprintf(stderr, "ds4: /power must be between 1 and 100\n");
-                } else if (ds4_session_set_power(chat.session, power) != 0) {
-                    fprintf(stderr, "ds4: failed to set /power\n");
-                } else {
-                    cfg->engine.power_percent = power;
-                    printf("Power: %d%%.\n", power);
-                }
-            }
         } else if (!strncmp(cmd, "/ctx", 4) && (cmd[4] == '\0' || isspace((unsigned char)cmd[4]))) {
             char *arg = trim_inplace(cmd + 4);
             if (!arg[0]) {
@@ -1793,7 +1775,6 @@ static cli_config parse_options(int argc, char **argv) {
         exit(1);
     }
 
-    bool directional_steering_scale_set = false;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
@@ -1802,33 +1783,9 @@ static cli_config parse_options(int argc, char **argv) {
             usage(stdout, topic);
             exit(0);
         }
-        char dist_parse_err[256] = {0};
-        ds4_dist_cli_parse_result dist_parse = ds4_dist_parse_cli_arg(arg,
-                                                                      &i,
-                                                                      argc,
-                                                                      argv,
-                                                                      c.dist,
-                                                                      dist_parse_err,
-                                                                      sizeof(dist_parse_err));
-        if (dist_parse == DS4_DIST_CLI_ERROR) {
-            fprintf(stderr, "ds4: %s\n", dist_parse_err[0] ? dist_parse_err : "invalid distributed option");
-            exit(2);
+        if (cli_option_is_unsupported(arg)) {
+            cli_reject_unsupported_option(arg);
         }
-        if (dist_parse == DS4_DIST_CLI_MATCHED) continue;
-
-        char tp_parse_err[256] = {0};
-        ds4_tp_cli_parse_result tp_parse = ds4_tp_parse_cli_arg(arg,
-                                                                &i,
-                                                                argc,
-                                                                argv,
-                                                                &c.engine.tp,
-                                                                tp_parse_err,
-                                                                sizeof(tp_parse_err));
-        if (tp_parse == DS4_TP_CLI_ERROR) {
-            fprintf(stderr, "ds4: %s\n", tp_parse_err[0] ? tp_parse_err : "invalid tensor-parallel option");
-            exit(2);
-        }
-        if (tp_parse == DS4_TP_CLI_MATCHED) continue;
 
         if (!strcmp(arg, "-p") || !strcmp(arg, "--prompt")) {
             if (c.gen.prompt) {
@@ -1850,8 +1807,6 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.raw_prompt = true;
         } else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
             c.engine.model_path = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--mtp")) {
-            c.engine.mtp_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--dflash")) {
             c.engine.dflash_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--dflash-draft")) {
@@ -1862,25 +1817,6 @@ static cli_config parse_options(int argc, char **argv) {
                 parse_float_range(
                     need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
             c.engine.dflash_p_min_set = true;
-        } else if (!strcmp(arg, "--mtp-draft")) {
-            c.engine.mtp_draft_tokens = parse_int(need_arg(&i, argc, argv, arg), arg);
-        } else if (!strcmp(arg, "--mtp-margin")) {
-            c.engine.mtp_margin = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 1000.0f);
-        } else if (!strcmp(arg, "--glm-mtp")) {
-            c.engine.glm_mtp = true;
-        } else if (!strcmp(arg, "--glm-mtp-timing")) {
-            c.engine.glm_mtp = true;
-            c.engine.glm_mtp_timing = true;
-        } else if (!strcmp(arg, "--dspark")) {
-            c.engine.dspark = true;
-        } else if (!strcmp(arg, "--dspark-confidence")) {
-            c.engine.dspark = true;
-            c.engine.dspark_confidence_threshold =
-                parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
-            c.engine.dspark_confidence_threshold_set = true;
-        } else if (!strcmp(arg, "--dspark-strict")) {
-            c.engine.dspark = true;
-            c.engine.dspark_strict = true;
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
             c.gen.n_predict = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {
@@ -1901,83 +1837,14 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.seed = parse_u64(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--quality")) {
             c.engine.quality = true;
-        } else if (!strcmp(arg, "--ssd-streaming")) {
-            c.engine.ssd_streaming = true;
-        } else if (!strcmp(arg, "--ssd-streaming-cold")) {
-            c.engine.ssd_streaming_cold = true;
-        } else if (!strcmp(arg, "--ssd-streaming-cache-experts")) {
-            uint32_t experts = 0;
-            uint64_t bytes = 0;
-            if (!ds4_parse_streaming_cache_experts_arg(
-                    need_arg(&i, argc, argv, arg), &experts, &bytes)) {
-                fprintf(stderr,
-                        "ds4: --ssd-streaming-cache-experts must be a positive count or <number>GB\n");
-                exit(2);
-            }
-            c.engine.ssd_streaming_cache_experts = experts;
-            c.engine.ssd_streaming_cache_bytes = bytes;
-        } else if (!strcmp(arg, "--ssd-streaming-full-layers")) {
-            int v = parse_nonnegative_int(need_arg(&i, argc, argv, arg), arg);
-            c.engine.ssd_streaming_full_layers = (uint32_t)v;
-            c.engine.ssd_streaming_full_layers_set = true;
-        } else if (!strcmp(arg, "--ssd-streaming-preload-experts")) {
-            int v = parse_int(need_arg(&i, argc, argv, arg), arg);
-            if (v <= 0) {
-                fprintf(stderr, "ds4: --ssd-streaming-preload-experts must be positive\n");
-                exit(2);
-            }
-            c.engine.ssd_streaming_preload_experts = (uint32_t)v;
-        } else if (!strcmp(arg, "--simulate-used-memory")) {
-            if (!ds4_parse_gib_arg(need_arg(&i, argc, argv, arg),
-                                   &c.engine.simulate_used_memory_bytes)) {
-                fprintf(stderr,
-                        "ds4: --simulate-used-memory must be a positive GiB value, e.g. 64GB\n");
-                exit(2);
-            }
-        } else if (!strcmp(arg, "--prefill-chunk")) {
-            int v = parse_int(need_arg(&i, argc, argv, arg), arg);
-            if (v <= 0) {
-                fprintf(stderr, "ds4: --prefill-chunk must be positive\n");
-                exit(2);
-            }
-            c.engine.prefill_chunk = (uint32_t)v;
-        } else if (!strcmp(arg, "--power")) {
-            c.engine.power_percent = parse_int(need_arg(&i, argc, argv, arg), arg);
-            if (c.engine.power_percent < 1 || c.engine.power_percent > 100) {
-                fprintf(stderr, "ds4: --power must be between 1 and 100\n");
-                exit(2);
-            }
-        } else if (!strcmp(arg, "--dir-steering-file")) {
-            c.engine.directional_steering_file = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--expert-profile")) {
             c.engine.expert_profile_path = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--dir-steering-ffn")) {
-            c.engine.directional_steering_ffn = parse_float_range(need_arg(&i, argc, argv, arg), arg, -100.0f, 100.0f);
-            directional_steering_scale_set = true;
-        } else if (!strcmp(arg, "--dir-steering-attn")) {
-            c.engine.directional_steering_attn = parse_float_range(need_arg(&i, argc, argv, arg), arg, -100.0f, 100.0f);
-            directional_steering_scale_set = true;
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--backend")) {
             c.engine.backend = parse_backend(need_arg(&i, argc, argv, arg));
-        } else if (!strcmp(arg, "--cpu")) {
-            c.engine.backend = DS4_BACKEND_CPU;
         } else if (!strcmp(arg, "--metal")) {
             c.engine.backend = DS4_BACKEND_METAL;
-#ifdef DS4_ROCM_BUILD
-        } else if (!strcmp(arg, "--rocm")) {
-            c.engine.backend = DS4_BACKEND_CUDA;
-#else
-        } else if (!strcmp(arg, "--cuda")) {
-            c.engine.backend = DS4_BACKEND_CUDA;
-#endif
-        } else if (!strcmp(arg, "--gpu-vram")) {
-            c.gpu_vram_arg = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--gpu-devices")) {
-            c.gpu_devices_arg = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--cuda-tensor-parallel")) {
-            c.engine.cuda_tensor_parallel = true;
         } else if (!strcmp(arg, "--dump-tokens")) {
             c.gen.dump_tokens = true;
         } else if (!strcmp(arg, "--dump-logits")) {
@@ -2007,29 +1874,15 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.think_mode = DS4_THINK_NONE;
         } else if (!strcmp(arg, "--head-test")) {
             c.gen.head_test = true;
-        } else if (!strcmp(arg, "--first-token-test")) {
-            c.gen.first_token_test = true;
         } else if (!strcmp(arg, "--metal-graph-test")) {
             c.gen.metal_graph_test = true;
-#ifdef DS4_ROCM_BUILD
-            c.engine.backend = DS4_BACKEND_CUDA;
-#else
             c.engine.backend = DS4_BACKEND_METAL;
-#endif
         } else if (!strcmp(arg, "--metal-graph-full-test")) {
             c.gen.metal_graph_full_test = true;
-#ifdef DS4_ROCM_BUILD
-            c.engine.backend = DS4_BACKEND_CUDA;
-#else
             c.engine.backend = DS4_BACKEND_METAL;
-#endif
         } else if (!strcmp(arg, "--metal-graph-prompt-test")) {
             c.gen.metal_graph_prompt_test = true;
-#ifdef DS4_ROCM_BUILD
-            c.engine.backend = DS4_BACKEND_CUDA;
-#else
             c.engine.backend = DS4_BACKEND_METAL;
-#endif
         } else if (!strcmp(arg, "--metal-graph-generate")) {
             fprintf(stderr, "ds4: --metal-graph-generate was removed; --metal is the graph path\n");
             exit(2);
@@ -2047,9 +1900,6 @@ static cli_config parse_options(int argc, char **argv) {
         }
     }
 
-    if (c.engine.directional_steering_file && !directional_steering_scale_set) {
-        c.engine.directional_steering_ffn = 1.0f;
-    }
     if (c.gen.imatrix_output_path && !c.gen.imatrix_dataset_path) {
         fprintf(stderr, "ds4: --imatrix-out requires --imatrix-dataset\n");
         exit(2);
@@ -2097,48 +1947,11 @@ int main(int argc, char **argv) {
         return rc;
     }
     cfg.engine.inspect_only = cfg.inspect;
-    cfg.engine.first_token_test = cfg.gen.first_token_test;
     cfg.engine.metal_graph_test = cfg.gen.metal_graph_test;
     cfg.engine.context_size = cfg.gen.ctx_size;
     cfg.engine.placement_ctx_hint = cfg.gen.ctx_size;
     ds4_engine *engine = NULL;
-    if (cfg.gpu_vram_arg || cfg.gpu_devices_arg) {
-        ds4_gpu_config gpu_cfg = {0};
-        bool skip_cuda = false;
-        char errbuf[256];
-        if (parse_gpu_vram_arg(cfg.gpu_vram_arg, cfg.gpu_devices_arg,
-                               &gpu_cfg, &skip_cuda,
-                               errbuf, sizeof(errbuf)) != 0) {
-            fprintf(stderr, "ds4: %s\n", errbuf);
-            ds4_dist_options_free(cfg.dist);
-            free(cfg.prompt_owned);
-            return 2;
-        }
-        cfg.engine.backend = skip_cuda ? DS4_BACKEND_CPU : DS4_BACKEND_CUDA;
-        if (skip_cuda) {
-            if (ds4_engine_open(&engine, &cfg.engine) != 0) {
-                ds4_dist_options_free(cfg.dist);
-                free(cfg.prompt_owned);
-                return 1;
-            }
-        } else {
-            const bool was_auto =
-                (cfg.gpu_vram_arg && !strcmp(cfg.gpu_vram_arg, "auto")) ||
-                (!cfg.gpu_vram_arg && cfg.gpu_devices_arg);
-            char layout[256];
-            if (format_gpu_layout_line(&gpu_cfg, was_auto,
-                                       layout, sizeof(layout)) > 0) {
-                fprintf(stdout, "%s\n", layout);
-                fflush(stdout);
-            }
-            if (ds4_engine_create_with_gpu_config(&engine, &cfg.engine,
-                                                   &gpu_cfg) != 0) {
-                ds4_dist_options_free(cfg.dist);
-                free(cfg.prompt_owned);
-                return 1;
-            }
-        }
-    } else if (ds4_engine_open(&engine, &cfg.engine) != 0) {
+    if (ds4_engine_open(&engine, &cfg.engine) != 0) {
         ds4_dist_options_free(cfg.dist);
         free(cfg.prompt_owned);
         return 1;

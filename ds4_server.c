@@ -1,6 +1,5 @@
 #include "ds4.h"
 #include "ds4_distributed.h"
-#include "ds4_gpu_args.h"
 #include "ds4_help.h"
 #include "ds4_kvstore.h"
 #include "rax.h"
@@ -13205,8 +13204,6 @@ static void set_client_socket_nonblocking(int fd) {
 
 typedef struct {
     ds4_engine_options engine;
-    const char *gpu_vram_arg;
-    const char *gpu_devices_arg;
     const char *host;
     int port;
     int ctx_size;
@@ -13320,31 +13317,48 @@ static void usage(FILE *fp, const char *topic) {
     ds4_help_print(fp, DS4_HELP_SERVER, topic);
 }
 
+static bool server_option_is_unsupported(const char *arg) {
+    static const char *const options[] = {
+        "--cpu", "--cuda", "--rocm", "--gpu-vram", "--gpu-devices",
+        "--cuda-tensor-parallel",
+        "--ssd-streaming", "--ssd-streaming-cold",
+        "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
+        "--ssd-streaming-preload-experts", "--simulate-used-memory",
+        "--prefill-chunk", "--power",
+        "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
+        "--mtp", "--mtp-draft", "--mtp-margin", "--glm-mtp",
+        "--glm-mtp-timing", "--dspark", "--dspark-confidence",
+        "--dspark-strict", "--role", "--layers", "--listen",
+        "--coordinator", "--dist-prefill-chunk", "--dist-prefill-window",
+        "--dist-activation-bits", "--dist-replay-check", "--debug",
+        "--tensor-parallel", "--transport", "--rdma-device",
+        "--rdma-gid-index", "--tensor-parallel-token-prefill", "--debug-hash",
+        "--first-token-test",
+    };
+    for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+        if (!strcmp(arg, options[i])) return true;
+    }
+    return false;
+}
+
+static void server_reject_unsupported_option(const char *arg) {
+    server_log(DS4_LOG_DEFAULT,
+               "ds4-server: unsupported option %s; this product supports Laguna S2.1 on Apple Metal only",
+               arg);
+    exit(2);
+}
+
 static ds4_backend parse_backend_arg(const char *s, const char *arg) {
     if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
-#ifdef DS4_ROCM_BUILD
-    if (!strcmp(s, "rocm")) return DS4_BACKEND_CUDA;
-#else
-    if (!strcmp(s, "cuda")) return DS4_BACKEND_CUDA;
-#endif
-    if (!strcmp(s, "cpu")) return DS4_BACKEND_CPU;
-    server_log(DS4_LOG_DEFAULT, "ds4-server: invalid %s value: %s", arg, s);
-#ifdef DS4_ROCM_BUILD
-    server_log(DS4_LOG_DEFAULT, "ds4-server: valid server backends are: metal, rocm, cpu");
-#else
-    server_log(DS4_LOG_DEFAULT, "ds4-server: valid server backends are: metal, cuda, cpu");
-#endif
+    (void)arg;
+    server_log(DS4_LOG_DEFAULT,
+               "ds4-server: unsupported option --backend %s; this product supports Laguna S2.1 on Apple Metal only",
+               s);
     exit(2);
 }
 
 static ds4_backend default_server_backend(void) {
-#ifdef DS4_NO_GPU
-    return DS4_BACKEND_CPU;
-#elif defined(__APPLE__)
     return DS4_BACKEND_METAL;
-#else
-    return DS4_BACKEND_CUDA;
-#endif
 }
 
 static server_config parse_options(int argc, char **argv) {
@@ -13365,7 +13379,6 @@ static server_config parse_options(int argc, char **argv) {
     };
     c.kv_cache = kv_cache_default_options();
 
-    bool directional_steering_scale_set = false;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
@@ -13374,27 +13387,12 @@ static server_config parse_options(int argc, char **argv) {
             usage(stdout, topic);
             exit(0);
         }
-        char dist_parse_err[256] = {0};
-        ds4_dist_cli_parse_result dist_parse =
-            ds4_dist_parse_cli_arg(arg,
-                                   &i,
-                                   argc,
-                                   argv,
-                                   &c.engine.distributed,
-                                   dist_parse_err,
-                                   sizeof(dist_parse_err));
-        if (dist_parse == DS4_DIST_CLI_ERROR) {
-            server_log(DS4_LOG_DEFAULT,
-                       "ds4-server: %s",
-                       dist_parse_err[0] ? dist_parse_err : "invalid distributed option");
-            exit(2);
+        if (server_option_is_unsupported(arg)) {
+            server_reject_unsupported_option(arg);
         }
-        if (dist_parse == DS4_DIST_CLI_MATCHED) continue;
 
         if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
             c.engine.model_path = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--mtp")) {
-            c.engine.mtp_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--dflash")) {
             c.engine.dflash_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--dflash-draft")) {
@@ -13405,25 +13403,6 @@ static server_config parse_options(int argc, char **argv) {
                 parse_float_arg(
                     need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
             c.engine.dflash_p_min_set = true;
-        } else if (!strcmp(arg, "--mtp-draft")) {
-            c.engine.mtp_draft_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
-        } else if (!strcmp(arg, "--mtp-margin")) {
-            c.engine.mtp_margin = parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 1000.0f);
-        } else if (!strcmp(arg, "--glm-mtp")) {
-            c.engine.glm_mtp = true;
-        } else if (!strcmp(arg, "--glm-mtp-timing")) {
-            c.engine.glm_mtp = true;
-            c.engine.glm_mtp_timing = true;
-        } else if (!strcmp(arg, "--dspark")) {
-            c.engine.dspark = true;
-        } else if (!strcmp(arg, "--dspark-confidence")) {
-            c.engine.dspark = true;
-            c.engine.dspark_confidence_threshold =
-                parse_float_arg(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
-            c.engine.dspark_confidence_threshold_set = true;
-        } else if (!strcmp(arg, "--dspark-strict")) {
-            c.engine.dspark = true;
-            c.engine.dspark_strict = true;
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {
             c.ctx_size = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
@@ -13467,83 +13446,12 @@ static server_config parse_options(int argc, char **argv) {
             c.tool_memory_max_ids = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--quality")) {
             c.engine.quality = true;
-        } else if (!strcmp(arg, "--ssd-streaming")) {
-            c.engine.ssd_streaming = true;
-        } else if (!strcmp(arg, "--ssd-streaming-cold")) {
-            c.engine.ssd_streaming_cold = true;
-        } else if (!strcmp(arg, "--ssd-streaming-cache-experts")) {
-            uint32_t experts = 0;
-            uint64_t bytes = 0;
-            if (!ds4_parse_streaming_cache_experts_arg(
-                    need_arg(&i, argc, argv, arg), &experts, &bytes)) {
-                server_log(DS4_LOG_DEFAULT,
-                           "ds4-server: --ssd-streaming-cache-experts must be a positive count or <number>GB");
-                exit(2);
-            }
-            c.engine.ssd_streaming_cache_experts = experts;
-            c.engine.ssd_streaming_cache_bytes = bytes;
-        } else if (!strcmp(arg, "--ssd-streaming-full-layers")) {
-            int v = parse_nonneg_int_arg(need_arg(&i, argc, argv, arg), arg);
-            c.engine.ssd_streaming_full_layers = (uint32_t)v;
-            c.engine.ssd_streaming_full_layers_set = true;
-        } else if (!strcmp(arg, "--ssd-streaming-preload-experts")) {
-            int v = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
-            if (v <= 0) {
-                server_log(DS4_LOG_DEFAULT,
-                           "ds4-server: --ssd-streaming-preload-experts must be positive");
-                exit(2);
-            }
-            c.engine.ssd_streaming_preload_experts = (uint32_t)v;
-        } else if (!strcmp(arg, "--simulate-used-memory")) {
-            if (!ds4_parse_gib_arg(need_arg(&i, argc, argv, arg),
-                                   &c.engine.simulate_used_memory_bytes)) {
-                server_log(DS4_LOG_DEFAULT,
-                           "ds4-server: --simulate-used-memory must be a positive GiB value, e.g. 64GB");
-                exit(2);
-            }
-        } else if (!strcmp(arg, "--prefill-chunk")) {
-            int v = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
-            if (v <= 0) {
-                server_log(DS4_LOG_DEFAULT,
-                           "ds4-server: --prefill-chunk must be positive");
-                exit(2);
-            }
-            c.engine.prefill_chunk = (uint32_t)v;
-        } else if (!strcmp(arg, "--power")) {
-            c.engine.power_percent = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
-            if (c.engine.power_percent < 1 || c.engine.power_percent > 100) {
-                server_log(DS4_LOG_DEFAULT, "ds4-server: --power must be between 1 and 100");
-                exit(2);
-            }
-        } else if (!strcmp(arg, "--dir-steering-file")) {
-            c.engine.directional_steering_file = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--dir-steering-ffn")) {
-            c.engine.directional_steering_ffn = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -100.0f, 100.0f);
-            directional_steering_scale_set = true;
-        } else if (!strcmp(arg, "--dir-steering-attn")) {
-            c.engine.directional_steering_attn = parse_float_arg(need_arg(&i, argc, argv, arg), arg, -100.0f, 100.0f);
-            directional_steering_scale_set = true;
         } else if (!strcmp(arg, "--warm-weights")) {
             c.engine.warm_weights = true;
         } else if (!strcmp(arg, "--metal")) {
             c.engine.backend = DS4_BACKEND_METAL;
-#ifdef DS4_ROCM_BUILD
-        } else if (!strcmp(arg, "--rocm")) {
-            c.engine.backend = DS4_BACKEND_CUDA;
-#else
-        } else if (!strcmp(arg, "--cuda")) {
-            c.engine.backend = DS4_BACKEND_CUDA;
-#endif
-        } else if (!strcmp(arg, "--gpu-vram")) {
-            c.gpu_vram_arg = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--gpu-devices")) {
-            c.gpu_devices_arg = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--cuda-tensor-parallel")) {
-            c.engine.cuda_tensor_parallel = true;
         } else if (!strcmp(arg, "--backend")) {
             c.engine.backend = parse_backend_arg(need_arg(&i, argc, argv, arg), arg);
-        } else if (!strcmp(arg, "--cpu")) {
-            c.engine.backend = DS4_BACKEND_CPU;
         } else {
             server_log(DS4_LOG_DEFAULT, "ds4-server: unknown option: %s", arg);
             usage(stderr, NULL);
@@ -13556,9 +13464,6 @@ static server_config parse_options(int argc, char **argv) {
         server_log(DS4_LOG_DEFAULT,
                    "ds4-server: --kv-cache-cold-max-tokens must be 0 or >= --kv-cache-min-tokens");
         exit(2);
-    }
-    if (c.engine.directional_steering_file && !directional_steering_scale_set) {
-        c.engine.directional_steering_ffn = 1.0f;
     }
     char dist_err[256];
     if (ds4_dist_prepare_engine_options(&c.engine.distributed,
@@ -13610,33 +13515,7 @@ int main(int argc, char **argv) {
         cfg.batched_sessions > 0 ? cfg.batched_sessions : 1;
     cfg.engine.share_session_prefill_workspace = cfg.batched_sessions > 0;
     ds4_engine *engine = NULL;
-    if (cfg.gpu_vram_arg || cfg.gpu_devices_arg) {
-        ds4_gpu_config gpu_cfg = {0};
-        bool skip_cuda = false;
-        char gpu_err[256];
-        if (parse_gpu_vram_arg(cfg.gpu_vram_arg, cfg.gpu_devices_arg,
-                               &gpu_cfg, &skip_cuda,
-                               gpu_err, sizeof(gpu_err)) != 0) {
-            fprintf(stderr, "ds4-server: %s\n", gpu_err);
-            return 2;
-        }
-        cfg.engine.backend = skip_cuda ? DS4_BACKEND_CPU : DS4_BACKEND_CUDA;
-        if (skip_cuda) {
-            if (ds4_engine_open(&engine, &cfg.engine) != 0) return 1;
-        } else {
-            const bool was_auto =
-                (cfg.gpu_vram_arg && !strcmp(cfg.gpu_vram_arg, "auto")) ||
-                (!cfg.gpu_vram_arg && cfg.gpu_devices_arg);
-            char layout[256];
-            if (format_gpu_layout_line(&gpu_cfg, was_auto,
-                                       layout, sizeof(layout)) > 0) {
-                fprintf(stdout, "%s\n", layout);
-                fflush(stdout);
-            }
-            if (ds4_engine_create_with_gpu_config(
-                    &engine, &cfg.engine, &gpu_cfg) != 0) return 1;
-        }
-    } else if (ds4_engine_open(&engine, &cfg.engine) != 0) {
+    if (ds4_engine_open(&engine, &cfg.engine) != 0) {
         return 1;
     }
 
@@ -13716,10 +13595,6 @@ int main(int argc, char **argv) {
                    server_prefill_quantum_for(&s, false),
                    server_prefill_quantum_for(&s, true),
                    server_decode_coalesce_us());
-        if (ds4_engine_has_mtp(engine)) {
-            server_log(DS4_LOG_DEFAULT,
-                       "ds4-server: MTP speculative decoding is disabled while native session batching is active");
-        }
     }
     if (cfg.trace_path) {
         s.trace = fopen(cfg.trace_path, "w");
