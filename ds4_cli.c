@@ -457,7 +457,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
     ds4_session_set_speculative_enabled(
         session,
         cfg->gen.temperature <= 0.0f &&
-        getenv("DS4_MTP_SPEC_DISABLE") == NULL);
+        getenv("DS4_DFLASH_SPEC_DISABLE") == NULL);
 
     char err[160];
     ds4_think_mode think_mode = cli_effective_think_mode(&cfg->gen);
@@ -501,8 +501,8 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
         ((uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)clock());
     int generated = 0;
     const bool speculative_argmax = cfg->gen.temperature <= 0.0f &&
-        ds4_engine_mtp_draft_tokens(engine) > 1 &&
-        getenv("DS4_MTP_SPEC_DISABLE") == NULL;
+        ds4_engine_dflash_draft_tokens(engine) > 1 &&
+        getenv("DS4_DFLASH_SPEC_DISABLE") == NULL;
     const bool greedy_argmax = cfg->gen.temperature <= 0.0f &&
         !speculative_argmax;
     bool have_greedy_next = false;
@@ -521,8 +521,8 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
 
         int toks[17];
         int ntok = 0;
-        if (cfg->gen.temperature <= 0.0f && ds4_engine_mtp_draft_tokens(engine) > 1 &&
-            getenv("DS4_MTP_SPEC_DISABLE") == NULL) {
+        if (cfg->gen.temperature <= 0.0f && ds4_engine_dflash_draft_tokens(engine) > 1 &&
+            getenv("DS4_DFLASH_SPEC_DISABLE") == NULL) {
             ntok = ds4_session_eval_speculative_argmax(session,
                                                        token,
                                                        max_tokens - generated,
@@ -1122,7 +1122,7 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
     } else {
         if (getenv("DS4_CLI_FORCE_SESSION") != NULL ||
             cfg->gen.temperature > 0.0f ||
-            ds4_engine_mtp_draft_tokens(engine) > 1) {
+            ds4_engine_dflash_draft_tokens(engine) > 1) {
             rc = run_sampled_generation(engine, cfg, &prompt);
         } else {
             token_printer printer = {
@@ -1308,7 +1308,7 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
     ds4_session_set_speculative_enabled(
         chat->session,
         cfg->gen.temperature <= 0.0f &&
-        getenv("DS4_MTP_SPEC_DISABLE") == NULL);
+        getenv("DS4_DFLASH_SPEC_DISABLE") == NULL);
     ds4_think_mode think_mode = ds4_think_mode_for_context(cfg->gen.think_mode,
                                                            chat->ctx_size);
     repl_chat_apply_think_prefix(engine, chat, think_mode);
@@ -1362,8 +1362,8 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
         ((uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)clock());
     int generated = 0;
     const bool speculative_argmax = cfg->gen.temperature <= 0.0f &&
-        ds4_engine_mtp_draft_tokens(engine) > 1 &&
-        getenv("DS4_MTP_SPEC_DISABLE") == NULL;
+        ds4_engine_dflash_draft_tokens(engine) > 1 &&
+        getenv("DS4_DFLASH_SPEC_DISABLE") == NULL;
     const bool greedy_argmax = cfg->gen.temperature <= 0.0f &&
         !speculative_argmax;
     bool have_greedy_next = false;
@@ -1386,8 +1386,8 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
 
         int toks[17];
         int ntok = 0;
-        if (cfg->gen.temperature <= 0.0f && ds4_engine_mtp_draft_tokens(engine) > 1 &&
-            getenv("DS4_MTP_SPEC_DISABLE") == NULL) {
+        if (cfg->gen.temperature <= 0.0f && ds4_engine_dflash_draft_tokens(engine) > 1 &&
+            getenv("DS4_DFLASH_SPEC_DISABLE") == NULL) {
             ntok = ds4_session_eval_speculative_argmax(chat->session,
                                                        token,
                                                        max_tokens - generated,

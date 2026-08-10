@@ -14466,11 +14466,11 @@ static ds4_engine *test_open_dspark_engine(const char *support_path) {
  * divergences.  Needs an MTP head, so it self-skips without DS4_TEST_MTP. */
 static void test_mtp_verify_depth(void) {
     ds4_engine *engine = test_get_engine(false);
-    if (!engine || !ds4_engine_has_mtp(engine)) {
+    if (!engine || !ds4_engine_has_dflash(engine)) {
         fprintf(stderr, "ds4-test: mtp-verify-depth skipped (set DS4_TEST_MTP to an MTP GGUF)\n");
         return;
     }
-    TEST_ASSERT(ds4_engine_mtp_draft_tokens(engine) > 2);
+    TEST_ASSERT(ds4_engine_dflash_draft_tokens(engine) > 2);
 
     ds4_tokens prompt = {0};
     ds4_chat_begin(engine, &prompt);
@@ -14521,7 +14521,7 @@ static void test_dspark_verify_depth(void) {
     int *spec = NULL;
 
     if (engine) {
-        const int draft_depth = ds4_engine_mtp_draft_tokens(engine);
+        const int draft_depth = ds4_engine_dflash_draft_tokens(engine);
         TEST_ASSERT(draft_depth > 2);
 
         ds4_chat_begin(engine, &prompt);

@@ -86,6 +86,25 @@ assert_help_contract() {
 
 assert_help_contract ds4 ./ds4
 assert_help_contract ds4-server ./ds4-server
+
+# Public engine selection is intentionally DFlash-only in this product slice.
+# Check the linked CLI surface as well as the source-level environment contract;
+# this keeps an old MTP spelling from silently returning through a frontend.
+for symbol in _ds4_engine_has_dflash _ds4_engine_dflash_draft_tokens; do
+    if nm -gU ./ds4 | grep -F -- "$symbol" >/dev/null &&
+       nm -gU ./ds4-server | grep -F -- "$symbol" >/dev/null; then
+        pass "public DFlash symbol $symbol"
+    else
+        fail "missing public DFlash symbol $symbol"
+    fi
+done
+legacy_spec_disable_env="DS4""_MTP""_SPEC_DISABLE"
+if grep -Fq -- 'DS4_DFLASH_SPEC_DISABLE' ds4_cli.c ds4_server.c &&
+   ! grep -Fq -- "$legacy_spec_disable_env" ds4_cli.c ds4_server.c; then
+    pass "DFlash speculative disable environment contract"
+else
+    fail "DFlash speculative disable environment contract"
+fi
 contains_option "server preserves HTTP batching" "--mixed-prefill-quantum" \
     "$test_tmp_dir/ds4-server.help"
 contains_option "server preserves disk KV" "--kv-disk-dir" \

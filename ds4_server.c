@@ -10385,7 +10385,7 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
         slot->session,
         !s->batched_mode &&
         j->req.temperature <= 0.0f &&
-        getenv("DS4_MTP_SPEC_DISABLE") == NULL);
+        getenv("DS4_DFLASH_SPEC_DISABLE") == NULL);
     const int old_pos = ds4_session_pos(slot->session);
     const int common = ds4_session_common_prefix(slot->session, &j->req.prompt);
     trace_cache_diag cache_diag = {0};
@@ -10873,8 +10873,8 @@ decode_again:
         int toks[17];
         int ntok = 0;
         if (!s->batched_mode && temperature <= 0.0f &&
-            ds4_engine_mtp_draft_tokens(s->engine) > 1 &&
-            getenv("DS4_MTP_SPEC_DISABLE") == NULL)
+            ds4_engine_dflash_draft_tokens(s->engine) > 1 &&
+            getenv("DS4_DFLASH_SPEC_DISABLE") == NULL)
         {
             ntok = ds4_session_eval_speculative_argmax(slot->session,
                                                        token,
