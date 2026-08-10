@@ -118,8 +118,8 @@ ds4-bench: ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sour
 ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_eval.o ds4_help.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.c ds4.h $(CORE_OBJS) rax.o ds4_gpu_args.o | check-metal-sources
-	$(CC) $(QUALITY_CFLAGS) -I. -o $@ gguf-tools/quality-testing/score_official.c $(CORE_OBJS) rax.o ds4_gpu_args.o $(METAL_LDLIBS)
+gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.c ds4.h $(CORE_OBJS) rax.o | check-metal-sources
+	$(CC) $(QUALITY_CFLAGS) -I. -o $@ gguf-tools/quality-testing/score_official.c $(CORE_OBJS) rax.o $(METAL_LDLIBS)
 
 tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h ds4_tp.h
 	$(CC) $(CFLAGS) -I. -c -o $@ tests/test_metal_session_batch.c
