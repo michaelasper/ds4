@@ -6004,53 +6004,7 @@ static void weights_bind_laguna_layer(ds4_layer_weights *l, const ds4_model *m, 
     l->ffn_down_shexp  = required_tensorf(m, "blk.%u.ffn_down_shexp.weight", il);
 }
 
-static void weights_bind_glm_dsa_layer(ds4_layer_weights *l, const ds4_model *m, uint32_t il) {
-    l->attn_norm       = required_tensorf(m, "blk.%u.attn_norm.weight", il);
-    l->attn_q_a        = required_tensorf(m, "blk.%u.attn_q_a.weight", il);
-    l->attn_q_a_norm   = required_tensorf(m, "blk.%u.attn_q_a_norm.weight", il);
-    l->attn_q_b        = required_tensorf(m, "blk.%u.attn_q_b.weight", il);
-    l->attn_kv_a_mqa   = required_tensorf(m, "blk.%u.attn_kv_a_mqa.weight", il);
-    l->attn_kv_a_norm  = required_tensorf(m, "blk.%u.attn_kv_a_norm.weight", il);
-    l->attn_k_b        = required_tensorf(m, "blk.%u.attn_k_b.weight", il);
-    l->attn_v_b        = required_tensorf(m, "blk.%u.attn_v_b.weight", il);
-    l->attn_output     = required_tensorf(m, "blk.%u.attn_output.weight", il);
-    l->indexer_attn_q_b = required_tensorf(m, "blk.%u.indexer.attn_q_b.weight", il);
-    l->indexer_attn_k  = required_tensorf(m, "blk.%u.indexer.attn_k.weight", il);
-    l->indexer_k_norm  = required_tensorf(m, "blk.%u.indexer.k_norm.weight", il);
-    l->indexer_k_norm_b = required_tensorf(m, "blk.%u.indexer.k_norm.bias", il);
-    l->indexer_proj    = required_tensorf(m, "blk.%u.indexer.proj.weight", il);
-    l->ffn_norm        = required_tensorf(m, "blk.%u.ffn_norm.weight", il);
-
-    if (il < DS4_N_LEADING_DENSE) {
-        l->ffn_gate = required_tensorf(m, "blk.%u.ffn_gate.weight", il);
-        l->ffn_up   = required_tensorf(m, "blk.%u.ffn_up.weight", il);
-        l->ffn_down = required_tensorf(m, "blk.%u.ffn_down.weight", il);
-    } else {
-        l->ffn_gate_inp    = required_tensorf(m, "blk.%u.ffn_gate_inp.weight", il);
-        l->ffn_exp_probs_b = required_tensorf(m, "blk.%u.exp_probs_b.bias", il);
-        l->ffn_gate_exps   = required_tensorf(m, "blk.%u.ffn_gate_exps.weight", il);
-        l->ffn_up_exps     = required_tensorf(m, "blk.%u.ffn_up_exps.weight", il);
-        l->ffn_down_exps   = required_tensorf(m, "blk.%u.ffn_down_exps.weight", il);
-        l->ffn_gate_shexp  = required_tensorf(m, "blk.%u.ffn_gate_shexp.weight", il);
-        l->ffn_up_shexp    = required_tensorf(m, "blk.%u.ffn_up_shexp.weight", il);
-        l->ffn_down_shexp  = required_tensorf(m, "blk.%u.ffn_down_shexp.weight", il);
-    }
-
-    if (DS4_N_NEXTN_PREDICT != 0 &&
-        il + DS4_N_NEXTN_PREDICT >= DS4_N_LAYER) {
-        l->nextn_eh_proj = required_tensorf(m, "blk.%u.nextn.eh_proj.weight", il);
-        l->nextn_enorm = required_tensorf(m, "blk.%u.nextn.enorm.weight", il);
-        l->nextn_hnorm = required_tensorf(m, "blk.%u.nextn.hnorm.weight", il);
-        l->nextn_shared_head_norm =
-            required_tensorf(m, "blk.%u.nextn.shared_head_norm.weight", il);
-    }
-}
-
 static void weights_bind_layer(ds4_layer_weights *l, const ds4_model *m, uint32_t il) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
-        weights_bind_glm_dsa_layer(l, m, il);
-        return;
-    }
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
         weights_bind_laguna_layer(l, m, il);
         return;
