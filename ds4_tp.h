@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 
 #include "ds4.h"
 
@@ -54,38 +53,6 @@ typedef struct {
     uint32_t gate_slot_step;
     uint32_t gates_per_token;
 } ds4_tp_identity;
-
-bool ds4_tp_enabled(const ds4_tp_options *opt);
-
-typedef enum {
-    DS4_TP_CLI_ERROR = -1,
-    DS4_TP_CLI_NOT_MATCHED = 0,
-    DS4_TP_CLI_MATCHED = 1,
-} ds4_tp_cli_parse_result;
-
-/* CLI parsing, same contract as ds4_dist_parse_cli_arg(): returns 1 when the
- * argument was consumed, 0 when not matched, -1 on error (err filled). */
-int ds4_tp_parse_cli_arg(
-        const char *arg,
-        int *index,
-        int argc,
-        char **argv,
-        ds4_tp_options *opt,
-        char *err,
-        size_t errlen);
-int ds4_tp_adopt_distributed_options(
-        ds4_tp_options *tp,
-        ds4_distributed_options *dist,
-        char *err,
-        size_t errlen);
-void ds4_tp_usage(FILE *fp);
-
-/* Validates option combinations that TP cannot run with (SSD streaming,
- * distributed mode, MTP drafting, CPU backend). */
-int ds4_tp_validate_engine_options(
-        const ds4_engine_options *opt,
-        char *err,
-        size_t errlen);
 
 /* Connection bring-up.  The leader listens and accepts one worker; the
  * worker dials with retry.  Both then exchange and validate identities.
