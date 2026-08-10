@@ -66,6 +66,21 @@ static uint64_t g_command_batch_epoch;
  * after ds4_gpu_init has already compiled the Metal source). */
 static int g_metal_math_safe;
 static NSMutableArray<id<MTLCommandBuffer>> *g_pending_cbs;
+typedef struct {
+    uint64_t qk_simd32;
+    uint64_t target_generated;
+    uint32_t target_generated_tokens;
+    uint32_t target_generated_pos0;
+    uint64_t target_consumed;
+    uint64_t target_family[2];
+    uint64_t support_generated;
+    uint32_t support_generated_tokens;
+    uint32_t support_generated_pos0;
+    uint64_t support_consumed;
+} ds4_gpu_laguna_atlas_cb_evidence;
+static NSMutableArray<NSData *> *g_pending_laguna_atlas_evidence;
+static ds4_gpu_laguna_atlas_cb_evidence g_batch_laguna_atlas_evidence;
+static ds4_gpu_laguna_atlas_cb_evidence g_owned_laguna_atlas_evidence;
 static id<MTLSharedEvent> g_selected_readback_event;
 static uint64_t g_selected_readback_event_value;
 static id<MTLComputePipelineState> g_set_rows_f32_i32_pipeline;
@@ -303,10 +318,50 @@ static id<MTLComputePipelineState> g_laguna_qk_head_norm_rope_simd32_pipeline;
 static int g_laguna_qk_head_norm_rope_simd32_pipeline_checked;
 static int g_laguna_qk_head_norm_rope_simd32_invalid_env_reported;
 static uint64_t g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count;
+static uint64_t g_laguna_qk_head_norm_rope_simd32_completed_dispatch_count;
 /* -2 means the graph has not selected a Q/K plan yet.  Once selected,
  * consumers never consult getenv for the selector or its trace flag. */
 static int g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
 static int g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
+/* Strict Laguna RoPE angle atlas.  These PSOs stay lazy so an explicit source
+ * override remains usable while the optional experiment is off. */
+static id<MTLComputePipelineState> g_laguna_rope_atlas_pipeline;
+static id<MTLComputePipelineState> g_laguna_rope_support_atlas_pipeline;
+static id<MTLComputePipelineState> g_laguna_head_norm_rope_atlas_pipeline;
+static id<MTLComputePipelineState> g_laguna_qk_head_norm_rope_atlas_pipeline;
+static id<MTLComputePipelineState> g_laguna_qk_head_norm_rope_simd32_atlas_pipeline;
+static int g_laguna_rope_atlas_pipeline_checked;
+static int g_laguna_rope_atlas_invalid_env_reported;
+/* Cached with the immutable atlas graph plan.  Consumers must not perform a
+ * getenv per layer/token merely to decide whether optional tracing is on. */
+static int g_laguna_rope_atlas_trace_mode = -1;
+static id<MTLBuffer> g_laguna_rope_atlas_buffer;
+static NSUInteger g_laguna_rope_atlas_buffer_bytes;
+static id<MTLBuffer> g_laguna_rope_support_atlas_buffer;
+static NSUInteger g_laguna_rope_support_atlas_buffer_bytes;
+static uint64_t g_laguna_rope_atlas_valid_epoch;
+static uint32_t g_laguna_rope_atlas_valid_tokens;
+static uint32_t g_laguna_rope_atlas_valid_pos0;
+static int g_laguna_rope_atlas_valid;
+static int g_laguna_rope_atlas_valid_completed;
+static uint64_t g_laguna_rope_support_atlas_valid_epoch;
+static uint32_t g_laguna_rope_support_atlas_valid_tokens;
+static uint32_t g_laguna_rope_support_atlas_valid_pos0;
+static int g_laguna_rope_support_atlas_valid;
+static int g_laguna_rope_support_atlas_valid_completed;
+static uint64_t g_laguna_rope_atlas_encoded_dispatch_count;
+static uint64_t g_laguna_rope_atlas_consumed_dispatch_count;
+static uint64_t g_laguna_rope_atlas_consumed_family_count[2];
+static uint64_t g_laguna_rope_support_atlas_encoded_dispatch_count;
+static uint64_t g_laguna_rope_support_atlas_consumed_dispatch_count;
+static uint64_t g_laguna_rope_atlas_completed_generated_count;
+static uint64_t g_laguna_rope_atlas_completed_consumed_dispatch_count;
+static uint64_t g_laguna_rope_atlas_completed_consumed_family_count[2];
+static uint64_t g_laguna_rope_support_atlas_completed_generated_count;
+static uint64_t g_laguna_rope_support_atlas_completed_consumed_dispatch_count;
+/* -2 means no graph/preflight plan has been selected yet.  Once selected,
+ * route kernels never consult getenv; this is also the disabled fast path. */
+static int g_laguna_rope_atlas_plan_mode = -2;
 static id<MTLComputePipelineState> g_laguna_store_kv_pipeline;
 static id<MTLComputePipelineState> g_laguna_attention_pipeline;
 static id<MTLComputePipelineState> g_laguna_stage_kv_pipeline;
@@ -1065,6 +1120,51 @@ static NSUInteger ds4_gpu_tensor_offset(const ds4_gpu_tensor *tensor) {
 
 static id<MTLCommandBuffer> ds4_gpu_new_command_buffer(void);
 static void ds4_gpu_stream_expert_cache_note_owned_created(void);
+static ds4_gpu_laguna_atlas_cb_evidence *
+ds4_gpu_laguna_atlas_current_cb_evidence(void) {
+    return g_batch_cb ? &g_batch_laguna_atlas_evidence :
+                        &g_owned_laguna_atlas_evidence;
+}
+
+static void ds4_gpu_laguna_atlas_evidence_zero(
+        ds4_gpu_laguna_atlas_cb_evidence *e) {
+    if (e) memset(e, 0, sizeof(*e));
+}
+
+static void ds4_gpu_laguna_atlas_publish(
+        const ds4_gpu_laguna_atlas_cb_evidence *e) {
+    if (!e) return;
+    g_laguna_qk_head_norm_rope_simd32_completed_dispatch_count += e->qk_simd32;
+    g_laguna_rope_atlas_completed_generated_count += e->target_generated;
+    g_laguna_rope_atlas_completed_consumed_dispatch_count += e->target_consumed;
+    g_laguna_rope_atlas_completed_consumed_family_count[0] += e->target_family[0];
+    g_laguna_rope_atlas_completed_consumed_family_count[1] += e->target_family[1];
+    g_laguna_rope_support_atlas_completed_generated_count += e->support_generated;
+    g_laguna_rope_support_atlas_completed_consumed_dispatch_count += e->support_consumed;
+    if (e->target_generated != 0 &&
+        g_laguna_rope_atlas_valid &&
+        g_laguna_rope_atlas_valid_tokens == e->target_generated_tokens &&
+        g_laguna_rope_atlas_valid_pos0 == e->target_generated_pos0) {
+        g_laguna_rope_atlas_valid_completed = 1;
+    }
+    if (e->support_generated != 0 &&
+        g_laguna_rope_support_atlas_valid &&
+        g_laguna_rope_support_atlas_valid_tokens ==
+            e->support_generated_tokens &&
+        g_laguna_rope_support_atlas_valid_pos0 ==
+            e->support_generated_pos0) {
+        g_laguna_rope_support_atlas_valid_completed = 1;
+    }
+}
+
+static void ds4_gpu_laguna_atlas_register_pending(
+        id<MTLCommandBuffer> cb,
+        const ds4_gpu_laguna_atlas_cb_evidence *e) {
+    if (!g_pending_laguna_atlas_evidence) return;
+    [g_pending_laguna_atlas_evidence addObject:
+        [NSData dataWithBytes:e length:sizeof(*e)]];
+    [g_pending_cbs addObject:cb];
+}
 
 static id<MTLCommandBuffer> ds4_gpu_command_buffer(int *owned) {
     if (g_batch_cb) {
@@ -1073,7 +1173,10 @@ static id<MTLCommandBuffer> ds4_gpu_command_buffer(int *owned) {
     }
     *owned = 1;
     id<MTLCommandBuffer> cb = ds4_gpu_new_command_buffer();
-    if (cb) ds4_gpu_stream_expert_cache_note_owned_created();
+    if (cb) {
+        ds4_gpu_laguna_atlas_evidence_zero(&g_owned_laguna_atlas_evidence);
+        ds4_gpu_stream_expert_cache_note_owned_created();
+    }
     return cb;
 }
 
@@ -1310,10 +1413,23 @@ static void ds4_gpu_laguna_test_decode_route_batch_completed(int ok);
 
 static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     int ok = 1;
-    for (id<MTLCommandBuffer> pending in g_pending_cbs) {
-        if (!ds4_gpu_wait_command_buffer(pending, label)) ok = 0;
+    const NSUInteger count = [g_pending_cbs count];
+    for (NSUInteger i = 0; i < count; i++) {
+        id<MTLCommandBuffer> pending = [g_pending_cbs objectAtIndex:i];
+        const BOOL completed = ds4_gpu_wait_command_buffer(pending, label);
+        if (!completed) {
+            ok = 0;
+        } else if (i < [g_pending_laguna_atlas_evidence count]) {
+            NSData *data = [g_pending_laguna_atlas_evidence objectAtIndex:i];
+            if ([data length] == sizeof(ds4_gpu_laguna_atlas_cb_evidence)) {
+                ds4_gpu_laguna_atlas_cb_evidence evidence;
+                [data getBytes:&evidence length:sizeof(evidence)];
+                ds4_gpu_laguna_atlas_publish(&evidence);
+            }
+        }
     }
     [g_pending_cbs removeAllObjects];
+    [g_pending_laguna_atlas_evidence removeAllObjects];
     ds4_gpu_stream_expert_cache_note_pending_completed();
 #ifdef DS4_TEST_HOOKS
     /* These command buffers were already committed by flush/submit (or by a
@@ -1324,7 +1440,13 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     g_laguna_router_fused_pending_dispatches = 0;
     ds4_gpu_laguna_test_decode_route_batch_completed(ok);
 #endif
-    if (!ok) ds4_gpu_invalidate_zero_prefix_prefill_block_maps();
+    if (!ok) {
+        ds4_gpu_invalidate_zero_prefix_prefill_block_maps();
+        g_laguna_rope_atlas_valid = 0;
+        g_laguna_rope_atlas_valid_completed = 0;
+        g_laguna_rope_support_atlas_valid = 0;
+        g_laguna_rope_support_atlas_valid_completed = 0;
+    }
     return ok;
 }
 
@@ -1336,6 +1458,14 @@ static int ds4_gpu_finish_command_buffer(id<MTLCommandBuffer> cb, int owned, con
     if (!ds4_gpu_wait_command_buffer(cb, label)) {
         ok = 0;
         ds4_gpu_invalidate_zero_prefix_prefill_block_maps();
+        g_laguna_rope_atlas_valid = 0;
+        g_laguna_rope_atlas_valid_completed = 0;
+        g_laguna_rope_support_atlas_valid = 0;
+        g_laguna_rope_support_atlas_valid_completed = 0;
+        ds4_gpu_laguna_atlas_evidence_zero(&g_owned_laguna_atlas_evidence);
+    } else {
+        ds4_gpu_laguna_atlas_publish(&g_owned_laguna_atlas_evidence);
+        ds4_gpu_laguna_atlas_evidence_zero(&g_owned_laguna_atlas_evidence);
     }
     ds4_gpu_stream_expert_cache_note_owned_completed();
     [g_transient_buffers removeAllObjects];
@@ -2397,6 +2527,543 @@ ds4_gpu_laguna_qk_head_norm_rope_simd32_pipeline(void) {
     return g_laguna_qk_head_norm_rope_simd32_pipeline;
 }
 
+typedef struct {
+    uint32_t n_tokens;
+    uint32_t pos0;
+    uint32_t n_families;
+    uint32_t atlas_stride;
+    uint32_t n_rot[2];
+    uint32_t n_ctx_orig[2];
+    float    freq_base[2];
+    float    freq_scale[2];
+    float    ext_factor[2];
+    float    attn_factor[2];
+    float    beta_fast[2];
+    float    beta_slow[2];
+} ds4_gpu_laguna_rope_atlas_args;
+
+static int ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode_impl(void);
+
+static id<MTLComputePipelineState>
+ds4_gpu_laguna_rope_atlas_pipeline(void) {
+    if (!g_laguna_rope_atlas_pipeline_checked) {
+        g_laguna_rope_atlas_pipeline_checked = 1;
+        g_laguna_rope_atlas_pipeline = ds4_gpu_get_pipeline(
+            "kernel_laguna_rope_atlas");
+        g_laguna_rope_support_atlas_pipeline = ds4_gpu_get_pipeline(
+            "kernel_laguna_rope_support_atlas");
+        g_laguna_head_norm_rope_atlas_pipeline = ds4_gpu_get_pipeline(
+            "kernel_laguna_head_rms_norm_rope_neox_atlas");
+        g_laguna_qk_head_norm_rope_atlas_pipeline = ds4_gpu_get_pipeline(
+            "kernel_laguna_qk_head_rms_norm_rope_neox_atlas");
+        g_laguna_qk_head_norm_rope_simd32_atlas_pipeline =
+            ds4_gpu_get_pipeline(
+                "kernel_laguna_qk_head_rms_norm_rope_neox_simd32_atlas");
+    }
+    return g_laguna_rope_atlas_pipeline;
+}
+
+static int ds4_gpu_laguna_rope_atlas_env_mode_impl(void) {
+    const char *v = getenv("DS4_METAL_LAGUNA_ROPE_ATLAS");
+    if (!v || !v[0] || strcmp(v, "0") == 0) return 0;
+    if (strcmp(v, "1") == 0) return 1;
+    if (!g_laguna_rope_atlas_invalid_env_reported) {
+        fprintf(stderr,
+                "ds4: invalid DS4_METAL_LAGUNA_ROPE_ATLAS=%s; "
+                "requested configuration is fatal (use unset, empty, 0, or 1)\n",
+                v);
+        g_laguna_rope_atlas_invalid_env_reported = 1;
+    }
+    return -1;
+}
+
+static int ds4_gpu_laguna_rope_atlas_plan_mode(void) {
+    return g_laguna_rope_atlas_plan_mode;
+}
+
+static int ds4_gpu_laguna_rope_atlas_single_geometry_ok(
+        uint32_t n_head, uint32_t head_dim, uint32_t n_rot) {
+    return (n_head == 8u || n_head == 48u || n_head == 72u) &&
+           head_dim == 128u && (n_rot == 64u || n_rot == 128u);
+}
+
+static int ds4_gpu_laguna_rope_atlas_geometry_ok(
+        uint32_t n_q_head, uint32_t n_k_head,
+        uint32_t head_dim, uint32_t n_rot) {
+    if (n_k_head == 0u) {
+        return ds4_gpu_laguna_rope_atlas_single_geometry_ok(
+            n_q_head, head_dim, n_rot);
+    }
+    return (n_q_head == 48u || n_q_head == 72u) &&
+           n_k_head == 8u && head_dim == 128u &&
+           (n_rot == 64u || n_rot == 128u);
+}
+
+/* Return the fixed atlas plane for the exact Laguna model contract.  The
+ * atlas is not a generic RoPE cache: accepting nearby parameters would make
+ * a caller silently consume coefficients from the wrong family. */
+static int ds4_gpu_laguna_rope_atlas_family_for_args(
+        uint32_t n_rot, uint32_t n_ctx_orig,
+        float freq_base, float freq_scale, float ext_factor,
+        float attn_factor, float beta_fast, float beta_slow) {
+    if (n_rot == 64u && n_ctx_orig == 8192u &&
+        freq_base == 500000.0f && freq_scale == (1.0f / 32.0f) &&
+        ext_factor == 1.0f && attn_factor == 1.0f &&
+        beta_fast == 32.0f && beta_slow == 1.0f) {
+        return 0;
+    }
+    if (n_rot == 128u && n_ctx_orig == 262144u &&
+        freq_base == 10000.0f && freq_scale == 1.0f &&
+        ext_factor == 0.0f && attn_factor == 1.0f &&
+        beta_fast == 0.0f && beta_slow == 0.0f) {
+        return 1;
+    }
+    /* DFlash support has a deliberately independent one-family atlas.  Its
+     * context/frequency contract is not interchangeable with target SWA. */
+    if (n_rot == 128u && n_ctx_orig == 262144u &&
+        freq_base == 500000.0f && freq_scale == 1.0f &&
+        ext_factor == 0.0f && attn_factor == 1.0f &&
+        beta_fast == 0.0f && beta_slow == 0.0f) {
+        return 2;
+    }
+    return -1;
+}
+
+static int ds4_gpu_laguna_rope_atlas_pipeline_usable(
+        id<MTLComputePipelineState> pipeline,
+        NSUInteger min_threads,
+        NSUInteger required_tew,
+        const char *label) {
+    if (!pipeline) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas requested but %s pipeline is unavailable; "
+                "refusing legacy fallback\n",
+                label);
+        return 0;
+    }
+    if (required_tew != 0u && pipeline.threadExecutionWidth != required_tew) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas %s pipeline has execution width %lu, "
+                "requires %lu; requested configuration fails\n",
+                label,
+                (unsigned long)pipeline.threadExecutionWidth,
+                (unsigned long)required_tew);
+        return 0;
+    }
+    if (pipeline.maxTotalThreadsPerThreadgroup < min_threads) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas %s pipeline supports %lu threads, "
+                "needs at least %lu; requested configuration fails\n",
+                label,
+                (unsigned long)pipeline.maxTotalThreadsPerThreadgroup,
+                (unsigned long)min_threads);
+        return 0;
+    }
+    return 1;
+}
+
+static int ds4_gpu_laguna_rope_atlas_buffer_ensure(void);
+static int ds4_gpu_laguna_rope_support_atlas_buffer_ensure(void);
+int ds4_gpu_laguna_rope_atlas_trace_enabled(void);
+
+int ds4_gpu_laguna_rope_atlas_env_mode(void) {
+    return ds4_gpu_laguna_rope_atlas_env_mode_impl();
+}
+
+int ds4_gpu_laguna_rope_atlas_plan_mode_cached(void) {
+    return ds4_gpu_laguna_rope_atlas_plan_mode();
+}
+
+static int ds4_gpu_laguna_rope_atlas_target_reuse_ready_impl(
+        uint32_t n_tokens, uint32_t pos0) {
+    if (g_laguna_rope_atlas_plan_mode != 1 ||
+        n_tokens == 0u || n_tokens > 16384u ||
+        pos0 > UINT32_MAX - (n_tokens - 1u)) {
+        return 0;
+    }
+    return g_laguna_rope_atlas_valid &&
+           g_laguna_rope_atlas_valid_completed &&
+           g_laguna_rope_atlas_valid_tokens == n_tokens &&
+           g_laguna_rope_atlas_valid_pos0 == pos0;
+}
+
+int ds4_gpu_laguna_rope_atlas_target_reuse_ready(
+        uint32_t n_tokens, uint32_t pos0) {
+    /* This query is intentionally read-only: no environment parsing, buffer
+     * allocation, command encoding, or validity promotion occurs here. */
+    return ds4_gpu_laguna_rope_atlas_target_reuse_ready_impl(
+        n_tokens, pos0);
+}
+
+int ds4_gpu_laguna_rope_atlas_preflight(
+        uint32_t n_q_head, uint32_t n_k_head,
+        uint32_t head_dim, uint32_t n_rot) {
+    /* The first successful/failed preflight freezes the graph plan.  A caller
+     * changing the environment mid-session cannot silently change layer
+     * routing; focused tests use the explicit reset hook below. */
+    if (g_laguna_rope_atlas_plan_mode == -2) {
+        g_laguna_rope_atlas_plan_mode = ds4_gpu_laguna_rope_atlas_env_mode_impl();
+        const char *trace = getenv("DS4_METAL_LAGUNA_ROPE_ATLAS_TRACE");
+        g_laguna_rope_atlas_trace_mode =
+            trace && strcmp(trace, "1") == 0 ? 1 : 0;
+    }
+    const int mode = ds4_gpu_laguna_rope_atlas_plan_mode();
+    if (mode <= 0) return mode;
+    int simd32_mode =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    if (simd32_mode == -2) {
+        /* Atlas preflight is also a graph boundary for direct atlas users:
+         * select the Q/K plan once, then keep all later atlas checks on that
+         * frozen value rather than reparsing the selector per route. */
+        /* Atlas can be selected by a single K-only support route.  That
+         * route has no paired Q/K geometry; freeze SIMD32 against the
+         * canonical Laguna paired contract instead of feeding 8/0 into the
+         * paired selector. */
+        if (ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                    48u, 8u, 128u, 64u) < 0) {
+            g_laguna_rope_atlas_plan_mode = -1;
+            return -1;
+        }
+        simd32_mode =
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    }
+    if (simd32_mode < 0) {
+        g_laguna_rope_atlas_plan_mode = -1;
+        return -1;
+    }
+    if (!ds4_gpu_laguna_rope_atlas_geometry_ok(
+            n_q_head, n_k_head, head_dim, n_rot)) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas requested but geometry is unsupported "
+                "(q_heads=%u k_heads=%u head_dim=%u n_rot=%u); refusing legacy fallback\n",
+                n_q_head, n_k_head, head_dim, n_rot);
+        g_laguna_rope_atlas_plan_mode = -1;
+        return -1;
+    }
+    if (!g_initialized && !ds4_gpu_init()) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas requested but Metal initialization failed\n");
+        g_laguna_rope_atlas_plan_mode = -1;
+        return -1;
+    }
+    (void)ds4_gpu_laguna_rope_atlas_pipeline();
+    if (!ds4_gpu_laguna_rope_atlas_pipeline_usable(
+            g_laguna_rope_atlas_pipeline, 64u, 0u, "generation") ||
+        !ds4_gpu_laguna_rope_atlas_pipeline_usable(
+            g_laguna_rope_support_atlas_pipeline, 64u, 0u,
+            "support generation") ||
+        !ds4_gpu_laguna_rope_atlas_pipeline_usable(
+            g_laguna_head_norm_rope_atlas_pipeline, 128u, 0u, "single") ||
+        !ds4_gpu_laguna_rope_atlas_pipeline_usable(
+            g_laguna_qk_head_norm_rope_atlas_pipeline, 128u, 0u, "paired")) {
+        g_laguna_rope_atlas_plan_mode = -1;
+        return -1;
+    }
+    /* The built-in atlas source always includes this PSO.  Requiring it at
+     * preflight makes a source override fail closed even when the current
+     * graph happens to select stock Q/K. */
+    if (!ds4_gpu_laguna_rope_atlas_pipeline_usable(
+            g_laguna_qk_head_norm_rope_simd32_atlas_pipeline,
+            32u, 32u, "SIMD32 atlas paired")) {
+        g_laguna_rope_atlas_plan_mode = -1;
+        return -1;
+    }
+    (void)simd32_mode;
+    if (!ds4_gpu_laguna_rope_atlas_buffer_ensure() ||
+        !ds4_gpu_laguna_rope_support_atlas_buffer_ensure()) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas requested but target/support storage "
+                "could not be allocated before graph planning\n");
+        g_laguna_rope_atlas_plan_mode = -1;
+        return -1;
+    }
+    return 1;
+}
+
+static int ds4_gpu_laguna_rope_atlas_buffer_ensure(void) {
+    const uint64_t max_tokens = 16384u;
+    const uint64_t coeffs_per_token = 2u * 64u;
+    const uint64_t bytes64 = max_tokens * coeffs_per_token * sizeof(float) * 2u;
+    if (bytes64 > (uint64_t)NSUIntegerMax) return 0;
+    if (g_laguna_rope_atlas_buffer &&
+        g_laguna_rope_atlas_buffer_bytes >= (NSUInteger)bytes64) return 1;
+    id<MTLBuffer> buffer = [g_device newBufferWithLength:(NSUInteger)bytes64
+                                                 options:MTLResourceStorageModePrivate];
+    if (!buffer) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas allocation failed (%.2f MiB)\n",
+                (double)bytes64 / 1048576.0);
+        return 0;
+    }
+    buffer.label = @"ds4_laguna_rope_atlas";
+    g_laguna_rope_atlas_buffer = buffer;
+    g_laguna_rope_atlas_buffer_bytes = (NSUInteger)bytes64;
+    g_laguna_rope_atlas_valid = 0;
+    g_laguna_rope_atlas_valid_completed = 0;
+    return 1;
+}
+
+static int ds4_gpu_laguna_rope_support_atlas_buffer_ensure(void) {
+    const uint64_t max_tokens = 512u;
+    const uint64_t bytes64 = max_tokens * 64u * sizeof(float) * 2u;
+    if (bytes64 > (uint64_t)NSUIntegerMax) return 0;
+    if (g_laguna_rope_support_atlas_buffer &&
+        g_laguna_rope_support_atlas_buffer_bytes >= (NSUInteger)bytes64) {
+        return 1;
+    }
+    id<MTLBuffer> buffer = [g_device newBufferWithLength:(NSUInteger)bytes64
+                                                 options:MTLResourceStorageModePrivate];
+    if (!buffer) {
+        fprintf(stderr,
+                "ds4: Laguna DFlash support RoPE atlas allocation failed "
+                "(%.2f KiB)\n", (double)bytes64 / 1024.0);
+        return 0;
+    }
+    buffer.label = @"ds4_laguna_rope_support_atlas";
+    g_laguna_rope_support_atlas_buffer = buffer;
+    g_laguna_rope_support_atlas_buffer_bytes = (NSUInteger)bytes64;
+    g_laguna_rope_support_atlas_valid = 0;
+    g_laguna_rope_support_atlas_valid_completed = 0;
+    return 1;
+}
+
+static int ds4_gpu_laguna_rope_atlas_prepare(
+        uint32_t n_tokens, uint32_t pos0) {
+    if (n_tokens == 0u || n_tokens > 16384u) return 0;
+    if (pos0 > UINT32_MAX - (n_tokens - 1u)) return 0;
+    if (!ds4_gpu_laguna_rope_atlas_buffer_ensure()) return 0;
+
+    if ((ds4_gpu_laguna_rope_atlas_target_reuse_ready_impl(n_tokens, pos0) ||
+         (g_laguna_rope_atlas_valid &&
+          !g_laguna_rope_atlas_valid_completed &&
+          g_laguna_rope_atlas_valid_epoch == g_command_batch_epoch &&
+          g_laguna_rope_atlas_valid_tokens == n_tokens &&
+          g_laguna_rope_atlas_valid_pos0 == pos0))) {
+        return 1;
+    }
+
+    ds4_gpu_laguna_rope_atlas_args args = {
+        .n_tokens = n_tokens,
+        .pos0 = pos0,
+        .n_families = 2u,
+        .atlas_stride = 2u,
+        .n_rot = {64u, 128u},
+        .n_ctx_orig = {8192u, 262144u},
+        .freq_base = {500000.0f, 10000.0f},
+        .freq_scale = {1.0f / 32.0f, 1.0f},
+        .ext_factor = {1.0f, 0.0f},
+        .attn_factor = {1.0f, 1.0f},
+        .beta_fast = {32.0f, 0.0f},
+        .beta_slow = {1.0f, 0.0f},
+    };
+    int owned = 0;
+    id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+    if (!cb) return 0;
+    id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+    if (!enc || !g_laguna_rope_atlas_pipeline ||
+        !g_laguna_rope_atlas_buffer) {
+        if (enc) ds4_gpu_end_compute_encoder(cb, enc);
+        if (owned) {
+            (void)ds4_gpu_finish_command_buffer(
+                cb, owned, "Laguna RoPE atlas generation unavailable");
+        }
+        return 0;
+    }
+    [enc setComputePipelineState:g_laguna_rope_atlas_pipeline];
+    [enc setBytes:&args length:sizeof(args) atIndex:0];
+    [enc setBuffer:g_laguna_rope_atlas_buffer offset:0 atIndex:1];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 2, n_tokens)
+         threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    g_laguna_rope_atlas_encoded_dispatch_count++;
+    g_laguna_rope_atlas_valid_completed = 0;
+    ds4_gpu_laguna_atlas_current_cb_evidence()->target_generated++;
+    ds4_gpu_laguna_atlas_current_cb_evidence()->target_generated_tokens =
+        n_tokens;
+    ds4_gpu_laguna_atlas_current_cb_evidence()->target_generated_pos0 = pos0;
+    if (ds4_gpu_laguna_rope_atlas_trace_enabled()) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas generation encoded tokens=%u pos0=%u "
+                "families=global64+swa128\n",
+                n_tokens, pos0);
+    }
+    ds4_gpu_end_compute_encoder(cb, enc);
+    g_laguna_rope_atlas_valid = 1;
+    g_laguna_rope_atlas_valid_epoch = g_command_batch_epoch;
+    g_laguna_rope_atlas_valid_tokens = n_tokens;
+    g_laguna_rope_atlas_valid_pos0 = pos0;
+    if (owned && !ds4_gpu_finish_command_buffer(
+            cb, owned, "Laguna RoPE atlas generation")) {
+        g_laguna_rope_atlas_valid = 0;
+        g_laguna_rope_atlas_valid_completed = 0;
+        return 0;
+    }
+    return 1;
+}
+
+static int ds4_gpu_laguna_rope_support_atlas_prepare(
+        uint32_t n_tokens, uint32_t pos0) {
+    if (n_tokens == 0u || n_tokens > 512u) return 0;
+    if (pos0 > UINT32_MAX - (n_tokens - 1u)) return 0;
+    if (!ds4_gpu_laguna_rope_support_atlas_buffer_ensure()) return 0;
+    if (g_laguna_rope_support_atlas_valid &&
+        (g_laguna_rope_support_atlas_valid_completed ||
+         g_laguna_rope_support_atlas_valid_epoch == g_command_batch_epoch) &&
+        g_laguna_rope_support_atlas_valid_tokens == n_tokens &&
+        g_laguna_rope_support_atlas_valid_pos0 == pos0) {
+        return 1;
+    }
+
+    ds4_gpu_laguna_rope_atlas_args args = {
+        .n_tokens = n_tokens,
+        .pos0 = pos0,
+        .n_families = 1u,
+        .atlas_stride = 1u,
+        .n_rot = {128u, 0u},
+        .n_ctx_orig = {262144u, 0u},
+        .freq_base = {500000.0f, 0.0f},
+        .freq_scale = {1.0f, 0.0f},
+        .ext_factor = {0.0f, 0.0f},
+        .attn_factor = {1.0f, 0.0f},
+        .beta_fast = {0.0f, 0.0f},
+        .beta_slow = {0.0f, 0.0f},
+    };
+    int owned = 0;
+    id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+    if (!cb) return 0;
+    id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+    if (!enc || !g_laguna_rope_support_atlas_pipeline ||
+        !g_laguna_rope_support_atlas_buffer) {
+        if (enc) ds4_gpu_end_compute_encoder(cb, enc);
+        if (owned) {
+            (void)ds4_gpu_finish_command_buffer(
+                cb, owned, "Laguna DFlash support RoPE atlas unavailable");
+        }
+        return 0;
+    }
+    [enc setComputePipelineState:g_laguna_rope_support_atlas_pipeline];
+    [enc setBytes:&args length:sizeof(args) atIndex:0];
+    [enc setBuffer:g_laguna_rope_support_atlas_buffer offset:0 atIndex:1];
+    [enc dispatchThreadgroups:MTLSizeMake(1, n_tokens, 1)
+         threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    g_laguna_rope_support_atlas_encoded_dispatch_count++;
+    g_laguna_rope_support_atlas_valid_completed = 0;
+    ds4_gpu_laguna_atlas_current_cb_evidence()->support_generated++;
+    ds4_gpu_laguna_atlas_current_cb_evidence()->support_generated_tokens =
+        n_tokens;
+    ds4_gpu_laguna_atlas_current_cb_evidence()->support_generated_pos0 = pos0;
+    ds4_gpu_end_compute_encoder(cb, enc);
+    g_laguna_rope_support_atlas_valid = 1;
+    g_laguna_rope_support_atlas_valid_epoch = g_command_batch_epoch;
+    g_laguna_rope_support_atlas_valid_tokens = n_tokens;
+    g_laguna_rope_support_atlas_valid_pos0 = pos0;
+    if (owned && !ds4_gpu_finish_command_buffer(
+            cb, owned, "Laguna DFlash support RoPE atlas generation")) {
+        g_laguna_rope_support_atlas_valid = 0;
+        g_laguna_rope_support_atlas_valid_completed = 0;
+        return 0;
+    }
+    return 1;
+}
+
+int ds4_gpu_laguna_rope_atlas_trace_enabled(void) {
+    return g_laguna_rope_atlas_trace_mode == 1;
+}
+
+static void ds4_gpu_laguna_rope_atlas_trace_consume(
+        const char *route, uint32_t family, uint32_t n_tokens,
+        uint32_t pos0) {
+    if (!ds4_gpu_laguna_rope_atlas_trace_enabled()) return;
+    fprintf(stderr,
+            "ds4: Laguna RoPE atlas consumer encoded route=%s family=%s tokens=%u "
+            "pos0=%u\n",
+            route ? route : "unknown",
+            family == 0u ? "global64" :
+            (family == 1u ? "target-swa128" : "dflash-support128"),
+            n_tokens, pos0);
+}
+
+int ds4_gpu_laguna_rope_atlas_generate(uint32_t n_tokens, uint32_t pos0) {
+    if (ds4_gpu_laguna_rope_atlas_preflight(72u, 8u, 128u, 64u) != 1) {
+        return 0;
+    }
+    if (ds4_gpu_laguna_rope_atlas_plan_mode() != 1) return 0;
+    return ds4_gpu_laguna_rope_atlas_prepare(n_tokens, pos0);
+}
+
+int ds4_gpu_laguna_rope_atlas_plan_reset_for_test(void) {
+    if (g_batch_cb || (g_pending_cbs && [g_pending_cbs count] != 0)) return 0;
+    g_laguna_rope_atlas_plan_mode = -2;
+    g_laguna_rope_atlas_trace_mode = -1;
+    g_laguna_rope_atlas_invalid_env_reported = 0;
+    g_laguna_rope_atlas_valid = 0;
+    g_laguna_rope_support_atlas_valid = 0;
+    g_laguna_rope_atlas_valid_completed = 0;
+    g_laguna_rope_support_atlas_valid_completed = 0;
+    return 1;
+}
+
+uint64_t ds4_gpu_laguna_rope_atlas_encoded_dispatch_count(void) {
+    return g_laguna_rope_atlas_encoded_dispatch_count;
+}
+
+uint64_t ds4_gpu_laguna_rope_atlas_consumed_dispatch_count(void) {
+    return g_laguna_rope_atlas_consumed_dispatch_count;
+}
+
+uint64_t ds4_gpu_laguna_rope_atlas_consumed_family_count(uint32_t family) {
+    return family < 2u ? g_laguna_rope_atlas_consumed_family_count[family] : 0u;
+}
+
+uint64_t ds4_gpu_laguna_rope_atlas_completed_generated_count(void) {
+    return g_laguna_rope_atlas_completed_generated_count;
+}
+
+uint64_t ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count(void) {
+    return g_laguna_rope_atlas_completed_consumed_dispatch_count;
+}
+
+uint64_t ds4_gpu_laguna_rope_atlas_completed_family_count(uint32_t family) {
+    return family < 2u ? g_laguna_rope_atlas_completed_consumed_family_count[family] : 0u;
+}
+
+uint64_t ds4_gpu_laguna_rope_support_atlas_encoded_dispatch_count(void) {
+    return g_laguna_rope_support_atlas_encoded_dispatch_count;
+}
+
+uint64_t ds4_gpu_laguna_rope_support_atlas_consumed_dispatch_count(void) {
+    return g_laguna_rope_support_atlas_consumed_dispatch_count;
+}
+
+uint64_t ds4_gpu_laguna_rope_support_atlas_completed_generated_count(void) {
+    return g_laguna_rope_support_atlas_completed_generated_count;
+}
+
+uint64_t ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count(void) {
+    return g_laguna_rope_support_atlas_completed_consumed_dispatch_count;
+}
+
+#ifdef DS4_TEST_HOOKS
+int ds4_gpu_laguna_rope_atlas_valid_completed_for_test(void) {
+    return g_laguna_rope_atlas_valid_completed ? 1 : 0;
+}
+
+int ds4_gpu_laguna_rope_atlas_test_poison(uint32_t support_atlas) {
+    if (ds4_gpu_laguna_rope_atlas_plan_mode() != 1 || !g_batch_cb) return 0;
+    id<MTLBuffer> buffer = support_atlas
+        ? g_laguna_rope_support_atlas_buffer : g_laguna_rope_atlas_buffer;
+    NSUInteger bytes = support_atlas
+        ? g_laguna_rope_support_atlas_buffer_bytes : g_laguna_rope_atlas_buffer_bytes;
+    if (!buffer || bytes == 0) return 0;
+    ds4_gpu_close_batch_encoder();
+    id<MTLBlitCommandEncoder> blit = [g_batch_cb blitCommandEncoder];
+    if (!blit) return 0;
+    [blit fillBuffer:buffer range:NSMakeRange(0, bytes) value:0];
+    [blit endEncoding];
+    g_batch_has_work = YES;
+    return 1;
+}
+#endif
+
 static int ds4_gpu_laguna_qk_head_norm_rope_simd32_usable(
         id<MTLComputePipelineState> pipeline) {
     if (!pipeline) return 0;
@@ -2658,8 +3325,6 @@ static int ds4_gpu_q8_parse_decimal_selector(
         int         max_value,
         int         zero_is_default,
         int        *value_out) {
-    /* q8 selector parser body follows the merged SIMD32 selector block. */
-
     const char *v = getenv(name);
     if (!v || v[0] == '\0') {
         *value_out = default_value;
@@ -4639,7 +5304,9 @@ void ds4_gpu_print_memory_report(const char *label) {
         (uint64_t)g_moe_id_map_bytes +
         (uint64_t)g_moe_q4_gate_slots_bytes +
         (uint64_t)g_moe_q4_up_slots_bytes +
-        (uint64_t)g_moe_q4_down_slots_bytes;
+        (uint64_t)g_moe_q4_down_slots_bytes +
+        (uint64_t)g_laguna_rope_atlas_buffer_bytes +
+        (uint64_t)g_laguna_rope_support_atlas_buffer_bytes;
 
     pthread_mutex_lock(&g_tensor_mu);
     const uint64_t tensor_live_snap = g_tensor_alloc_live_bytes;
@@ -4891,7 +5558,7 @@ void ds4_gpu_print_memory_report(const char *label) {
                 (g_metal4_tensor_api_compile_supported ? "available" : "disabled"),
             g_metal4_m5_neural_accelerators_hint ? "likely" : "not detected");
     fprintf(stderr,
-            "ds4:   scratch %.2f MiB (flash mask %.2f, pad %.2f, tmp %.2f, blk %.2f, ring %.2f, kv %.2f, compressor %.2f, router %.2f, indexer %.2f, moe %.2f, f16 %.2f, raw-store %.2f)\n",
+            "ds4:   scratch %.2f MiB (flash mask %.2f, pad %.2f, tmp %.2f, blk %.2f, ring %.2f, kv %.2f, compressor %.2f, router %.2f, indexer %.2f, moe %.2f, f16 %.2f, raw-store %.2f, laguna-atlas %.2f, laguna-support-atlas %.2f)\n",
             ds4_gpu_mib(scratch),
             ds4_gpu_mib((uint64_t)g_flash_attn_mask_bytes +
                         (uint64_t)g_glm_flash_attn_mask_bytes +
@@ -4923,7 +5590,9 @@ void ds4_gpu_print_memory_report(const char *label) {
                           (uint64_t)g_moe_q4_up_slots_bytes +
                           (uint64_t)g_moe_q4_down_slots_bytes),
             ds4_gpu_mib((uint64_t)g_f16_round_scratch_bytes),
-            ds4_gpu_mib((uint64_t)g_raw_store_round_bytes));
+            ds4_gpu_mib((uint64_t)g_raw_store_round_bytes),
+            ds4_gpu_mib((uint64_t)g_laguna_rope_atlas_buffer_bytes),
+            ds4_gpu_mib((uint64_t)g_laguna_rope_support_atlas_buffer_bytes));
     if (color) fputs(reset, stderr);
 }
 
@@ -5061,8 +5730,10 @@ static NSString *ds4_gpu_full_source(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     /*
      * Kernels are kept as separate files for review, then concatenated into one
-     * Metal library.  Environment overrides are still honored so a diagnostic
-     * run can swap one source file without changing the executable.
+     * Metal library.  A non-empty source override is authoritative for that
+     * component: an unreadable path fails library construction instead of
+     * silently compiling a different built-in file.  Empty/unset overrides
+     * retain the normal built-in search path.
      */
     NSArray<NSArray<NSString *> *> *required_sources = @[
         @[@"DS4_METAL_FLASH_ATTN_SOURCE", @"metal/flash_attn.metal"],
@@ -5092,11 +5763,18 @@ static NSString *ds4_gpu_full_source(void) {
     for (NSArray<NSString *> *spec in required_sources) {
         const char *override_path = getenv([spec[0] UTF8String]);
         NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        const BOOL exclusive_override =
+            override_path && override_path[0];
         if (override_path && override_path[0]) {
+            /* A non-empty override is a source-selection contract, not a
+             * preferred search path.  Falling through after a typo would
+             * silently run a different kernel implementation. */
             [paths addObject:[NSString stringWithUTF8String:override_path]];
         }
-        [paths addObject:spec[1]];
-        [paths addObject:[@"./" stringByAppendingString:spec[1]]];
+        if (!exclusive_override) {
+            [paths addObject:spec[1]];
+            [paths addObject:[@"./" stringByAppendingString:spec[1]]];
+        }
 
         NSString *loaded = nil;
         NSString *loaded_path = nil;
@@ -5117,9 +5795,16 @@ static NSString *ds4_gpu_full_source(void) {
         }
 
         if (!loaded) {
-            fprintf(stderr,
-                    "ds4: Metal source %s not found (set %s to override)\n",
-                    [spec[1] UTF8String], [spec[0] UTF8String]);
+            if (exclusive_override) {
+                fprintf(stderr,
+                        "ds4: Metal source override %s for %s is unreadable; "
+                        "override is exclusive and built-in fallback is disabled\n",
+                        override_path, [spec[0] UTF8String]);
+            } else {
+                fprintf(stderr,
+                        "ds4: Metal source %s not found (set %s to override)\n",
+                        [spec[1] UTF8String], [spec[0] UTF8String]);
+            }
             return nil;
         }
         [source appendFormat:@"\n// appended %@\n%@\n", loaded_path, loaded];
@@ -6835,7 +7520,8 @@ typedef struct {
     float    attn_factor;
     float    beta_fast;
     float    beta_slow;
-    uint32_t pad0;
+    uint32_t rope_atlas_family;
+    uint32_t rope_atlas_stride;
 } ds4_gpu_laguna_norm_rope_args;
 
 typedef struct {
@@ -7279,12 +7965,15 @@ int ds4_gpu_init(void) {
         g_dsv4_completion_cache.countLimit = 256u;
         g_transient_buffers = [NSMutableArray array];
         g_pending_cbs = [NSMutableArray array];
+        g_pending_laguna_atlas_evidence = [NSMutableArray array];
         if (!g_model_buffer_cache || !g_q4_expert_table_cache ||
             !g_q4_expert_layer_residency_cache ||
             !g_pipeline_cache || !g_dsv4_completion_cache ||
-            !g_transient_buffers || !g_pending_cbs) {
+            !g_transient_buffers || !g_pending_cbs ||
+            !g_pending_laguna_atlas_evidence) {
             fprintf(stderr, "ds4: Metal bookkeeping allocation failed\n");
             g_pending_cbs = nil;
+            g_pending_laguna_atlas_evidence = nil;
             g_transient_buffers = nil;
             g_dsv4_completion_cache = nil;
             g_pipeline_cache = nil;
@@ -9958,6 +10647,7 @@ int ds4_gpu_begin_commands(void) {
         getenv("DS4_METAL_DISABLE_PRE_M5_HEAD_RMS_ROPE_PIPELINE_STATIC") == NULL;
     g_batch_cb = ds4_gpu_new_command_buffer();
     g_batch_has_work = NO;
+    ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
     if (g_batch_cb) {
         if (g_command_batch_epoch != UINT64_MAX) g_command_batch_epoch++;
         ds4_gpu_stream_expert_cache_note_batch_created();
@@ -9989,11 +10679,13 @@ int ds4_gpu_flush_commands(void) {
     ds4_gpu_laguna_test_decode_route_batch_committed();
 #endif
     [cb commit];
-    [g_pending_cbs addObject:cb];
+    ds4_gpu_laguna_atlas_register_pending(cb, &g_batch_laguna_atlas_evidence);
+    ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
     ds4_gpu_stream_expert_cache_note_batch_committed();
 
     g_batch_cb = ds4_gpu_new_command_buffer();
     g_batch_has_work = NO;
+    ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
     if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
     if (!g_batch_cb) {
         (void)ds4_gpu_wait_pending_command_buffers("command batch");
@@ -10024,7 +10716,8 @@ int ds4_gpu_submit_commands(void) {
     ds4_gpu_laguna_test_decode_route_batch_committed();
 #endif
     [cb commit];
-    [g_pending_cbs addObject:cb];
+    ds4_gpu_laguna_atlas_register_pending(cb, &g_batch_laguna_atlas_evidence);
+    ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
     ds4_gpu_stream_expert_cache_note_batch_committed();
     return 1;
 }
@@ -10051,6 +10744,11 @@ int ds4_gpu_discard_commands(void) {
     memset(g_laguna_test_decode_route_batch, 0,
            sizeof(g_laguna_test_decode_route_batch));
 #endif
+    g_laguna_rope_atlas_valid = 0;
+    g_laguna_rope_atlas_valid_completed = 0;
+    g_laguna_rope_support_atlas_valid = 0;
+    g_laguna_rope_support_atlas_valid_completed = 0;
+    ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
     const uint64_t discarded_seq = g_stream_expert_cache_batch_seq;
     g_stream_expert_cache_batch_seq = 0;
     if ([g_pending_cbs count] != 0 &&
@@ -10488,12 +11186,13 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
         ds4_gpu_laguna_test_decode_route_batch_committed();
 #endif
         [cb commit];
+        ds4_gpu_laguna_atlas_register_pending(cb, &g_batch_laguna_atlas_evidence);
+        ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
         ds4_gpu_stream_expert_cache_note_batch_committed();
 
         const char *what = label ? label : "selected-id overlap";
         const BOOL signaled =
             [g_selected_readback_event waitUntilSignaledValue:event_value timeoutMS:60000];
-        [g_pending_cbs addObject:cb];
         if (!signaled) {
             fprintf(stderr, "ds4: timeout waiting for Metal shared event in %s\n", what);
             (void)ds4_gpu_wait_pending_command_buffers(what);
@@ -10518,6 +11217,7 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
 
         g_batch_cb = ds4_gpu_new_command_buffer();
         g_batch_has_work = NO;
+        ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
         if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
         if (!g_batch_cb) {
             (void)ds4_gpu_wait_pending_command_buffers(what);
@@ -11151,10 +11851,11 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
         [cb encodeSignalEvent:g_selected_readback_event value:value];
         g_batch_has_work = YES;
         [cb commit];
+        ds4_gpu_laguna_atlas_register_pending(cb, &g_batch_laguna_atlas_evidence);
+        ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
         ds4_gpu_stream_expert_cache_note_batch_committed();
 
         const BOOL signaled = [g_selected_readback_event waitUntilSignaledValue:value timeoutMS:60000];
-        [g_pending_cbs addObject:cb];
         if (!signaled) {
             fprintf(stderr, "ds4: timeout waiting for Metal shared event in %s\n",
                     label ? label : "selected-id readback");
@@ -11205,6 +11906,8 @@ int ds4_gpu_end_commands(void) {
     id<MTLCommandBuffer> cb = g_batch_cb;
     g_batch_cb = nil;
     g_batch_has_work = NO;
+    g_owned_laguna_atlas_evidence = g_batch_laguna_atlas_evidence;
+    ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
     g_stream_expert_cache_owned_seq = g_stream_expert_cache_batch_seq;
     g_stream_expert_cache_batch_seq = 0;
     const int ok = ds4_gpu_finish_command_buffer(cb, 1, "command batch");
@@ -11290,6 +11993,20 @@ void ds4_gpu_cleanup(void) {
         g_laguna_swa_gqa3_mode = 0;
         g_laguna_staged_swa_mode = 0;
         g_laguna_swa_selectors_snapshot_valid = 0;
+        /* Test/process setup may select a disabled or malformed plan before
+         * Metal is available.  Cleanup is still the lifecycle boundary for
+         * those frozen selectors; leave no stale trace or one-shot
+         * diagnostic state for the next initialization attempt. */
+        g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
+        g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
+        g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
+        g_laguna_rope_atlas_plan_mode = -2;
+        g_laguna_rope_atlas_trace_mode = -1;
+        g_laguna_rope_atlas_invalid_env_reported = 0;
+        g_laguna_rope_atlas_valid = 0;
+        g_laguna_rope_atlas_valid_completed = 0;
+        g_laguna_rope_support_atlas_valid = 0;
+        g_laguna_rope_support_atlas_valid_completed = 0;
         return;
     }
 
@@ -11375,8 +12092,44 @@ void ds4_gpu_cleanup(void) {
         g_laguna_qk_head_norm_rope_simd32_pipeline_checked = 0;
         g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
         g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count = 0;
+        g_laguna_qk_head_norm_rope_simd32_completed_dispatch_count = 0;
         g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
         g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
+        g_laguna_rope_atlas_pipeline = nil;
+        g_laguna_rope_support_atlas_pipeline = nil;
+        g_laguna_head_norm_rope_atlas_pipeline = nil;
+        g_laguna_qk_head_norm_rope_atlas_pipeline = nil;
+        g_laguna_qk_head_norm_rope_simd32_atlas_pipeline = nil;
+        g_laguna_rope_atlas_pipeline_checked = 0;
+        g_laguna_rope_atlas_invalid_env_reported = 0;
+        g_laguna_rope_atlas_trace_mode = -1;
+        g_laguna_rope_atlas_buffer = nil;
+        g_laguna_rope_atlas_buffer_bytes = 0;
+        g_laguna_rope_support_atlas_buffer = nil;
+        g_laguna_rope_support_atlas_buffer_bytes = 0;
+        g_laguna_rope_atlas_valid = 0;
+        g_laguna_rope_atlas_valid_completed = 0;
+        g_laguna_rope_atlas_valid_epoch = 0;
+        g_laguna_rope_atlas_valid_tokens = 0;
+        g_laguna_rope_atlas_valid_pos0 = 0;
+        g_laguna_rope_support_atlas_valid = 0;
+        g_laguna_rope_support_atlas_valid_completed = 0;
+        g_laguna_rope_support_atlas_valid_epoch = 0;
+        g_laguna_rope_support_atlas_valid_tokens = 0;
+        g_laguna_rope_support_atlas_valid_pos0 = 0;
+        g_laguna_rope_atlas_encoded_dispatch_count = 0;
+        g_laguna_rope_atlas_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_consumed_family_count[0] = 0;
+        g_laguna_rope_atlas_consumed_family_count[1] = 0;
+        g_laguna_rope_support_atlas_encoded_dispatch_count = 0;
+        g_laguna_rope_support_atlas_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_completed_generated_count = 0;
+        g_laguna_rope_atlas_completed_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_completed_consumed_family_count[0] = 0;
+        g_laguna_rope_atlas_completed_consumed_family_count[1] = 0;
+        g_laguna_rope_support_atlas_completed_generated_count = 0;
+        g_laguna_rope_support_atlas_completed_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_plan_mode = -2;
         g_rms_norm_scale_pipeline = nil;
         g_dsv4_qkv_rms_norm_pipeline = nil;
         g_dsv4_head_rms_norm_rope_tail_pipeline = nil;
@@ -11553,8 +12306,44 @@ void ds4_gpu_cleanup(void) {
         g_laguna_qk_head_norm_rope_simd32_pipeline_checked = 0;
         g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
         g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count = 0;
+        g_laguna_qk_head_norm_rope_simd32_completed_dispatch_count = 0;
         g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
         g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
+        g_laguna_rope_atlas_pipeline = nil;
+        g_laguna_rope_support_atlas_pipeline = nil;
+        g_laguna_head_norm_rope_atlas_pipeline = nil;
+        g_laguna_qk_head_norm_rope_atlas_pipeline = nil;
+        g_laguna_qk_head_norm_rope_simd32_atlas_pipeline = nil;
+        g_laguna_rope_atlas_pipeline_checked = 0;
+        g_laguna_rope_atlas_invalid_env_reported = 0;
+        g_laguna_rope_atlas_trace_mode = -1;
+        g_laguna_rope_atlas_buffer = nil;
+        g_laguna_rope_atlas_buffer_bytes = 0;
+        g_laguna_rope_support_atlas_buffer = nil;
+        g_laguna_rope_support_atlas_buffer_bytes = 0;
+        g_laguna_rope_atlas_valid = 0;
+        g_laguna_rope_atlas_valid_completed = 0;
+        g_laguna_rope_atlas_valid_epoch = 0;
+        g_laguna_rope_atlas_valid_tokens = 0;
+        g_laguna_rope_atlas_valid_pos0 = 0;
+        g_laguna_rope_support_atlas_valid = 0;
+        g_laguna_rope_support_atlas_valid_completed = 0;
+        g_laguna_rope_support_atlas_valid_epoch = 0;
+        g_laguna_rope_support_atlas_valid_tokens = 0;
+        g_laguna_rope_support_atlas_valid_pos0 = 0;
+        g_laguna_rope_atlas_encoded_dispatch_count = 0;
+        g_laguna_rope_atlas_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_consumed_family_count[0] = 0;
+        g_laguna_rope_atlas_consumed_family_count[1] = 0;
+        g_laguna_rope_support_atlas_encoded_dispatch_count = 0;
+        g_laguna_rope_support_atlas_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_completed_generated_count = 0;
+        g_laguna_rope_atlas_completed_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_completed_consumed_family_count[0] = 0;
+        g_laguna_rope_atlas_completed_consumed_family_count[1] = 0;
+        g_laguna_rope_support_atlas_completed_generated_count = 0;
+        g_laguna_rope_support_atlas_completed_consumed_dispatch_count = 0;
+        g_laguna_rope_atlas_plan_mode = -2;
         g_laguna_store_kv_pipeline = nil;
         g_laguna_attention_pipeline = nil;
         g_laguna_stage_kv_pipeline = nil;
@@ -11656,6 +12445,7 @@ void ds4_gpu_cleanup(void) {
         g_model_buffer_cache = nil;
         g_transient_buffers = nil;
         g_pending_cbs = nil;
+        g_pending_laguna_atlas_evidence = nil;
         g_library = nil;
         g_queue = nil;
         g_device = nil;
@@ -36613,14 +37403,20 @@ static int ds4_gpu_laguna_head_rms_norm_rope_tensor_impl(
         selector_mode =
             ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
     }
+    /* Atlas selection is frozen by graph preflight.  The unplanned state is
+     * treated as disabled for legacy/direct callers; production Laguna plans
+     * always run the preflight before reaching this layer loop. */
+    const int atlas_plan_mode = ds4_gpu_laguna_rope_atlas_plan_mode();
+    const int atlas_mode = atlas_plan_mode == -1 ? -1 :
+                           (atlas_plan_mode > 0 ? 1 : 0);
     if (selector_mode < 0 || (selector_mode > 0 && !allow_selector)) {
         return 0;
     }
-    if (!g_initialized && !ds4_gpu_init()) return 0;
+    if (atlas_mode < 0) return 0;
     if (!x || !model_map || n_tokens == 0 || n_head == 0 ||
         head_dim == 0 || head_dim > 128u || n_rot == 0 ||
         n_rot > head_dim || (n_rot & 1u) != 0u ||
-        pos0 > UINT32_MAX - n_tokens ||
+        pos0 > UINT32_MAX - (n_tokens - 1u) ||
         !isfinite(freq_base) || freq_base <= 0.0f ||
         !isfinite(freq_scale) || freq_scale <= 0.0f ||
         !isfinite(ext_factor) || !isfinite(attn_factor) ||
@@ -36628,6 +37424,17 @@ static int ds4_gpu_laguna_head_rms_norm_rope_tensor_impl(
         !isfinite(eps) || eps <= 0.0f) {
         return 0;
     }
+    const int atlas_family = atlas_mode > 0 ?
+        ds4_gpu_laguna_rope_atlas_family_for_args(
+            n_rot, n_ctx_orig, freq_base, freq_scale, ext_factor,
+            attn_factor, beta_fast, beta_slow) : -1;
+    if (atlas_mode > 0 &&
+        (atlas_family < 0 || (atlas_family == 2 && !allow_selector) ||
+         (atlas_family != 2 && allow_selector) ||
+         !ds4_gpu_laguna_rope_atlas_geometry_ok(n_head, 0u, head_dim, n_rot))) {
+        return 0;
+    }
+    if (!g_initialized && !ds4_gpu_init()) return 0;
 
     const uint64_t values = (uint64_t)n_tokens * n_head * head_dim;
     const uint64_t bytes = values * sizeof(float);
@@ -36646,9 +37453,21 @@ static int ds4_gpu_laguna_head_rms_norm_rope_tensor_impl(
                                                             weight_offset,
                                                             weight_bytes,
                                                             &weight_inner);
-        id<MTLComputePipelineState> pipeline = ds4_gpu_hot_pipeline(
-            g_laguna_head_norm_rope_pipeline,
-            "kernel_laguna_head_rms_norm_rope_neox");
+        id<MTLComputePipelineState> pipeline = nil;
+        if (atlas_mode > 0) {
+            if (atlas_family == 2) {
+                if (!ds4_gpu_laguna_rope_support_atlas_prepare(n_tokens, pos0)) {
+                    return 0;
+                }
+            } else if (!ds4_gpu_laguna_rope_atlas_prepare(n_tokens, pos0)) {
+                return 0;
+            }
+            pipeline = g_laguna_head_norm_rope_atlas_pipeline;
+        } else {
+            pipeline = ds4_gpu_hot_pipeline(
+                g_laguna_head_norm_rope_pipeline,
+                "kernel_laguna_head_rms_norm_rope_neox");
+        }
         if (!xbuf || !weightbuf || !pipeline) return 0;
 
         ds4_gpu_laguna_norm_rope_args args = {
@@ -36665,19 +37484,50 @@ static int ds4_gpu_laguna_head_rms_norm_rope_tensor_impl(
             .attn_factor = attn_factor,
             .beta_fast = beta_fast,
             .beta_slow = beta_slow,
+            .rope_atlas_family = atlas_family >= 0 ?
+                (uint32_t)(atlas_family == 2 ? 0 : atlas_family) : 0u,
+            .rope_atlas_stride = atlas_family == 2 ? 1u : 2u,
         };
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
         id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        if (!enc) {
+            if (owned) {
+                (void)ds4_gpu_finish_command_buffer(
+                    cb, owned, "Laguna head norm/RoPE encoder unavailable");
+            }
+            return 0;
+        }
         [enc setComputePipelineState:pipeline];
         [enc setBytes:&args length:sizeof(args) atIndex:0];
         [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:1];
         [enc setBuffer:weightbuf offset:(NSUInteger)weight_inner atIndex:2];
+        if (atlas_mode > 0) {
+            [enc setBuffer:atlas_family == 2
+                         ? g_laguna_rope_support_atlas_buffer
+                         : g_laguna_rope_atlas_buffer
+                    offset:0 atIndex:3];
+        }
         [enc setThreadgroupMemoryLength:128u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(n_head, n_tokens, 1)
              threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
+        if (atlas_mode > 0) {
+            if (atlas_family == 2) {
+                g_laguna_rope_support_atlas_consumed_dispatch_count++;
+                ds4_gpu_laguna_atlas_current_cb_evidence()->support_consumed++;
+                ds4_gpu_laguna_rope_atlas_trace_consume(
+                    "support-single", 2u, n_tokens, pos0);
+            } else {
+                g_laguna_rope_atlas_consumed_dispatch_count++;
+                g_laguna_rope_atlas_consumed_family_count[atlas_family]++;
+                ds4_gpu_laguna_atlas_current_cb_evidence()->target_consumed++;
+                ds4_gpu_laguna_atlas_current_cb_evidence()->target_family[atlas_family]++;
+                ds4_gpu_laguna_rope_atlas_trace_consume(
+                    "single", (uint32_t)atlas_family, n_tokens, pos0);
+            }
+        }
         if (!ds4_gpu_finish_command_buffer(cb, owned, "Laguna head norm/RoPE")) return 0;
     }
     return 1;
@@ -36764,7 +37614,10 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         simd32_mode =
             ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
     }
+    const int atlas_plan = ds4_gpu_laguna_rope_atlas_plan_mode();
+    const int atlas_mode = atlas_plan == -1 ? -1 : (atlas_plan > 0 ? 1 : 0);
     if (simd32_mode < 0) return 0;
+    if (atlas_mode < 0) return 0;
     if (simd32_mode > 0 &&
         ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
                 n_q_head, n_k_head, head_dim, n_rot) != 1) {
@@ -36781,6 +37634,16 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         !isfinite(ext_factor) || !isfinite(attn_factor) ||
         !isfinite(beta_fast) || !isfinite(beta_slow) ||
         !isfinite(eps) || eps <= 0.0f) {
+        return 0;
+    }
+    const int atlas_family = atlas_mode > 0 ?
+        ds4_gpu_laguna_rope_atlas_family_for_args(
+            n_rot, n_ctx_orig, freq_base, freq_scale, ext_factor,
+            attn_factor, beta_fast, beta_slow) : -1;
+    if (atlas_mode > 0 && (atlas_family < 0 ||
+                           (atlas_family == 2 && n_q_head != 72u) ||
+                           !ds4_gpu_laguna_rope_atlas_geometry_ok(
+                               n_q_head, n_k_head, head_dim, n_rot))) {
         return 0;
     }
 
@@ -36809,10 +37672,28 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
             model_map, model_size, k_weight_offset, weight_bytes,
             &k_weight_inner);
         const bool use_simd32 = simd32_mode > 0;
+        const bool use_atlas = atlas_mode > 0;
         id<MTLComputePipelineState> pipeline = nil;
         const char *pipeline_name =
             "kernel_laguna_qk_head_rms_norm_rope_neox";
-        if (use_simd32) {
+        if (use_atlas) {
+            if (atlas_family == 2) {
+                if (!ds4_gpu_laguna_rope_support_atlas_prepare(n_tokens, pos0)) {
+                    return 0;
+                }
+            } else if (!ds4_gpu_laguna_rope_atlas_prepare(n_tokens, pos0)) {
+                return 0;
+            }
+            if (use_simd32) {
+                pipeline = g_laguna_qk_head_norm_rope_simd32_atlas_pipeline;
+                pipeline_name =
+                    "kernel_laguna_qk_head_rms_norm_rope_neox_simd32_atlas";
+            } else {
+                pipeline = g_laguna_qk_head_norm_rope_atlas_pipeline;
+                pipeline_name =
+                    "kernel_laguna_qk_head_rms_norm_rope_neox_atlas";
+            }
+        } else if (use_simd32) {
             id<MTLComputePipelineState> simd32_pipeline =
                 ds4_gpu_laguna_qk_head_norm_rope_simd32_pipeline();
             pipeline = simd32_pipeline;
@@ -36841,6 +37722,9 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
             .attn_factor = attn_factor,
             .beta_fast = beta_fast,
             .beta_slow = beta_slow,
+            .rope_atlas_family = atlas_family >= 0 ?
+                (uint32_t)(atlas_family == 2 ? 0 : atlas_family) : 0u,
+            .rope_atlas_stride = atlas_family == 2 ? 1u : 2u,
         };
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
@@ -36860,6 +37744,12 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         [enc setBuffer:q_weightbuf offset:(NSUInteger)q_weight_inner atIndex:3];
         [enc setBuffer:k_weightbuf offset:(NSUInteger)k_weight_inner atIndex:4];
         [enc setBytes:&n_q_head length:sizeof(n_q_head) atIndex:5];
+        if (use_atlas) {
+            [enc setBuffer:atlas_family == 2
+                         ? g_laguna_rope_support_atlas_buffer
+                         : g_laguna_rope_atlas_buffer
+                    offset:0 atIndex:6];
+        }
         [enc setThreadgroupMemoryLength:128u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(n_q_head + n_k_head, n_tokens, 1)
              threadsPerThreadgroup:MTLSizeMake(use_simd32 ? 32u : 128u,
@@ -36868,6 +37758,24 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
             /* This is encoded-dispatch evidence, not completion accounting:
              * graph callers may keep the command batch open. */
             g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count++;
+            ds4_gpu_laguna_atlas_current_cb_evidence()->qk_simd32++;
+        }
+        if (use_atlas) {
+            if (atlas_family == 2) {
+                g_laguna_rope_support_atlas_consumed_dispatch_count++;
+                ds4_gpu_laguna_atlas_current_cb_evidence()->support_consumed++;
+                ds4_gpu_laguna_rope_atlas_trace_consume(
+                    use_simd32 ? "support-paired-simd32" : "support-paired",
+                    2u, n_tokens, pos0);
+            } else {
+                g_laguna_rope_atlas_consumed_dispatch_count++;
+                g_laguna_rope_atlas_consumed_family_count[atlas_family]++;
+                ds4_gpu_laguna_atlas_current_cb_evidence()->target_consumed++;
+                ds4_gpu_laguna_atlas_current_cb_evidence()->target_family[atlas_family]++;
+                ds4_gpu_laguna_rope_atlas_trace_consume(
+                    use_simd32 ? "paired-simd32" : "paired",
+                    (uint32_t)atlas_family, n_tokens, pos0);
+            }
         }
         ds4_gpu_end_compute_encoder(cb, enc);
         if (!ds4_gpu_finish_command_buffer(
@@ -36894,6 +37802,10 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
 
 uint64_t ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count(void) {
     return g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count;
+}
+
+uint64_t ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count(void) {
+    return g_laguna_qk_head_norm_rope_simd32_completed_dispatch_count;
 }
 
 static int ds4_gpu_encode_laguna_flash_attention_decode(

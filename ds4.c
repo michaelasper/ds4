@@ -50149,13 +50149,23 @@ typedef struct {
     laguna_dense_q8_gate_up_swiglu_counters dense_q8_pending;
 #ifdef __APPLE__
     /* A deferred DFlash verifier keeps the target command buffer open while
-     * support features are appended.  Retain only the target's encoded-count
-     * snapshot until that command is actually completed. */
+     * support features are appended.  Retain encoded and completion-counter
+     * snapshots until that command is actually completed for diagnostics. */
     uint64_t qk_simd32_target_encoded_before;
+    uint64_t qk_simd32_target_completed_before;
     uint32_t qk_simd32_target_n_tokens;
     bool qk_simd32_target_capture;
     bool qk_simd32_target_verifier;
     bool qk_simd32_target_evidence_pending;
+    uint64_t rope_atlas_target_generated_before;
+    uint64_t rope_atlas_target_consumed_before;
+    uint64_t rope_atlas_target_family0_before;
+    uint64_t rope_atlas_target_family1_before;
+    uint64_t rope_atlas_target_generation_expected;
+    uint32_t rope_atlas_target_n_tokens;
+    bool rope_atlas_target_capture;
+    bool rope_atlas_target_verifier;
+    bool rope_atlas_target_evidence_pending;
 #endif
 } ds4_laguna_gpu_graph;
 
@@ -51571,8 +51581,8 @@ static bool dflash_graph_encode_inject(
         }
         if (ok) {
 #ifdef __APPLE__
-            /* Support K staging is deliberately stock and does not certify
-             * the paired target route when the selector is enabled. */
+            /* Support K staging uses the independent DFlash support atlas
+             * when the strict Laguna atlas plan is enabled. */
             ok = ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
 #else
             ok = ds4_gpu_laguna_head_rms_norm_rope_tensor(
@@ -51870,10 +51880,10 @@ static bool dflash_graph_draft_block(
 }
 
 #ifdef __APPLE__
-/* The explicit Q/K SIMD32 selector is a graph contract, not a kernel hint.
- * Validate it before any graph scratch, command buffer, or KV mutation.  The
- * Laguna S 2.1 model alternates 48- and 72-query-head layers, with 8 KV heads
- * and 64/128 rotary dimensions for global/SWA layers respectively. */
+/* The explicit Q/K SIMD32 and RoPE-atlas selectors are graph contracts, not
+ * kernel hints. Validate them before any graph scratch, command buffer, or KV
+ * mutation. The Laguna S 2.1 model alternates 48- and 72-query-head layers,
+ * with 8 KV heads and 64/128 rotary dimensions for global/SWA layers. */
 static bool laguna_metal_qk_norm_rope_simd32_preflight(void) {
     int mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
     if (mode == -2) {
@@ -51881,11 +51891,23 @@ static bool laguna_metal_qk_norm_rope_simd32_preflight(void) {
                 48u, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, 64u);
         mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
     }
+    int atlas_mode = ds4_gpu_laguna_rope_atlas_plan_mode_cached();
+    if (atlas_mode == -2) {
+        /* Select and allocate the immutable atlas graph plan once.  The
+         * backend owns strict environment parsing; later layer calls consume
+         * this cached result instead of reparsing getenv. */
+        if (ds4_gpu_laguna_rope_atlas_preflight(
+                    48u, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, 64u) < 0) {
+            return false;
+        }
+        atlas_mode = ds4_gpu_laguna_rope_atlas_plan_mode_cached();
+    }
     if (mode < 0) return false;
-    if (mode == 0) return true;
+    if (atlas_mode < 0) return false;
+    if (mode == 0 && atlas_mode == 0) return true;
     if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) {
         fprintf(stderr,
-                "ds4: Laguna Q/K norm/RoPE SIMD32 requested outside the "
+                "ds4: Laguna Q/K norm/RoPE experiment requested outside the "
                 "Laguna S 2.1 graph\n");
         return false;
     }
@@ -51893,9 +51915,16 @@ static bool laguna_metal_qk_norm_rope_simd32_preflight(void) {
     static const uint32_t n_rots[] = { 64u, 128u };
     for (size_t hi = 0; hi < sizeof(q_heads) / sizeof(q_heads[0]); hi++) {
         for (size_t ri = 0; ri < sizeof(n_rots) / sizeof(n_rots[0]); ri++) {
-            if (ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
-                        q_heads[hi], DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
-                        n_rots[ri]) != 1) {
+            if (mode > 0 &&
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                    q_heads[hi], DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
+                    n_rots[ri]) != 1) {
+                return false;
+            }
+            if (atlas_mode > 0 &&
+                ds4_gpu_laguna_rope_atlas_preflight(
+                    q_heads[hi], DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
+                    n_rots[ri]) != 1) {
                 return false;
             }
         }
@@ -51916,13 +51945,14 @@ static void laguna_metal_qk_norm_rope_simd32_trace_route(
             verifier ? 1 : 0);
 }
 
-/* The low-level count is intentionally only an encoded-dispatch counter.
- * Target proof must take its own snapshot immediately before the target graph
- * call and consume the delta only after that call's command buffer completes.
- * This excludes support work encoded before the target; dflash's post-target
- * support injector is K-only and does not increment this Q/K counter. */
+/* Target proof uses an encoded-count delta isolated immediately before the
+ * target plus command_waited.  The backend's completion-scoped counter is
+ * retained as lifecycle evidence/diagnostics, but a DFlash support command
+ * may complete between the target snapshot and target completion.  Support
+ * injection is K-only and does not increment the Q/K encoded counter. */
 static bool laguna_metal_qk_norm_rope_simd32_target_evidence(
         uint64_t    encoded_before,
+        uint64_t    completed_before,
         uint32_t    n_tokens,
         bool        capture,
         bool        verifier,
@@ -51933,32 +51963,44 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence(
         ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
     const uint64_t encoded_delta = encoded_after >= encoded_before ?
         encoded_after - encoded_before : UINT64_MAX;
+    const uint64_t completed_after =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count();
+    const uint64_t completed_delta = completed_after >= completed_before ?
+        completed_after - completed_before : UINT64_MAX;
+    /* The global completion counter is diagnostic only here: a DFlash
+     * support command may complete between the target snapshot and target
+     * completion.  The encoded target delta remains isolated by the snapshot
+     * immediately before this graph's target, while command_waited proves the
+     * owning command completed successfully. */
     const bool exact = encoded_delta == 48u;
     if (ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) {
         fprintf(stderr,
                 "ds4: Laguna Q/K norm/RoPE SIMD32 target_evidence "
                 "route=%s tokens=%u capture=%d verifier=%d "
-                "expected_target_dispatches=48 actual=%llu "
+                "expected_target_dispatches=48 encoded=%llu completed=%llu "
                 "completion=waited status=%s\n",
                 route ? route : "unknown",
                 n_tokens,
                 capture ? 1 : 0,
                 verifier ? 1 : 0,
                 (unsigned long long)encoded_delta,
+                (unsigned long long)completed_delta,
                 exact ? "ok" : "mismatch");
     }
     if (!exact) {
         if (encoded_delta == UINT64_MAX) {
             fprintf(stderr,
                     "ds4: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
-                    "counter moved backwards after waited %s\n",
+                    "encoded counter moved backwards after waited %s\n",
                     route ? route : "target");
         } else {
             fprintf(stderr,
                     "ds4: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
-                    "expected 48 layer dispatches after waited %s, actual=%llu\n",
+                    "expected 48 encoded layer dispatches after waited %s, "
+                    "actual=%llu (global completed delta=%llu)\n",
                     route ? route : "target",
-                    (unsigned long long)encoded_delta);
+                    (unsigned long long)encoded_delta,
+                    (unsigned long long)completed_delta);
         }
     }
     return exact;
@@ -51968,6 +52010,7 @@ static void laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
         ds4_laguna_gpu_graph *g) {
     if (!g) return;
     g->qk_simd32_target_encoded_before = 0;
+    g->qk_simd32_target_completed_before = 0;
     g->qk_simd32_target_n_tokens = 0;
     g->qk_simd32_target_capture = false;
     g->qk_simd32_target_verifier = false;
@@ -51979,6 +52022,7 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
     if (!g || !g->qk_simd32_target_evidence_pending) return true;
     const bool ok = laguna_metal_qk_norm_rope_simd32_target_evidence(
         g->qk_simd32_target_encoded_before,
+        g->qk_simd32_target_completed_before,
         g->qk_simd32_target_n_tokens,
         g->qk_simd32_target_capture,
         g->qk_simd32_target_verifier,
@@ -51986,6 +52030,182 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
         true);
     laguna_metal_qk_norm_rope_simd32_target_evidence_discard(g);
     return ok;
+}
+
+/* Atlas target proof is deliberately completion-scoped.  Support-model
+ * injection has its own counters and may complete before a deferred target;
+ * using the global encoded counters here would either certify discarded work
+ * or mix support with target.  A production Laguna graph consumes the two
+ * fixed families across all 48 layers (12 global64, 36 SWA128), and encodes
+ * exactly one target generation unless a completed same-key atlas is reused. */
+static bool laguna_metal_rope_atlas_target_evidence(
+        uint64_t generated_before,
+        uint64_t expected_generated,
+        uint64_t consumed_before,
+        uint64_t family0_before,
+        uint64_t family1_before,
+        uint32_t n_tokens,
+        bool capture,
+        bool verifier,
+        const char *route,
+        bool command_waited) {
+    const uint64_t generated_after =
+        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+    const uint64_t consumed_after =
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+    const uint64_t family0_after =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+    const uint64_t family1_after =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+    const uint64_t generated_delta = generated_after >= generated_before ?
+        generated_after - generated_before : UINT64_MAX;
+    const uint64_t consumed_delta = consumed_after >= consumed_before ?
+        consumed_after - consumed_before : UINT64_MAX;
+    const uint64_t family0_delta = family0_after >= family0_before ?
+        family0_after - family0_before : UINT64_MAX;
+    const uint64_t family1_delta = family1_after >= family1_before ?
+        family1_after - family1_before : UINT64_MAX;
+    const bool exact = command_waited && generated_delta == expected_generated &&
+        consumed_delta == 48u && family0_delta == 12u && family1_delta == 36u;
+    if (exact && ds4_gpu_laguna_rope_atlas_trace_enabled()) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas waited_target route=%s tokens=%u "
+                "capture=%d verifier=%d generation_expected=%llu "
+                "generation_completed=%llu consumers_completed=%llu "
+                "family0_completed=%llu family1_completed=%llu "
+                "completion=%s status=%s\n",
+                route ? route : "unknown",
+                n_tokens,
+                capture ? 1 : 0,
+                verifier ? 1 : 0,
+                (unsigned long long)expected_generated,
+                (unsigned long long)generated_delta,
+                (unsigned long long)consumed_delta,
+                (unsigned long long)family0_delta,
+                (unsigned long long)family1_delta,
+                command_waited ? "waited" : "not-waited",
+                exact ? "ok" : "mismatch");
+    }
+    if (!exact) {
+        fprintf(stderr,
+                "ds4: Laguna RoPE atlas target proof failed: expected "
+                "completed generation=%llu consumers=48 family0=12 family1=36 "
+                "after waited %s (actual generation=%llu consumers=%llu "
+                "family0=%llu family1=%llu)\n",
+                (unsigned long long)expected_generated,
+                route ? route : "target",
+                (unsigned long long)generated_delta,
+                (unsigned long long)consumed_delta,
+                (unsigned long long)family0_delta,
+                (unsigned long long)family1_delta);
+    }
+    return exact;
+}
+
+static void laguna_metal_rope_atlas_target_evidence_discard(
+        ds4_laguna_gpu_graph *g) {
+    if (!g) return;
+    g->rope_atlas_target_generated_before = 0;
+    g->rope_atlas_target_consumed_before = 0;
+    g->rope_atlas_target_family0_before = 0;
+    g->rope_atlas_target_family1_before = 0;
+    g->rope_atlas_target_generation_expected = 0;
+    g->rope_atlas_target_n_tokens = 0;
+    g->rope_atlas_target_capture = false;
+    g->rope_atlas_target_verifier = false;
+    g->rope_atlas_target_evidence_pending = false;
+}
+
+static void laguna_metal_rope_atlas_target_evidence_store(
+        ds4_laguna_gpu_graph *g,
+        uint64_t generated_before,
+        uint64_t expected_generated,
+        uint64_t consumed_before,
+        uint64_t family0_before,
+        uint64_t family1_before,
+        uint32_t n_tokens,
+        bool capture,
+        bool verifier) {
+    if (!g) return;
+    g->rope_atlas_target_generated_before = generated_before;
+    g->rope_atlas_target_generation_expected = expected_generated;
+    g->rope_atlas_target_consumed_before = consumed_before;
+    g->rope_atlas_target_family0_before = family0_before;
+    g->rope_atlas_target_family1_before = family1_before;
+    g->rope_atlas_target_n_tokens = n_tokens;
+    g->rope_atlas_target_capture = capture;
+    g->rope_atlas_target_verifier = verifier;
+    g->rope_atlas_target_evidence_pending = true;
+}
+
+static bool laguna_metal_rope_atlas_target_evidence_complete(
+        ds4_laguna_gpu_graph *g) {
+    if (!g || !g->rope_atlas_target_evidence_pending) return true;
+    const bool ok = laguna_metal_rope_atlas_target_evidence(
+        g->rope_atlas_target_generated_before,
+        g->rope_atlas_target_generation_expected,
+        g->rope_atlas_target_consumed_before,
+        g->rope_atlas_target_family0_before,
+        g->rope_atlas_target_family1_before,
+        g->rope_atlas_target_n_tokens,
+        g->rope_atlas_target_capture,
+        g->rope_atlas_target_verifier,
+        g->rope_atlas_target_verifier ? "speculative-verifier" : "prefill",
+        true);
+    laguna_metal_rope_atlas_target_evidence_discard(g);
+    return ok;
+}
+
+#ifdef DS4_TEST_HOOKS
+/* Test-only owner for the same deferred snapshot/complete state used by a
+ * speculative graph.  It is compiled into the focused test object only. */
+static ds4_laguna_gpu_graph g_laguna_test_rope_atlas_evidence;
+static bool g_laguna_test_rope_atlas_evidence_live;
+
+int ds4_laguna_test_rope_atlas_deferred_snapshot(
+        uint64_t generated_before,
+        uint64_t expected_generated,
+        uint64_t consumed_before,
+        uint64_t family0_before,
+        uint64_t family1_before,
+        uint32_t n_tokens) {
+    if (g_laguna_test_rope_atlas_evidence_live ||
+        !ds4_gpu_commands_active()) {
+        return 0;
+    }
+    memset(&g_laguna_test_rope_atlas_evidence, 0,
+           sizeof(g_laguna_test_rope_atlas_evidence));
+    laguna_metal_rope_atlas_target_evidence_store(
+        &g_laguna_test_rope_atlas_evidence,
+        generated_before,
+        expected_generated,
+        consumed_before,
+        family0_before,
+        family1_before,
+        n_tokens,
+        false,
+        false);
+    g_laguna_test_rope_atlas_evidence_live = true;
+    return 1;
+}
+
+int ds4_laguna_test_rope_atlas_deferred_complete(void) {
+    if (!g_laguna_test_rope_atlas_evidence_live ||
+        ds4_gpu_commands_active()) {
+        return 0;
+    }
+    const bool ok = laguna_metal_rope_atlas_target_evidence_complete(
+        &g_laguna_test_rope_atlas_evidence);
+    memset(&g_laguna_test_rope_atlas_evidence, 0,
+           sizeof(g_laguna_test_rope_atlas_evidence));
+    g_laguna_test_rope_atlas_evidence_live = false;
+    return ok ? 1 : 0;
+}
+#endif
+
+static void laguna_metal_target_evidence_discard(ds4_laguna_gpu_graph *g) {
+    laguna_metal_qk_norm_rope_simd32_target_evidence_discard(g);
+    laguna_metal_rope_atlas_target_evidence_discard(g);
 }
 
 static int laguna_metal_decode_residual_norm_mode(void);
@@ -52056,6 +52276,26 @@ static bool laguna_graph_forward_token(
     const uint64_t qk_simd32_target_encoded_before =
         qk_simd32_target_evidence ?
         ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
+    const uint64_t qk_simd32_target_completed_before =
+        qk_simd32_target_evidence ?
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count() : 0;
+    const bool rope_atlas_target_evidence =
+        ds4_gpu_laguna_rope_atlas_plan_mode_cached() > 0;
+    const uint64_t rope_atlas_target_generation_expected =
+        rope_atlas_target_evidence &&
+        !ds4_gpu_laguna_rope_atlas_target_reuse_ready(1u, pos) ? 1u : 0u;
+    const uint64_t rope_atlas_target_generated_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_generated_count() : 0;
+    const uint64_t rope_atlas_target_consumed_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() : 0;
+    const uint64_t rope_atlas_target_family0_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) : 0;
+    const uint64_t rope_atlas_target_family1_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) : 0;
     if (qk_simd32_target_evidence) {
         laguna_metal_qk_norm_rope_simd32_trace_route(
             "decode", 1u, capture != NULL, false);
@@ -52067,6 +52307,7 @@ static bool laguna_graph_forward_token(
         laguna_metal_router_simd_topk_trace_enabled();
     bool decode_residual_norm_completion_waited = false;
     bool qk_simd32_target_command_waited = false;
+    bool rope_atlas_target_command_waited = false;
     const int decode_residual_norm_mode =
         laguna_metal_decode_residual_norm_mode();
     if (decode_residual_norm_mode < 0) return false;
@@ -52695,6 +52936,7 @@ static bool laguna_graph_forward_token(
             } else {
                 decode_residual_norm_completion_waited = true;
                 qk_simd32_target_command_waited = true;
+                rope_atlas_target_command_waited = true;
                 laguna_dense_q8_gate_up_swiglu_report_waited(g);
             }
         } else {
@@ -52709,11 +52951,25 @@ static bool laguna_graph_forward_token(
     if (ok && qk_simd32_target_evidence) {
         ok = laguna_metal_qk_norm_rope_simd32_target_evidence(
             qk_simd32_target_encoded_before,
+            qk_simd32_target_completed_before,
             1u,
             capture != NULL,
             false,
             "decode",
             qk_simd32_target_command_waited);
+    }
+    if (ok && rope_atlas_target_evidence) {
+        ok = laguna_metal_rope_atlas_target_evidence(
+            rope_atlas_target_generated_before,
+            rope_atlas_target_generation_expected,
+            rope_atlas_target_consumed_before,
+            rope_atlas_target_family0_before,
+            rope_atlas_target_family1_before,
+            1u,
+            capture != NULL,
+            false,
+            "decode",
+            rope_atlas_target_command_waited);
     }
     if (ok && decode_residual_fusion &&
         decode_residual_norm_completion_waited &&
@@ -52891,13 +53147,25 @@ static bool laguna_graph_capture_final_feature(
     return ok;
 }
 
-/* Keep the ordinary Laguna prefill Q/K norm+RoPE dispatch choice opt-in.
- * Ordinary prefill and the exact verifier remain on their historical stock
- * paths unless this explicit experiment flag is set.  A literal "1" is
- * required so an unrelated exported value cannot silently change inference. */
+/* Keep the historical stock prefill Q/K norm+RoPE dispatch choice opt-in.
+ * A frozen SIMD32 or RoPE-atlas plan forces the paired route for every graph
+ * batch shape; otherwise only the explicit literal selector enables paired
+ * ordinary prefill. */
 static bool laguna_graph_prefill_qk_norm_rope_paired_requested(void) {
     const char *env = getenv("DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED");
     return env && strcmp(env, "1") == 0;
+}
+
+int ds4_laguna_graph_prefill_qk_norm_rope_paired_route(
+        int simd32_plan_mode,
+        int atlas_plan_mode,
+        int exact_q8_rows,
+        int gpu_draft_tokens,
+        int capture,
+        int explicit_request) {
+    if (simd32_plan_mode > 0 || atlas_plan_mode > 0) return 1;
+    return !exact_q8_rows && !gpu_draft_tokens && !capture &&
+           explicit_request != 0;
 }
 
 static bool laguna_graph_forward_batch(
@@ -52973,6 +53241,26 @@ static bool laguna_graph_forward_batch(
     const uint64_t qk_simd32_target_encoded_before =
         qk_simd32_target_evidence ?
         ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
+    const uint64_t qk_simd32_target_completed_before =
+        qk_simd32_target_evidence ?
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count() : 0;
+    const bool rope_atlas_target_evidence =
+        ds4_gpu_laguna_rope_atlas_plan_mode_cached() > 0;
+    const uint64_t rope_atlas_target_generation_expected =
+        rope_atlas_target_evidence &&
+        !ds4_gpu_laguna_rope_atlas_target_reuse_ready(n_tokens, pos0) ? 1u : 0u;
+    const uint64_t rope_atlas_target_generated_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_generated_count() : 0;
+    const uint64_t rope_atlas_target_consumed_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() : 0;
+    const uint64_t rope_atlas_target_family0_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) : 0;
+    const uint64_t rope_atlas_target_family1_before =
+        rope_atlas_target_evidence ?
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) : 0;
 #endif
     if (row_argmax_out &&
         (n_tokens > DS4_DFLASH_BLOCK_SIZE ||
@@ -53052,6 +53340,7 @@ static bool laguna_graph_forward_batch(
     const bool exact_q8_rows = row_argmax_out != NULL;
 #ifdef __APPLE__
     bool qk_simd32_target_command_waited = false;
+    bool rope_atlas_target_command_waited = false;
 #endif
     const int dense_q8_route =
         ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
@@ -53070,18 +53359,25 @@ static bool laguna_graph_forward_batch(
         DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK;
 #endif
     /* DFlash feature capture and GPU draft-token verification have their own
-     * cache/injection sequencing. Keep them on the established split path;
-     * only an ordinary, host-token prefill may opt into the paired dispatch. */
+     * cache/injection sequencing, but an enabled frozen SIMD32/atlas plan
+     * still forces the paired route so all production shapes are certified. */
 #ifdef __APPLE__
     const int simd32_plan_mode =
         ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    const int rope_atlas_plan_mode =
+        ds4_gpu_laguna_rope_atlas_plan_mode_cached();
 #else
     const int simd32_plan_mode = 0;
+    const int rope_atlas_plan_mode = 0;
 #endif
     const bool paired_qk_norm_rope =
-        simd32_plan_mode > 0 ||
-        (!exact_q8_rows && !gpu_draft_tokens && !capture &&
-         laguna_graph_prefill_qk_norm_rope_paired_requested());
+        ds4_laguna_graph_prefill_qk_norm_rope_paired_route(
+            simd32_plan_mode,
+            rope_atlas_plan_mode,
+            exact_q8_rows ? 1 : 0,
+            gpu_draft_tokens != NULL ? 1 : 0,
+            capture != NULL ? 1 : 0,
+            laguna_graph_prefill_qk_norm_rope_paired_requested() ? 1 : 0) != 0;
 #ifdef __APPLE__
     if (simd32_plan_mode > 0) {
         laguna_metal_qk_norm_rope_simd32_trace_route(
@@ -53528,7 +53824,10 @@ static bool laguna_graph_forward_batch(
         if (ok && live_progress) {
             ok = ds4_gpu_end_commands() != 0;
 #ifdef __APPLE__
-            if (ok) qk_simd32_target_command_waited = true;
+            if (ok) {
+                qk_simd32_target_command_waited = true;
+                rope_atlas_target_command_waited = true;
+            }
 #endif
             if (ok) {
                 const bool layer_is_all_work =
@@ -53670,6 +53969,8 @@ static bool laguna_graph_forward_batch(
                 ok = false;
             } else {
                 dense_q8_completion_waited = true;
+                qk_simd32_target_command_waited = true;
+                rope_atlas_target_command_waited = true;
             }
         } else {
             /* Never commit KV/attention work recorded before a later graph
@@ -53684,22 +53985,49 @@ static bool laguna_graph_forward_batch(
     if (ok && qk_simd32_target_evidence && !defer_completion) {
         ok = laguna_metal_qk_norm_rope_simd32_target_evidence(
             qk_simd32_target_encoded_before,
+            qk_simd32_target_completed_before,
             n_tokens,
             capture != NULL,
             row_argmax_out != NULL,
             row_argmax_out != NULL ? "speculative-verifier" : "prefill",
             qk_simd32_target_command_waited);
     }
+    if (ok && rope_atlas_target_evidence && !defer_completion) {
+        ok = laguna_metal_rope_atlas_target_evidence(
+            rope_atlas_target_generated_before,
+            rope_atlas_target_generation_expected,
+            rope_atlas_target_consumed_before,
+            rope_atlas_target_family0_before,
+            rope_atlas_target_family1_before,
+            n_tokens,
+            capture != NULL,
+            row_argmax_out != NULL,
+            row_argmax_out != NULL ? "speculative-verifier" : "prefill",
+            rope_atlas_target_command_waited);
+    }
     if (ok && qk_simd32_target_evidence && defer_completion) {
         g->qk_simd32_target_encoded_before =
             qk_simd32_target_encoded_before;
+        g->qk_simd32_target_completed_before =
+            qk_simd32_target_completed_before;
         g->qk_simd32_target_n_tokens = n_tokens;
         g->qk_simd32_target_capture = capture != NULL;
         g->qk_simd32_target_verifier = row_argmax_out != NULL;
         g->qk_simd32_target_evidence_pending = true;
-    } else if (!ok && qk_simd32_target_evidence) {
-        laguna_metal_qk_norm_rope_simd32_target_evidence_discard(g);
     }
+    if (ok && rope_atlas_target_evidence && defer_completion) {
+        laguna_metal_rope_atlas_target_evidence_store(
+            g,
+            rope_atlas_target_generated_before,
+            rope_atlas_target_generation_expected,
+            rope_atlas_target_consumed_before,
+            rope_atlas_target_family0_before,
+            rope_atlas_target_family1_before,
+            n_tokens,
+            capture != NULL,
+            row_argmax_out != NULL);
+    }
+    if (!ok) laguna_metal_target_evidence_discard(g);
 #endif
     ds4_gpu_tensor_free(last);
     if (ok && g->gpu_argmax_enabled && !defer_completion) {
@@ -65924,6 +66252,8 @@ static bool ds4_session_dflash_finish_capture(
      * after appending its K-only support feature.  Only now may the deferred
      * target snapshot be used as path evidence. */
     if (!laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
+            &s->laguna_graph) ||
+        !laguna_metal_rope_atlas_target_evidence_complete(
             &s->laguna_graph)) {
         s->dflash_synced = false;
         return false;
@@ -73602,16 +73932,28 @@ static int ds4_session_eval_dflash_speculative_argmax(
 #ifdef __APPLE__
             /* The speculative target was discarded before completion; never
              * let its pre-encode snapshot certify the replacement target. */
-            laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
-                &s->laguna_graph);
+            laguna_metal_target_evidence_discard(&s->laguna_graph);
 #endif
             target_preencoded = false;
         }
+#ifdef DS4_TEST_HOOKS
+        /* Fault-injection hook for the narrow confidence-read failure path:
+         * the speculative target may already have been encoded/deferred, so
+         * its evidence must be discarded before returning the error. */
+        const char *confidence_fault =
+            getenv("DS4_TEST_DFLASH_CONFIDENCE_READ_FAIL");
+        if (confidence_fault && strcmp(confidence_fault, "1") == 0) {
+            draft_read_ok = false;
+        }
+#endif
         if (!draft_read_ok ||
             (!target_preencoded && ds4_gpu_begin_commands() == 0)) {
             if (ds4_gpu_commands_active()) {
                 (void)ds4_gpu_discard_commands();
             }
+#ifdef __APPLE__
+            laguna_metal_target_evidence_discard(&s->laguna_graph);
+#endif
             s->dflash_synced = false;
             if (errlen) snprintf(err, errlen,
                                  "DFlash confidence cutoff failed");
@@ -73658,8 +74000,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
     if (!verify_ok || !inject_ok || !target_read_ok || !draft_read_ok) {
 #ifdef __APPLE__
-        laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
-            &s->laguna_graph);
+        laguna_metal_target_evidence_discard(&s->laguna_graph);
 #endif
         (void)laguna_graph_spec_restore(
             &s->laguna_graph, pos0, 0, n_rows);

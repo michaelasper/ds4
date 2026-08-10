@@ -528,8 +528,127 @@ struct ds4_metal_args_laguna_norm_rope {
     float    attn_factor;
     float    beta_fast;
     float    beta_slow;
-    uint32_t pad0;
+    uint32_t rope_atlas_family;
+    uint32_t rope_atlas_stride;
 };
+
+/* The atlas is deliberately a fixed two-family layout.  Each token owns two
+ * planes of 64 float2 coefficients, even though the global family consumes
+ * only its first 32 pairs.  Keeping the stride fixed makes the Q/K kernels a
+ * single integer add and leaves the unused global tail harmlessly untouched.
+ */
+struct ds4_metal_args_laguna_rope_atlas {
+    uint32_t n_tokens;
+    uint32_t pos0;
+    uint32_t n_families;
+    uint32_t atlas_stride;
+    uint32_t n_rot[2];
+    uint32_t n_ctx_orig[2];
+    float    freq_base[2];
+    float    freq_scale[2];
+    float    ext_factor[2];
+    float    attn_factor[2];
+    float    beta_fast[2];
+    float    beta_slow[2];
+};
+
+/* Keep angle construction in one source-level helper for the legacy kernels
+ * and the GPU atlas generators.  The atlas exactness claim is empirical for
+ * the validated Apple compiler/device matrix: this removes accidental source
+ * drift, while the compiler's selected pow/exp2 and cos/sin implementation
+ * remains the authority for the resulting bits. */
+static inline float2 laguna_rope_angle_coeff(
+        uint n_rot,
+        uint n_ctx_orig,
+        float freq_base,
+        float freq_scale,
+        float ext_factor,
+        float attn_factor,
+        float beta_fast,
+        float beta_slow,
+        uint position,
+        uint pair) {
+    float corr_dims[2] = {0.0f, 0.0f};
+    if (ext_factor != 0.0f) {
+        rope_yarn_corr_dims((int)n_rot, (int)n_ctx_orig, freq_base,
+                            beta_fast, beta_slow, corr_dims);
+    }
+    const int rel_i0 = (int)(pair * 2u);
+    const float inv_ndims = -1.0f / (float)n_rot;
+#ifdef DS4_METAL_ROPE_EXP2_LOG2
+    const float theta = (float)position *
+        exp2(inv_ndims * (float)rel_i0 * log2(freq_base));
+#else
+    const float theta = (float)position *
+        pow(freq_base, inv_ndims * (float)rel_i0);
+#endif
+    float cos_theta;
+    float sin_theta;
+    rope_yarn(theta, freq_scale, corr_dims, rel_i0, ext_factor,
+              attn_factor, &cos_theta, &sin_theta);
+    return float2(cos_theta, sin_theta);
+}
+
+/* Generate both exact Laguna S 2.1 angle families on-device.  The arithmetic
+ * intentionally mirrors laguna_head_rms_norm_rope_neox: the same pow (or
+ * opt-in exp2/log2), YaRN correction, and cos/sin calls are used, then the
+ * resulting float bits are stored for all 48 layer Q/K consumers. */
+kernel void kernel_laguna_rope_atlas(
+        constant ds4_metal_args_laguna_rope_atlas &args,
+        device float2 *atlas,
+        ushort lane [[thread_index_in_threadgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    const uint family = tgpig.y;
+    const uint token = tgpig.z;
+    if (family >= args.n_families || family >= 2u || token >= args.n_tokens) return;
+
+    const uint n_rot = args.n_rot[family];
+    const uint half_rot = n_rot >> 1u;
+    const uint pair = (uint)lane;
+    if (pair >= half_rot) return;
+
+    const float2 coeff = laguna_rope_angle_coeff(
+        n_rot,
+        args.n_ctx_orig[family],
+        args.freq_base[family],
+        args.freq_scale[family],
+        args.ext_factor[family],
+        args.attn_factor[family],
+        args.beta_fast[family],
+        args.beta_slow[family],
+        args.pos0 + token,
+        pair);
+    const uint64_t atlas_index =
+        ((uint64_t)token * args.atlas_stride + family) * 64u + pair;
+    atlas[atlas_index] = coeff;
+}
+
+/* The DFlash support path has its own one-family, compact atlas.  It uses the
+ * same argument arithmetic as the target generator, but never aliases the
+ * target two-plane allocation. */
+kernel void kernel_laguna_rope_support_atlas(
+        constant ds4_metal_args_laguna_rope_atlas &args,
+        device float2 *atlas,
+        ushort lane [[thread_index_in_threadgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    const uint token = tgpig.y;
+    if (token >= args.n_tokens || args.n_families == 0u) return;
+    const uint n_rot = args.n_rot[0];
+    const uint pair = (uint)lane;
+    if (pair >= (n_rot >> 1u)) return;
+
+    atlas[(uint64_t)token * 64u + pair] = laguna_rope_angle_coeff(
+        n_rot,
+        args.n_ctx_orig[0],
+        args.freq_base[0],
+        args.freq_scale[0],
+        args.ext_factor[0],
+        args.attn_factor[0],
+        args.beta_fast[0],
+        args.beta_slow[0],
+        args.pos0 + token,
+        pair);
+}
 
 static inline void laguna_head_rms_norm_rope_neox(
         constant ds4_metal_args_laguna_norm_rope &args,
@@ -560,38 +679,57 @@ static inline void laguna_head_rms_norm_rope_neox(
     const uint half_rot = args.n_rot >> 1u;
     if (tid >= half_rot) return;
 
-    float corr_dims[2] = {0.0f, 0.0f};
-    if (args.ext_factor != 0.0f) {
-        rope_yarn_corr_dims((int)args.n_rot,
-                            (int)args.n_ctx_orig,
-                            args.freq_base,
-                            args.beta_fast,
-                            args.beta_slow,
-                            corr_dims);
-    }
-    const int rel_i0 = (int)(tid * 2u);
-    const float inv_ndims = -1.0f / (float)args.n_rot;
-#ifdef DS4_METAL_ROPE_EXP2_LOG2
-    const float theta = (float)(args.pos0 + token) *
-        exp2(inv_ndims * (float)rel_i0 * log2(args.freq_base));
-#else
-    const float theta = (float)(args.pos0 + token) *
-        pow(args.freq_base, inv_ndims * (float)rel_i0);
-#endif
-    float cos_theta;
-    float sin_theta;
-    rope_yarn(theta,
-              args.freq_scale,
-              corr_dims,
-              rel_i0,
-              args.ext_factor,
-              args.attn_factor,
-              &cos_theta,
-              &sin_theta);
+    const float2 coeff = laguna_rope_angle_coeff(
+        args.n_rot, args.n_ctx_orig, args.freq_base, args.freq_scale,
+        args.ext_factor, args.attn_factor, args.beta_fast, args.beta_slow,
+        args.pos0 + token, tid);
     const float x0 = row[tid];
     const float x1 = row[tid + half_rot];
-    row[tid] = x0 * cos_theta - x1 * sin_theta;
-    row[tid + half_rot] = x0 * sin_theta + x1 * cos_theta;
+    row[tid] = x0 * coeff.x - x1 * coeff.y;
+    row[tid + half_rot] = x0 * coeff.y + x1 * coeff.x;
+}
+
+/* Atlas consumer.  Keep the RMSNorm reduction and its barriers byte-for-byte
+ * equivalent to the stock helper; only the expensive angle construction is
+ * replaced with a float2 load from the precomputed family plane. */
+static inline void laguna_head_rms_norm_rope_neox_atlas(
+        constant ds4_metal_args_laguna_norm_rope &args,
+        device float       *row,
+        device const float *weight,
+        device const float2 *atlas,
+        threadgroup float  *scratch [[threadgroup(0)]],
+        uint tid,
+        uint nth,
+        uint token,
+        uint atlas_stride) {
+    float ss = 0.0f;
+    for (uint i = tid; i < args.head_dim; i += nth) {
+        const float v = row[i];
+        ss += v * v;
+    }
+    scratch[tid] = ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint step = nth >> 1u; step != 0u; step >>= 1u) {
+        if (tid < step) scratch[tid] += scratch[tid + step];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float inv = rsqrt(scratch[0] / (float)args.head_dim + args.eps);
+    for (uint i = tid; i < args.head_dim; i += nth) {
+        row[i] = row[i] * inv * weight[i];
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+
+    const uint half_rot = args.n_rot >> 1u;
+    if (tid >= half_rot) return;
+    const uint family = args.rope_atlas_family;
+    const float2 coeff = atlas[((uint64_t)token * atlas_stride +
+                                (atlas_stride == 1u ? 0u : family)) *
+                               64u + tid];
+    const float x0 = row[tid];
+    const float x1 = row[tid + half_rot];
+    row[tid] = x0 * coeff.x - x1 * coeff.y;
+    row[tid + half_rot] = x0 * coeff.y + x1 * coeff.x;
 }
 
 /* A head_dim=128 specialization for Apple GPUs whose execution width is 32.
@@ -675,38 +813,86 @@ static inline void laguna_head_rms_norm_rope_neox_simd32(
         const uint base = bases[pair];
         if (base >= half_rot) continue;
 
-        float corr_dims[2] = {0.0f, 0.0f};
-        if (args.ext_factor != 0.0f) {
-            rope_yarn_corr_dims((int)args.n_rot,
-                                (int)args.n_ctx_orig,
-                                args.freq_base,
-                                args.beta_fast,
-                                args.beta_slow,
-                                corr_dims);
-        }
-        const int rel_i0 = (int)(base * 2u);
-        const float inv_ndims = -1.0f / (float)args.n_rot;
-#ifdef DS4_METAL_ROPE_EXP2_LOG2
-        const float theta = (float)(args.pos0 + token) *
-            exp2(inv_ndims * (float)rel_i0 * log2(args.freq_base));
-#else
-        const float theta = (float)(args.pos0 + token) *
-            pow(args.freq_base, inv_ndims * (float)rel_i0);
-#endif
-        float cos_theta;
-        float sin_theta;
-        rope_yarn(theta,
-                  args.freq_scale,
-                  corr_dims,
-                  rel_i0,
-                  args.ext_factor,
-                  args.attn_factor,
-                  &cos_theta,
-                  &sin_theta);
+        const float2 coeff = laguna_rope_angle_coeff(
+            args.n_rot, args.n_ctx_orig, args.freq_base, args.freq_scale,
+            args.ext_factor, args.attn_factor, args.beta_fast, args.beta_slow,
+            args.pos0 + token, base);
         const float x0 = row[base];
         const float x1 = row[base + half_rot];
-        row[base] = x0 * cos_theta - x1 * sin_theta;
-        row[base + half_rot] = x0 * sin_theta + x1 * cos_theta;
+        row[base] = x0 * coeff.x - x1 * coeff.y;
+        row[base + half_rot] = x0 * coeff.y + x1 * coeff.x;
+    }
+}
+
+/* SIMD32 atlas consumer.  This duplicates the reviewed reduction topology
+ * above so enabling the atlas never changes the SIMD32 RMSNorm arithmetic or
+ * its exact A/B contract. */
+static inline void laguna_head_rms_norm_rope_neox_simd32_atlas(
+        constant ds4_metal_args_laguna_norm_rope &args,
+        device float       *row,
+        device const float *weight,
+        device const float2 *atlas,
+        threadgroup float  *scratch,
+        ushort lane,
+        uint token,
+        uint atlas_stride) {
+    const uint i0 = (uint)lane;
+    const uint i1 = i0 + 32u;
+    const uint i2 = i0 + 64u;
+    const uint i3 = i0 + 96u;
+
+    float ss0 = 0.0f;
+    const float v0 = row[i0];
+    ss0 += v0 * v0;
+    scratch[i0] = ss0;
+    float ss1 = 0.0f;
+    const float v1 = row[i1];
+    ss1 += v1 * v1;
+    scratch[i1] = ss1;
+    float ss2 = 0.0f;
+    const float v2 = row[i2];
+    ss2 += v2 * v2;
+    scratch[i2] = ss2;
+    float ss3 = 0.0f;
+    const float v3 = row[i3];
+    ss3 += v3 * v3;
+    scratch[i3] = ss3;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    scratch[i0] = scratch[i0] + scratch[i2];
+    scratch[i1] = scratch[i1] + scratch[i3];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    scratch[i0] = scratch[i0] + scratch[i1];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint step = 16u; step != 0u; step >>= 1u) {
+        const float current = scratch[i0];
+        const float partner = simd_shuffle_down(current, (ushort)step);
+        if ((uint)lane < step) scratch[i0] = current + partner;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float total = scratch[0];
+    const float inv = rsqrt(total / 128.0f + args.eps);
+
+    row[i0] = row[i0] * inv * weight[i0];
+    row[i1] = row[i1] * inv * weight[i1];
+    row[i2] = row[i2] * inv * weight[i2];
+    row[i3] = row[i3] * inv * weight[i3];
+    threadgroup_barrier(mem_flags::mem_device);
+
+    const uint half_rot = args.n_rot >> 1u;
+    const uint bases[2] = {i0, i1};
+    const uint family = args.rope_atlas_family;
+    for (uint pair = 0u; pair < 2u; pair++) {
+        const uint base = bases[pair];
+        if (base >= half_rot) continue;
+        const float2 coeff =
+            atlas[((uint64_t)token * atlas_stride +
+                   (atlas_stride == 1u ? 0u : family)) * 64u + base];
+        const float x0 = row[base];
+        const float x1 = row[base + half_rot];
+        row[base] = x0 * coeff.x - x1 * coeff.y;
+        row[base + half_rot] = x0 * coeff.y + x1 * coeff.x;
     }
 }
 
@@ -797,6 +983,97 @@ kernel void kernel_laguna_qk_head_rms_norm_rope_neox_simd32(
     device const float *weight = is_q ? q_weight : k_weight;
     laguna_head_rms_norm_rope_neox_simd32(
         args, row, weight, scratch, lane, token);
+}
+
+/* Atlas single-tensor route.  It is used by the ordinary Laguna graph when
+ * paired Q/K is not selected and by DFlash's support-only K staging. */
+kernel void kernel_laguna_head_rms_norm_rope_neox_atlas(
+        constant ds4_metal_args_laguna_norm_rope &args,
+        device float       *x,
+        device const float *weight,
+        device const float2 *atlas,
+        threadgroup float  *scratch [[threadgroup(0)]],
+        uint tid [[thread_index_in_threadgroup]],
+        ushort3 ntg_u [[threads_per_threadgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    const uint head = tgpig.x;
+    const uint token = tgpig.y;
+    if (head >= args.n_head || token >= args.n_tokens ||
+        args.head_dim == 0u || args.n_rot > args.head_dim ||
+        (args.n_rot & 1u) != 0u || args.rope_atlas_family >= 2u) {
+        return;
+    }
+
+    device float *row = x +
+        ((uint64_t)token * args.n_head + head) * args.head_dim;
+    laguna_head_rms_norm_rope_neox_atlas(
+        args, row, weight, atlas, scratch, tid, ntg_u.x, token,
+        args.rope_atlas_stride);
+}
+
+/* Paired stock-topology atlas route. */
+kernel void kernel_laguna_qk_head_rms_norm_rope_neox_atlas(
+        constant ds4_metal_args_laguna_norm_rope &args,
+        device float       *q,
+        device float       *k,
+        device const float *q_weight,
+        device const float *k_weight,
+        constant uint      &n_q_head,
+        device const float2 *atlas,
+        threadgroup float  *scratch [[threadgroup(0)]],
+        uint tid [[thread_index_in_threadgroup]],
+        ushort3 ntg_u [[threads_per_threadgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    const uint combined_head = tgpig.x;
+    const uint token = tgpig.y;
+    if (combined_head >= args.n_head || token >= args.n_tokens ||
+        n_q_head >= args.n_head || args.head_dim == 0u ||
+        args.n_rot > args.head_dim || (args.n_rot & 1u) != 0u ||
+        args.rope_atlas_family >= 2u) {
+        return;
+    }
+
+    const bool is_q = combined_head < n_q_head;
+    const uint tensor_head = is_q ? combined_head : combined_head - n_q_head;
+    const uint tensor_n_head = is_q ? n_q_head : args.n_head - n_q_head;
+    device float *row = (is_q ? q : k) +
+        ((uint64_t)token * tensor_n_head + tensor_head) * args.head_dim;
+    device const float *weight = is_q ? q_weight : k_weight;
+    laguna_head_rms_norm_rope_neox_atlas(
+        args, row, weight, atlas, scratch, tid, ntg_u.x, token,
+        args.rope_atlas_stride);
+}
+
+/* Paired SIMD32 atlas route. */
+kernel void kernel_laguna_qk_head_rms_norm_rope_neox_simd32_atlas(
+        constant ds4_metal_args_laguna_norm_rope &args,
+        device float       *q,
+        device float       *k,
+        device const float *q_weight,
+        device const float *k_weight,
+        constant uint      &n_q_head,
+        device const float2 *atlas,
+        threadgroup float  *scratch [[threadgroup(0)]],
+        ushort lane [[thread_index_in_simdgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    const uint combined_head = tgpig.x;
+    const uint token = tgpig.y;
+    if (combined_head >= args.n_head || token >= args.n_tokens ||
+        n_q_head == 0u || n_q_head >= args.n_head || args.head_dim != 128u ||
+        args.n_rot == 0u || args.n_rot > args.head_dim ||
+        (args.n_rot & 1u) != 0u || args.rope_atlas_family >= 2u) {
+        return;
+    }
+
+    const bool is_q = combined_head < n_q_head;
+    const uint tensor_head = is_q ? combined_head : combined_head - n_q_head;
+    const uint tensor_n_head = is_q ? n_q_head : args.n_head - n_q_head;
+    device float *row = (is_q ? q : k) +
+        ((uint64_t)token * tensor_n_head + tensor_head) * args.head_dim;
+    device const float *weight = is_q ? q_weight : k_weight;
+    laguna_head_rms_norm_rope_neox_simd32_atlas(
+        args, row, weight, atlas, scratch, lane, token,
+        args.rope_atlas_stride);
 }
 
 struct ds4_metal_args_laguna_kv_store {
