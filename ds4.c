@@ -39452,6 +39452,23 @@ typedef struct {
     float prob;
 } sample_candidate;
 
+/* Session-owned candidate arena: the full-vocab candidate list is reused
+ * across tokens instead of a fresh multi-MB malloc/free per decode step. */
+typedef struct {
+    sample_candidate *v;
+    size_t cap;
+} sample_arena;
+
+static sample_candidate *sample_arena_reserve(sample_arena *a, size_t n) {
+    if (n > a->cap) {
+        size_t cap = a->cap ? a->cap : 1024;
+        while (cap < n) cap *= 2;
+        a->v = xrealloc(a->v, cap * sizeof(a->v[0]));
+        a->cap = cap;
+    }
+    return a->v;
+}
+
 static int sample_candidate_cmp_desc(const void *a, const void *b) {
     const sample_candidate *ca = a;
     const sample_candidate *cb = b;
@@ -39591,7 +39608,8 @@ static int sample_full_vocab(
         float        top_p,
         float        min_p,
         uint64_t    *rng,
-        float       *prob_scratch) {
+        float       *prob_scratch,
+        sample_arena *cands) {
     float max_logit = DS4_NEG_INF;
     int best = 0;
     uint32_t finite = 0;
@@ -39687,23 +39705,17 @@ static int sample_full_vocab(
         if (sum <= 0.0f || !isfinite(sum)) return best;
 
         const float min_prob = (1.0f / sum) * min_p;
+        cand = sample_arena_reserve(cands, finite);
         for (uint32_t i = 0; i < n_vocab; i++) {
             const float p = prob_scratch[i];
             if (p < 0.0f || p / sum < min_prob) continue;
-            n++;
-        }
-        if (n == 0) return best;
-        cand = xmalloc((size_t)n * sizeof(cand[0]));
-        uint32_t out = 0;
-        for (uint32_t i = 0; i < n_vocab; i++) {
-            const float p = prob_scratch[i];
-            if (p < 0.0f || p / sum < min_prob) continue;
-            cand[out++] = (sample_candidate){
+            cand[n++] = (sample_candidate){
                 .id = (int)i, .logit = logits[i], .prob = p
             };
         }
+        if (n == 0) return best;
     } else {
-        cand = xmalloc((size_t)finite * sizeof(cand[0]));
+        cand = sample_arena_reserve(cands, finite);
         for (uint32_t i = 0; i < n_vocab; i++) {
             const float v = logits[i];
             if (!isfinite(v)) continue;
@@ -39712,10 +39724,7 @@ static int sample_full_vocab(
             sum += p;
         }
     }
-    if (sum <= 0.0f || !isfinite(sum)) {
-        free(cand);
-        return best;
-    }
+    if (sum <= 0.0f || !isfinite(sum)) return best;
 
     qsort(cand, n, sizeof(cand[0]), sample_candidate_cmp_desc);
     const float min_prob = (cand[0].prob / sum) * (min_p > 0.0f ? min_p : 0.0f);
@@ -39728,23 +39737,14 @@ static int sample_full_vocab(
         filtered++;
         if (filtered_sum / sum >= top_p) break;
     }
-    if (filtered == 0) {
-        free(cand);
-        return best;
-    }
+    if (filtered == 0) return best;
 
     float r = sample_rng_f32(rng) * filtered_sum;
     for (uint32_t i = 0; i < filtered; i++) {
         r -= cand[i].prob;
-        if (r <= 0.0f) {
-            const int id = cand[i].id;
-            free(cand);
-            return id;
-        }
+        if (r <= 0.0f) return cand[i].id;
     }
-    const int id = cand[filtered - 1].id;
-    free(cand);
-    return id;
+    return cand[filtered - 1].id;
 }
 
 static int sample_top_p_min_p(
@@ -39755,7 +39755,8 @@ static int sample_top_p_min_p(
         float        top_p,
         float        min_p,
         uint64_t    *rng,
-        float       *prob_scratch) {
+        float       *prob_scratch,
+        sample_arena *cands) {
     if (temperature <= 0.0f) return sample_argmax(logits, n_vocab);
     if (top_p <= 0.0f || top_p > 1.0f) top_p = 1.0f;
     if (min_p < 0.0f) min_p = 0.0f;
@@ -39765,7 +39766,8 @@ static int sample_top_p_min_p(
             prob_scratch = xmalloc((size_t)n_vocab * sizeof(prob_scratch[0]));
         }
         const int token = sample_full_vocab(logits, n_vocab, temperature,
-                                            top_p, min_p, rng, prob_scratch);
+                                            top_p, min_p, rng, prob_scratch,
+                                            cands);
         if (owned_scratch) free(prob_scratch);
         return token;
     }
@@ -39825,8 +39827,12 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float top_p, float min_p, uint64_t *rng,
                            float *prob_scratch) {
     if (!logits || !rng || n_vocab == 0) return -1;
-    return sample_top_p_min_p(logits, n_vocab, temperature, top_k,
-                              top_p, min_p, rng, prob_scratch);
+    sample_arena cands = {0};
+    const int token = sample_top_p_min_p(logits, n_vocab, temperature, top_k,
+                                         top_p, min_p, rng, prob_scratch,
+                                         &cands);
+    free(cands.v);
+    return token;
 }
 
 int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
@@ -54095,6 +54101,7 @@ struct ds4_session {
     token_vec greedy_splitkv_segment;
     float *logits;
     float *sample_probs;
+    sample_arena sample_cands;
     double last_sample_ms;
     float *mtp_logits;
     int greedy_splitkv_anchor_len;
@@ -64241,6 +64248,7 @@ void ds4_session_free(ds4_session *s) {
     token_vec_free(&s->greedy_splitkv_segment);
     free(s->logits);
     free(s->sample_probs);
+    free(s->sample_cands.v);
 #ifndef DS4_NO_GPU
     free(s->glm_mtp_hc);
     free(s->glm_mtp_logits0);
@@ -66416,9 +66424,11 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
                       int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!logits || n_vocab <= 0) return 0;
     float *scratch = xmalloc((size_t)n_vocab * sizeof(scratch[0]));
+    sample_arena cands = {0};
     const int token = sample_top_p_min_p(logits, (uint32_t)n_vocab,
                                          temperature, top_k, top_p, min_p,
-                                         rng, scratch);
+                                         rng, scratch, &cands);
+    free(cands.v);
     free(scratch);
     return token;
 }
@@ -66426,12 +66436,14 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!s->engine->dflash_ready || !s->speculative_enabled) {
         return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
-                                  top_p, min_p, rng, s->sample_probs);
+                                  top_p, min_p, rng, s->sample_probs,
+                                  &s->sample_cands);
     }
     const double t0 = now_sec();
     const int token =
         sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
-                           top_p, min_p, rng, s->sample_probs);
+                           top_p, min_p, rng, s->sample_probs,
+                           &s->sample_cands);
     s->last_sample_ms = (now_sec() - t0) * 1000.0;
     return token;
 }
