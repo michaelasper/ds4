@@ -5171,15 +5171,44 @@ typedef struct {
     NSUInteger  smem;
 } ds4_gpu_mv_dispatch;
 
+/* Q8 decode dispatch selection is process/configuration constant while the
+ * Metal session is alive, but TP expert ownership can be suspended and
+ * resumed between calls.  Keep one lazy nsg result for each supported TP
+ * world instead of reparsing the environment at every Q8 call site. */
+typedef struct {
+    int16_t nsg;
+    BOOL    valid;
+} ds4_gpu_q8_mv_nsg_cache_entry;
+
+static ds4_gpu_q8_mv_nsg_cache_entry g_q8_mv_nsg_cache[2];
+#ifdef DS4_TEST_HOOKS
+static uint64_t g_q8_mv_nsg_probe_count;
+#endif
+
+static void ds4_gpu_q8_0_mv_dispatch_cache_reset(void) {
+    memset(g_q8_mv_nsg_cache, 0, sizeof(g_q8_mv_nsg_cache));
+#ifdef DS4_TEST_HOOKS
+    g_q8_mv_nsg_probe_count = 0;
+#endif
+}
+
 static int ds4_gpu_tp_world_is_two(void);
 
 static ds4_gpu_mv_dispatch ds4_gpu_make_q8_0_mv_dispatch(void) {
-    const uint64_t default_nsg = ds4_gpu_tp_world_is_two() ? 2u : 4u;
-    const int16_t nsg =
-        (int16_t)ds4_gpu_env_u64("DS4_METAL_Q8_MV_NSG", default_nsg, 1u, 8u);
+    const uint32_t world_slot = ds4_gpu_tp_world_is_two() ? 1u : 0u;
+    ds4_gpu_q8_mv_nsg_cache_entry *entry = &g_q8_mv_nsg_cache[world_slot];
+    if (!entry->valid) {
+        const uint64_t default_nsg = world_slot ? 2u : 4u;
+#ifdef DS4_TEST_HOOKS
+        ++g_q8_mv_nsg_probe_count;
+#endif
+        entry->nsg = (int16_t)ds4_gpu_env_u64(
+            "DS4_METAL_Q8_MV_NSG", default_nsg, 1u, 8u);
+        entry->valid = YES;
+    }
     return (ds4_gpu_mv_dispatch) {
         .function_name = "kernel_mul_mv_q8_0_f32",
-        .nsg = nsg,
+        .nsg = entry->nsg,
         .nr0 = 2,
         .smem = 32u * 2u * sizeof(float),
     };
@@ -6677,6 +6706,7 @@ int ds4_gpu_init(void) {
     if (g_initialized) return 1;
 
     @autoreleasepool {
+        ds4_gpu_q8_0_mv_dispatch_cache_reset();
         ds4_gpu_decode_pipeline_fast_cache_reset();
         g_pair_compressor_store_missing_count = 0;
         g_device = MTLCreateSystemDefaultDevice();
@@ -9978,6 +10008,26 @@ static int ds4_gpu_tp_world_is_two(void) {
     return g_tp_split_world == 2;
 }
 
+#ifdef DS4_TEST_HOOKS
+int ds4_gpu_q8_0_mv_dispatch_test_set_tp_world(int world) {
+    if (world != 1 && world != 2) return 0;
+    g_tp_split_world = (int32_t)world;
+    return 1;
+}
+
+int ds4_gpu_q8_0_mv_dispatch_test_nsg(void) {
+    return (int)ds4_gpu_make_q8_0_mv_dispatch().nsg;
+}
+
+void ds4_gpu_q8_0_mv_dispatch_test_reset(void) {
+    ds4_gpu_q8_0_mv_dispatch_cache_reset();
+}
+
+uint64_t ds4_gpu_q8_0_mv_dispatch_test_probe_count(void) {
+    return g_q8_mv_nsg_probe_count;
+}
+#endif
+
 /* Return the contiguous routed-expert range backed by this process. Rank 1
  * owns the high range and receives any odd-count remainder. */
 static void ds4_gpu_tp_expert_range(uint32_t n_total_expert,
@@ -10655,6 +10705,7 @@ int ds4_gpu_synchronize(void) {
 }
 
 void ds4_gpu_cleanup(void) {
+    ds4_gpu_q8_0_mv_dispatch_cache_reset();
     if (!g_initialized) return;
 
     @autoreleasepool {

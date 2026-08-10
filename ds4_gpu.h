@@ -357,6 +357,15 @@ void ds4_gpu_tp_shutdown(void);
  * Shared-event arrival is required in that mode to make each partial vector
  * CPU-visible before the transport thread reads it. */
 void ds4_gpu_tp_set_session_batch_mode(int enabled);
+#ifdef DS4_TEST_HOOKS
+/* Focused Q8 dispatch-cache oracle.  These hooks never initialize Metal and
+ * are omitted from production builds; they exercise the same selector used by
+ * the decode call sites and expose its deterministic parser-probe count. */
+int ds4_gpu_q8_0_mv_dispatch_test_set_tp_world(int world);
+int ds4_gpu_q8_0_mv_dispatch_test_nsg(void);
+void ds4_gpu_q8_0_mv_dispatch_test_reset(void);
+uint64_t ds4_gpu_q8_0_mv_dispatch_test_probe_count(void);
+#endif
 /* The coordinator-only DSpark support model does not participate in TP.
  * Suspend ownership only while encoding it; base-model verification remains
  * split across both ranks. */
