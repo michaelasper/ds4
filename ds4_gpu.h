@@ -2716,6 +2716,26 @@ int ds4_gpu_glm_router_select_batch_tensor(
         float                   expert_weight_scale,
         uint32_t                n_tokens);
 
+/* Opt-in fused decode router: F32 router-logit matvec + SIMD top-k select
+ * in one dispatch (single token).  Bit-identical to
+ * ds4_gpu_matmul_f32_decode_rows_exact_tensor followed by
+ * ds4_gpu_glm_router_select_batch_tensor on the supported shape class;
+ * fails closed (returns 0) outside it. */
+int ds4_gpu_laguna_router_decode_fused_tensor(
+        ds4_gpu_tensor       *selected,
+        ds4_gpu_tensor       *weights,
+        ds4_gpu_tensor       *probs,
+        ds4_gpu_tensor       *logits,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint64_t              bias_offset,
+        const ds4_gpu_tensor *x,
+        uint32_t              in_dim,
+        uint32_t              n_expert,
+        uint32_t              n_expert_used,
+        float                 expert_weight_scale);
+
 /* Laguna S2.1 decode-router SIMD top-k graph preflight.  Returns 0 when the
  * public opt-in is off, 1 when the exact 256/10/2.5 path is available, and
  * -1 for a malformed/conflicting request or unavailable source/PSO.  Env-off

@@ -222,6 +222,9 @@ static id<MTLBuffer> g_dsv4_hc_producer_last_completion;
 static id<MTLComputePipelineState> g_dsv4_router_weights_one_pipeline;
 static id<MTLComputePipelineState> g_glm_router_select_one_pipeline;
 static id<MTLComputePipelineState> g_glm_router_select_one_simd_pipeline;
+/* Optional fused Laguna decode router (logits + SIMD top-k in one
+ * dispatch).  Lazy like the SIMD selector above it. */
+static id<MTLComputePipelineState> g_laguna_router_decode_fused_pipeline;
 static id<MTLComputePipelineState> g_glm_kv_lora_rms_norm_pipeline;
 static id<MTLComputePipelineState> g_glm_k_b_project_pipeline;
 static id<MTLComputePipelineState> g_glm_store_compact_kv_pipeline;
@@ -10855,6 +10858,7 @@ void ds4_gpu_cleanup(void) {
         g_dsv4_router_weights_one_pipeline = nil;
         g_glm_router_select_one_pipeline = nil;
         g_glm_router_select_one_simd_pipeline = nil;
+        g_laguna_router_decode_fused_pipeline = nil;
         g_glm_kv_lora_rms_norm_pipeline = nil;
         g_glm_k_b_project_pipeline = nil;
         g_glm_store_compact_kv_pipeline = nil;
@@ -39434,6 +39438,146 @@ int ds4_gpu_glm_router_select_tensor(
         }
 
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM router select")) return 0;
+    }
+
+    return 1;
+}
+
+typedef struct {
+    uint32_t in_dim;
+    uint32_t n_expert;
+    uint32_t n_expert_used;
+    float    expert_weight_scale;
+    uint32_t stats_enabled;
+} ds4_gpu_laguna_router_fused_args;
+
+/* Opt-in fused Laguna decode router (DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED):
+ * the F32 router matvec and the SIMD top-k selection share one dispatch with
+ * the logits staged in threadgroup memory.  The matvec stage replicates the
+ * stock decode-row matvec reduction tree, so selected/weights/probs/logits
+ * are bit-identical to the two-dispatch path (see metal/dsv4_misc.metal).
+ * Fails closed outside the replicated shape class. */
+int ds4_gpu_laguna_router_decode_fused_tensor(
+        ds4_gpu_tensor       *selected,
+        ds4_gpu_tensor       *weights,
+        ds4_gpu_tensor       *probs,
+        ds4_gpu_tensor       *logits,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint64_t              bias_offset,
+        const ds4_gpu_tensor *x,
+        uint32_t              in_dim,
+        uint32_t              n_expert,
+        uint32_t              n_expert_used,
+        float                 expert_weight_scale) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    if (!selected || !weights || !probs || !logits || !x || !model_map) {
+        return 0;
+    }
+
+    const uint32_t nsg =
+        (in_dim + 127u) / 128u > 8u ? 8u : (in_dim + 127u) / 128u;
+    if (in_dim == 0u || (in_dim % 32u) != 0u || nsg != 8u ||
+        n_expert != 256u ||
+        n_expert_used == 0u || n_expert_used > n_expert) {
+        fprintf(stderr,
+                "ds4: Metal fused Laguna router received unsupported shape "
+                "in=%u experts=%u/%u\n", in_dim, n_expert, n_expert_used);
+        return 0;
+    }
+
+    @autoreleasepool {
+        id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
+        id<MTLBuffer> logitsbuf = ds4_gpu_tensor_buffer(logits);
+        id<MTLBuffer> selectedbuf = ds4_gpu_tensor_buffer(selected);
+        id<MTLBuffer> weightsbuf = ds4_gpu_tensor_buffer(weights);
+        id<MTLBuffer> probsbuf = ds4_gpu_tensor_buffer(probs);
+        const uint64_t x_bytes = (uint64_t)in_dim * sizeof(float);
+        const uint64_t expert_bytes = (uint64_t)n_expert * sizeof(float);
+        const uint64_t selected_bytes =
+            (uint64_t)n_expert_used * sizeof(int32_t);
+        const uint64_t weights_bytes =
+            (uint64_t)n_expert_used * sizeof(float);
+        if (!xbuf || !logitsbuf || !selectedbuf || !weightsbuf || !probsbuf ||
+            ds4_gpu_tensor_bytes(x) < x_bytes ||
+            ds4_gpu_tensor_bytes(logits) < expert_bytes ||
+            ds4_gpu_tensor_bytes(probs) < expert_bytes ||
+            ds4_gpu_tensor_bytes(selected) < selected_bytes ||
+            ds4_gpu_tensor_bytes(weights) < weights_bytes) {
+            fprintf(stderr, "ds4: Metal fused Laguna router received undersized buffers\n");
+            return 0;
+        }
+
+        if ((uint64_t)n_expert > UINT64_MAX / x_bytes) return 0;
+        const uint64_t weight_bytes = (uint64_t)n_expert * x_bytes;
+        if (weight_offset > model_size ||
+            weight_bytes > model_size - weight_offset ||
+            bias_offset > model_size ||
+            expert_bytes > model_size - bias_offset) {
+            fprintf(stderr, "ds4: Metal fused Laguna router range is outside the mapped model\n");
+            return 0;
+        }
+        uint64_t weight_inner = 0;
+        id<MTLBuffer> wbuf = ds4_gpu_wrap_model_range(
+            model_map, model_size, weight_offset, weight_bytes, &weight_inner);
+        uint64_t bias_inner = 0;
+        id<MTLBuffer> biasbuf = ds4_gpu_wrap_model_range(
+            model_map, model_size, bias_offset, expert_bytes, &bias_inner);
+        if (!wbuf || !biasbuf) return 0;
+
+        if (!g_laguna_router_decode_fused_pipeline) {
+            g_laguna_router_decode_fused_pipeline =
+                ds4_gpu_get_pipeline("kernel_laguna_router_decode_fused");
+        }
+        id<MTLComputePipelineState> pipeline = ds4_gpu_hot_pipeline(
+            g_laguna_router_decode_fused_pipeline,
+            "kernel_laguna_router_decode_fused");
+        if (!pipeline) return 0;
+        if (pipeline.threadExecutionWidth != 32u ||
+            pipeline.maxTotalThreadsPerThreadgroup < 256u) {
+            fprintf(stderr,
+                    "ds4: Metal fused Laguna router requires TEW=32 and "
+                    "maxThreads>=256 (got TEW=%lu maxThreads=%lu)\n",
+                    (unsigned long)pipeline.threadExecutionWidth,
+                    (unsigned long)pipeline.maxTotalThreadsPerThreadgroup);
+            return 0;
+        }
+        id<MTLBuffer> statsbuf = ds4_gpu_laguna_router_simd_topk_stats_buffer();
+        if (!statsbuf) return 0;
+
+        ds4_gpu_laguna_router_fused_args args = {
+            .in_dim = in_dim,
+            .n_expert = n_expert,
+            .n_expert_used = n_expert_used,
+            .expert_weight_scale = expert_weight_scale,
+            .stats_enabled = 0u,
+        };
+
+        int owned = 0;
+        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+        if (!cb) return 0;
+
+        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        [enc setComputePipelineState:pipeline];
+        [enc setBytes:&args length:sizeof(args) atIndex:0];
+        [enc setBuffer:wbuf offset:(NSUInteger)weight_inner atIndex:1];
+        [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:2];
+        [enc setBuffer:biasbuf offset:(NSUInteger)bias_inner atIndex:3];
+        [enc setBuffer:logitsbuf offset:ds4_gpu_tensor_offset(logits) atIndex:4];
+        [enc setBuffer:selectedbuf offset:ds4_gpu_tensor_offset(selected) atIndex:5];
+        [enc setBuffer:weightsbuf offset:ds4_gpu_tensor_offset(weights) atIndex:6];
+        [enc setBuffer:probsbuf offset:ds4_gpu_tensor_offset(probs) atIndex:7];
+        [enc setBuffer:statsbuf offset:0 atIndex:8];
+        [enc setThreadgroupMemoryLength:
+                (8u * 256u + 256u + 512u) * sizeof(float) +
+                256u * sizeof(uint32_t)
+               atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        ds4_gpu_end_compute_encoder(cb, enc);
+
+        if (!ds4_gpu_finish_command_buffer(cb, owned, "fused Laguna router decode")) return 0;
     }
 
     return 1;

@@ -50645,12 +50645,58 @@ static bool laguna_graph_routed_moe_decode_rows(
     return true;
 }
 
+/* Opt-in fused decode router (logits matvec + SIMD top-k in one dispatch).
+ * Literal-1 opt-in like the other DS4_METAL_LAGUNA_* routes; cached
+ * process-wide since the router runs once per layer per token.  Returns -1
+ * on an invalid value. */
+static int laguna_metal_router_decode_fused_mode(void) {
+    static int cache = -2;
+    if (cache == -2) {
+#if defined(__APPLE__)
+        const char *value = getenv("DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED");
+        if (!value || value[0] == '\0' || strcmp(value, "0") == 0) {
+            cache = 0;
+        } else if (strcmp(value, "1") == 0) {
+            cache = 1;
+        } else {
+            fprintf(stderr,
+                    "ds4: invalid DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED='%s'; "
+                    "expected unset, empty, 0, or literal 1\n", value);
+            cache = -1;
+        }
+#else
+        cache = 0;
+#endif
+    }
+    return cache;
+}
+
 static bool laguna_graph_router_decode_rows(
         ds4_laguna_gpu_graph    *g,
         const ds4_model         *model,
         const ds4_layer_weights *l,
         uint32_t                 n_rows) {
     if (!g || !model || !l || n_rows == 0u) return false;
+    const int fused_router = laguna_metal_router_decode_fused_mode();
+    if (fused_router < 0) return false;
+#if defined(__APPLE__)
+    if (fused_router > 0 && n_rows == 1u) {
+        return ds4_gpu_laguna_router_decode_fused_tensor(
+                   g->router_selected,
+                   g->router_weights,
+                   g->router_probs,
+                   g->router_logits,
+                   model->map,
+                   model->size,
+                   l->ffn_gate_inp->abs_offset,
+                   l->ffn_exp_probs_b->abs_offset,
+                   g->ffn_norm,
+                   (uint32_t)DS4_N_EMBD,
+                   DS4_N_EXPERT,
+                   DS4_N_EXPERT_USED,
+                   DS4_EXPERT_WEIGHT_SCALE) != 0;
+    }
+#endif
 #if defined(__APPLE__) || defined(DS4_ROCM_BUILD)
     return ds4_gpu_matmul_f32_decode_rows_exact_tensor(
                g->router_logits,

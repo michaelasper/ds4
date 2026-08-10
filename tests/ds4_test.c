@@ -8049,6 +8049,227 @@ static void test_metal_f16_rms_norm_mv_exact(void) {
     free(model_raw);
 }
 
+/* The fused Laguna decode router must reproduce the stock
+ * matmul_f32_decode_rows_exact + glm_router_select_batch pair bit-for-bit,
+ * including the staged-logits device copy and the non-finite fallback. */
+static void test_metal_laguna_router_fused_exact_case(
+        uint32_t in_dim,
+        uint32_t pattern,
+        uint32_t seed) {
+    const uint32_t n_expert = 256u;
+    const uint32_t n_used = 10u;
+    const float scale = 2.5f;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t weight_offset = page;
+    const uint64_t weight_bytes =
+        (uint64_t)n_expert * in_dim * sizeof(float);
+    const uint64_t bias_offset = weight_offset + weight_bytes;
+    const uint64_t bias_bytes = (uint64_t)n_expert * sizeof(float);
+    const uint64_t model_alloc = test_round_up_u64(
+        bias_offset + bias_bytes, page);
+    const uint64_t x_bytes = (uint64_t)in_dim * sizeof(float);
+    const uint64_t expert_bytes = (uint64_t)n_expert * sizeof(float);
+    const uint64_t selected_bytes = (uint64_t)n_used * sizeof(int32_t);
+    const uint64_t weights_bytes = (uint64_t)n_used * sizeof(float);
+
+    void *model_raw = NULL;
+    TEST_ASSERT(posix_memalign(
+                    &model_raw, (size_t)page, (size_t)model_alloc) == 0);
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
+    ds4_gpu_tensor *ref_logits = ds4_gpu_tensor_alloc(expert_bytes);
+    ds4_gpu_tensor *fused_logits = ds4_gpu_tensor_alloc(expert_bytes);
+    ds4_gpu_tensor *ref_probs = ds4_gpu_tensor_alloc(expert_bytes);
+    ds4_gpu_tensor *fused_probs = ds4_gpu_tensor_alloc(expert_bytes);
+    ds4_gpu_tensor *ref_selected = ds4_gpu_tensor_alloc(selected_bytes);
+    ds4_gpu_tensor *fused_selected = ds4_gpu_tensor_alloc(selected_bytes);
+    ds4_gpu_tensor *ref_weights = ds4_gpu_tensor_alloc(weights_bytes);
+    ds4_gpu_tensor *fused_weights = ds4_gpu_tensor_alloc(weights_bytes);
+    float *x_host = malloc((size_t)x_bytes);
+    float *ref_logits_host = malloc((size_t)expert_bytes);
+    float *fused_logits_host = malloc((size_t)expert_bytes);
+    float *ref_probs_host = malloc((size_t)expert_bytes);
+    float *fused_probs_host = malloc((size_t)expert_bytes);
+    int32_t *ref_selected_host = malloc((size_t)selected_bytes);
+    int32_t *fused_selected_host = malloc((size_t)selected_bytes);
+    float *ref_weights_host = malloc((size_t)weights_bytes);
+    float *fused_weights_host = malloc((size_t)weights_bytes);
+
+    TEST_ASSERT(model_raw && x && ref_logits && fused_logits && ref_probs &&
+                fused_probs && ref_selected && fused_selected &&
+                ref_weights && fused_weights && x_host && ref_logits_host &&
+                fused_logits_host && ref_probs_host && fused_probs_host &&
+                ref_selected_host && fused_selected_host && ref_weights_host &&
+                fused_weights_host);
+
+    const bool allocated = model_raw && x && ref_logits && fused_logits &&
+        ref_probs && fused_probs && ref_selected && fused_selected &&
+        ref_weights && fused_weights && x_host && ref_logits_host &&
+        fused_logits_host && ref_probs_host && fused_probs_host &&
+        ref_selected_host && fused_selected_host && ref_weights_host &&
+        fused_weights_host;
+    if (allocated) {
+        memset(model_raw, 0, (size_t)model_alloc);
+        float *w = (float *)((uint8_t *)model_raw + weight_offset);
+        float *bias = (float *)((uint8_t *)model_raw + bias_offset);
+        for (uint32_t r = 0; r < n_expert; r++) {
+            for (uint32_t i = 0; i < in_dim; i++) {
+                const uint32_t key =
+                    i * 41u + r * 787u + seed * 29u + ((i >> 3u) ^ (r * 7u));
+                float value =
+                    (float)((int)(key % 251u) - 125) / 4096.0f;
+                if (pattern == 2u && r == 3u) {
+                    value = 1.0e38f;
+                }
+                w[(uint64_t)r * in_dim + i] = value;
+            }
+            const uint32_t bkey = r * 53u + seed * 11u;
+            bias[r] = (float)((int)(bkey % 61u) - 30) / 128.0f;
+        }
+        for (uint32_t i = 0; i < in_dim; i++) {
+            const uint32_t key = i * 97u + seed * 13u + (i >> 4u);
+            const float sign = (key & 1u) ? -1.0f : 1.0f;
+            x_host[i] = pattern == 1u
+                ? 0.0f
+                : sign * (float)(1u + (key % 509u)) / 256.0f;
+        }
+
+        TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, model_alloc) != 0);
+        ds4_gpu_set_quality(false);
+
+        int ref_begun = ds4_gpu_begin_commands();
+        int ref_ok = ref_begun;
+        if (ref_ok) ref_ok = ds4_gpu_matmul_f32_decode_rows_exact_tensor(
+            ref_logits, model_raw, model_alloc, weight_offset,
+            in_dim, n_expert, x, 1u);
+        if (ref_ok) ref_ok = ds4_gpu_glm_router_select_batch_tensor(
+            ref_selected, ref_weights, ref_probs,
+            model_raw, model_alloc, bias_offset, ref_logits,
+            n_expert, n_used, scale, 1u);
+        const int ref_end = ref_begun ? ds4_gpu_end_commands() : 0;
+        TEST_ASSERT(ref_ok != 0);
+        TEST_ASSERT(ref_end != 0);
+
+        int fused_begun = ds4_gpu_begin_commands();
+        int fused_ok = fused_begun;
+        if (fused_ok) fused_ok = ds4_gpu_laguna_router_decode_fused_tensor(
+            fused_selected, fused_weights, fused_probs, fused_logits,
+            model_raw, model_alloc, weight_offset, bias_offset,
+            x, in_dim, n_expert, n_used, scale);
+        const int fused_end = fused_begun ? ds4_gpu_end_commands() : 0;
+        TEST_ASSERT(fused_ok != 0);
+        TEST_ASSERT(fused_end != 0);
+
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        ref_logits, 0, ref_logits_host, expert_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fused_logits, 0, fused_logits_host, expert_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        ref_probs, 0, ref_probs_host, expert_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fused_probs, 0, fused_probs_host, expert_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        ref_selected, 0, ref_selected_host, selected_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fused_selected, 0, fused_selected_host, selected_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        ref_weights, 0, ref_weights_host, weights_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fused_weights, 0, fused_weights_host, weights_bytes) != 0);
+
+        const test_float_compare_stats logits_stats = test_compare_float_bits(
+            ref_logits_host, fused_logits_host, (size_t)n_expert);
+        const test_float_compare_stats probs_stats = test_compare_float_bits(
+            ref_probs_host, fused_probs_host, (size_t)n_expert);
+        const test_float_compare_stats weights_stats = test_compare_float_bits(
+            ref_weights_host, fused_weights_host, (size_t)n_used);
+        fprintf(stderr,
+                "ds4-test: fused Laguna router exact in=%u pattern=%u "
+                "logits=%zu/%u probs=%zu/%u selected=%s weights=%zu/%u\n",
+                in_dim, pattern,
+                logits_stats.mismatch_count, n_expert,
+                probs_stats.mismatch_count, n_expert,
+                memcmp(ref_selected_host, fused_selected_host,
+                       (size_t)selected_bytes) == 0 ? "exact" : "MISMATCH",
+                weights_stats.mismatch_count, n_used);
+        TEST_ASSERT(logits_stats.mismatch_count == 0);
+        TEST_ASSERT(logits_stats.max_ulp == 0);
+        TEST_ASSERT(probs_stats.mismatch_count == 0);
+        TEST_ASSERT(weights_stats.mismatch_count == 0);
+        TEST_ASSERT(weights_stats.max_ulp == 0);
+        TEST_ASSERT(memcmp(ref_selected_host, fused_selected_host,
+                           (size_t)selected_bytes) == 0);
+    }
+
+    free(fused_weights_host);
+    free(ref_weights_host);
+    free(fused_selected_host);
+    free(ref_selected_host);
+    free(fused_probs_host);
+    free(ref_probs_host);
+    free(fused_logits_host);
+    free(ref_logits_host);
+    free(x_host);
+    ds4_gpu_tensor_free(fused_weights);
+    ds4_gpu_tensor_free(ref_weights);
+    ds4_gpu_tensor_free(fused_selected);
+    ds4_gpu_tensor_free(ref_selected);
+    ds4_gpu_tensor_free(fused_probs);
+    ds4_gpu_tensor_free(ref_probs);
+    ds4_gpu_tensor_free(fused_logits);
+    ds4_gpu_tensor_free(ref_logits);
+    ds4_gpu_tensor_free(x);
+    free(model_raw);
+}
+
+static void test_metal_laguna_router_fused_exact(void) {
+    /* The reference select must stay on the stock bitonic kernel here: the
+     * fused dispatch carries the SIMD body, and the pair is certified
+     * equivalent by the SIMD top-k suite. */
+    const char *simd_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK";
+    char *saved_simd = test_save_env(simd_env);
+    TEST_ASSERT(unsetenv(simd_env) == 0);
+
+    test_metal_laguna_router_fused_exact_case(4096u, 0u, 59u);
+    test_metal_laguna_router_fused_exact_case(4096u, 1u, 61u);
+    test_metal_laguna_router_fused_exact_case(4096u, 2u, 67u);
+    test_metal_laguna_router_fused_exact_case(2048u, 0u, 71u);
+
+    /* Outside the replicated shape class the fused dispatch fails closed. */
+    void *model_raw = NULL;
+    const uint64_t page = (uint64_t)getpagesize();
+    TEST_ASSERT(posix_memalign(&model_raw, (size_t)page, (size_t)page) == 0);
+    const uint64_t x_bytes = 4096u * sizeof(float);
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
+    ds4_gpu_tensor *logits = ds4_gpu_tensor_alloc(256u * sizeof(float));
+    ds4_gpu_tensor *probs = ds4_gpu_tensor_alloc(256u * sizeof(float));
+    ds4_gpu_tensor *selected = ds4_gpu_tensor_alloc(10u * sizeof(int32_t));
+    ds4_gpu_tensor *weights = ds4_gpu_tensor_alloc(10u * sizeof(float));
+    TEST_ASSERT(model_raw && x && logits && probs && selected && weights);
+    if (model_raw && x && logits && probs && selected && weights) {
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, page) != 0);
+        int begun = ds4_gpu_begin_commands();
+        TEST_ASSERT(begun != 0);
+        TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_tensor(
+                        selected, weights, probs, logits,
+                        model_raw, page, 0, 0,
+                        x, 4096u, 255u, 10u, 2.5f) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_tensor(
+                        selected, weights, probs, logits,
+                        model_raw, page, 0, 0,
+                        x, 1000u, 256u, 10u, 2.5f) == 0);
+        TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    }
+    ds4_gpu_tensor_free(weights);
+    ds4_gpu_tensor_free(selected);
+    ds4_gpu_tensor_free(probs);
+    ds4_gpu_tensor_free(logits);
+    ds4_gpu_tensor_free(x);
+    free(model_raw);
+
+    test_restore_env(simd_env, saved_simd);
+}
+
 static void test_metal_router_simd_finalize_exact(void) {
     typedef struct {
         const char *name;
@@ -9496,6 +9717,7 @@ static void test_metal_kernel_group(void) {
     test_metal_output_hc_weights4_exact();
     test_metal_hc_rms_scale_project_f16_exact();
     test_metal_f16_rms_norm_mv_exact();
+    test_metal_laguna_router_fused_exact();
     test_metal_router_simd_finalize_exact();
     test_metal_glm_router_simd_topk_exact();
     test_metal_router_weights_batch_exact();
