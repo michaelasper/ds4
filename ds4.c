@@ -5790,18 +5790,6 @@ static void weights_bind_output(
             w->output_norm = model_find_tensor(m, "output_norm.weight");
             w->output      = model_find_tensor(m, "output.weight");
         }
-    } else if (required) {
-        w->output_hc_base   = required_tensor(m, "output_hc_base.weight");
-        w->output_hc_fn     = required_tensor(m, "output_hc_fn.weight");
-        w->output_hc_scale  = required_tensor(m, "output_hc_scale.weight");
-        w->output_norm      = required_tensor(m, "output_norm.weight");
-        w->output           = required_tensor(m, "output.weight");
-    } else if (optional) {
-        w->output_hc_base   = model_find_tensor(m, "output_hc_base.weight");
-        w->output_hc_fn     = model_find_tensor(m, "output_hc_fn.weight");
-        w->output_hc_scale  = model_find_tensor(m, "output_hc_scale.weight");
-        w->output_norm      = model_find_tensor(m, "output_norm.weight");
-        w->output           = model_find_tensor(m, "output.weight");
     }
 
     if (optional &&
