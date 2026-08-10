@@ -72,33 +72,6 @@ typedef bool (*ds4_session_cancel_fn)(void *ud);
 
 #define DS4_SESSION_SYNC_INTERRUPTED 2
 
-typedef enum {
-    DS4_DISTRIBUTED_NONE = 0,
-    DS4_DISTRIBUTED_COORDINATOR,
-    DS4_DISTRIBUTED_WORKER,
-} ds4_distributed_role;
-
-typedef struct {
-    uint32_t start;
-    uint32_t end;
-    bool has_output;
-    bool set;
-} ds4_distributed_layers;
-
-typedef struct {
-    ds4_distributed_role role;
-    ds4_distributed_layers layers;
-    const char *listen_host;
-    int listen_port;
-    const char *coordinator_host;
-    int coordinator_port;
-    uint32_t prefill_chunk;
-    uint32_t prefill_window;
-    uint32_t activation_bits;
-    bool replay_check;
-    bool debug;
-} ds4_distributed_options;
-
 /* Tensor parallelism: two identical machines run the model in lockstep and
  * split the heavy per-layer matvecs, exchanging partial sums at gates inside
  * the graph (see misc/METAL_TENSOR_PARALLELISM.md).  Each rank keeps one
@@ -180,7 +153,6 @@ typedef struct {
     uint32_t load_layer_start;
     uint32_t load_layer_end;
     bool load_output;
-    ds4_distributed_options distributed;
     ds4_tp_options tp;
 } ds4_engine_options;
 
@@ -351,7 +323,6 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size);
 void ds4_session_free(ds4_session *s);
 int ds4_session_power(ds4_session *s);
 int ds4_session_set_power(ds4_session *s, int power_percent);
-bool ds4_session_is_distributed(ds4_session *s);
 void ds4_session_set_progress(ds4_session *s, ds4_session_progress_fn fn, void *ud);
 /* UI-only progress. It may report fine-grained progress inside a prefill chunk;
  * callers must not treat it as a durable KV checkpoint boundary. */
@@ -365,10 +336,6 @@ void ds4_session_set_cancel(ds4_session *s, ds4_session_cancel_fn fn, void *ud);
  * verifier, avoiding support-model work on every ordinary decode token. */
 void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled);
 void ds4_session_report_progress(ds4_session *s, const char *event, int current, int total);
-/* Distributed coordinator sessions return 1 when the full layer route is
- * available, 0 when it is still incomplete, and -1 for a local API error. */
-int ds4_session_distributed_route_ready(ds4_session *s, char *err, size_t errlen);
-
 typedef enum {
     DS4_SESSION_REWRITE_ERROR = -1,
     DS4_SESSION_REWRITE_OK = 0,
@@ -460,28 +427,6 @@ bool ds4_engine_has_output_head(ds4_engine *e);
 bool ds4_engine_has_mtp(ds4_engine *e);
 int ds4_engine_mtp_draft_tokens(ds4_engine *e);
 const ds4_tokens *ds4_session_tokens(ds4_session *s);
-
-/* Low-level graph slice entry points used by distributed inference.  The
- * transport/session routing logic lives in ds4_distributed.c. */
-int ds4_session_layer_slice_reset(ds4_session *s, char *err, size_t errlen);
-int ds4_session_eval_layer_slice(ds4_session *s,
-                                 const int *tokens,
-                                 uint32_t n_tokens,
-                                 uint32_t pos0,
-                                 uint32_t layer_start,
-                                 uint32_t layer_end,
-                                 const float *input_hc,
-                                 float *output_hc,
-                                 bool output_logits,
-                                 float *logits,
-                                 char *err,
-                                 size_t errlen);
-int ds4_session_eval_output_head_from_hc(ds4_session *s,
-                                         const float *hidden_hc,
-                                         uint32_t n_tokens,
-                                         float *logits,
-                                         char *err,
-                                         size_t errlen);
 
 /* Disk KV payload helpers.  HTTP/agent code owns the outer file header and
  * persistence policy; the engine owns the DS4-specific serialized graph state. */
