@@ -18363,16 +18363,13 @@ static bool metal_graph_stream_readahead_enabled(void) {
                               "DS4_METAL_DISABLE_STREAMING_READAHEAD")) {
         return false;
     }
-#ifdef DS4_ROCM_BUILD
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    /* Apple SSD streaming has F_RDADVISE-backed overlap by default.  Native
+     * CUDA and ROCm retain the historical opt-in behavior below. */
+    return true;
+#else
     return glm_graph_env_present("DS4_ROCM_ENABLE_STREAMING_READAHEAD",
                                  "DS4_METAL_ENABLE_STREAMING_READAHEAD");
-#else
-    /* Streaming layers sit in cold mmap pages; without F_RDADVISE the GPU
-     * faults them in page-by-page instead of streaming warm pages behind the
-     * current layer's compute. Every caller is an ssd_streaming path and the
-     * Metal-default non-streaming mmap path never reaches here, so default
-     * ON. DS4_METAL_DISABLE_STREAMING_READAHEAD is the diagnostic off-switch. */
-    return true;
 #endif
 }
 
@@ -18381,14 +18378,12 @@ static bool metal_graph_stream_madvise_willneed_enabled(void) {
                               "DS4_METAL_DISABLE_STREAMING_MADVISE_WILLNEED")) {
         return false;
     }
-#ifdef DS4_ROCM_BUILD
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    /* Keep the Metal default warm-page hint; CUDA and ROCm remain opt-in. */
+    return true;
+#else
     return glm_graph_env_present("DS4_ROCM_ENABLE_STREAMING_MADVISE_WILLNEED",
                                  "DS4_METAL_ENABLE_STREAMING_MADVISE_WILLNEED");
-#else
-    /* Same default as the readahead gate above: warm the next streaming
-     * layer's pages during the current layer's inference. Diagnostic
-     * off-switch: DS4_METAL_DISABLE_STREAMING_MADVISE_WILLNEED. */
-    return true;
 #endif
 }
 
@@ -18534,36 +18529,66 @@ static void metal_graph_stream_readahead_range(
             NULL);
 }
 
-static void metal_graph_stream_readahead_spans(
+typedef void (*metal_graph_stream_readahead_sink_fn)(uint64_t,
+                                                      uint64_t,
+                                                      void *);
+
+static uint32_t metal_graph_stream_coalesce_spans(
         const ds4_model              *model,
-        const ds4_model_map_span_vec *spans) {
-    if (!spans) return;
-    /* Spans arrive sorted but big routed-expert tensors stay split into
-     * isolate runs for Metal buffer aliasing. Readahead hints carry no
-     * aliasing semantics, so coalesce adjacent/overlapping runs first: the
-     * kernel sees one F_RDADVISE/madvise range per run instead of one syscall
-     * pair per tensor span. */
+        const ds4_model_map_span_vec *spans,
+        metal_graph_stream_readahead_sink_fn sink,
+        void                          *sink_ud) {
+    if (!spans || !sink || (spans->len != 0 && !spans->v)) return 0;
+
+    bool have_run = false;
     uint64_t run_off = 0;
     uint64_t run_end = 0;
+    uint32_t runs = 0;
     for (uint32_t i = 0; i < spans->len; i++) {
         const uint64_t off = spans->v[i].off;
         const uint64_t end = spans->v[i].end;
         if (end <= off) continue;
-        if (run_end == 0 || off > run_end) {
-            if (run_end != 0) {
-                metal_graph_stream_readahead_range(model,
-                                                   run_off,
-                                                   run_end - run_off);
+        /* Range validation normally happens at the syscall boundary.  Drop
+         * invalid members before coalescing so one corrupt span cannot widen
+         * a valid neighboring run into an all-or-nothing rejected range. */
+        if (model && (off > model->size || end > model->size)) continue;
+        if (!have_run || off > run_end) {
+            if (have_run) {
+                sink(run_off, run_end - run_off, sink_ud);
+                runs++;
             }
             run_off = off;
             run_end = end;
+            have_run = true;
         } else if (end > run_end) {
             run_end = end;
         }
     }
-    if (run_end != 0) {
-        metal_graph_stream_readahead_range(model, run_off, run_end - run_off);
+    if (have_run) {
+        sink(run_off, run_end - run_off, sink_ud);
+        runs++;
     }
+    return runs;
+}
+
+static void metal_graph_stream_readahead_range_sink(uint64_t offset,
+                                                     uint64_t size,
+                                                     void    *sink_ud) {
+    metal_graph_stream_readahead_range((const ds4_model *)sink_ud,
+                                       offset,
+                                       size);
+}
+
+static void metal_graph_stream_readahead_spans(
+        const ds4_model              *model,
+        const ds4_model_map_span_vec *spans) {
+    /* Readahead hints carry no aliasing semantics, so coalesce adjacent and
+     * overlapping runs before issuing one syscall pair per run. */
+    (void)metal_graph_stream_coalesce_spans(
+            model,
+            spans,
+            metal_graph_stream_readahead_range_sink,
+            (void *)model);
 }
 
 typedef struct {
@@ -19337,10 +19362,36 @@ static bool metal_graph_stream_pagein_touch_range(
     return true;
 }
 
-/* Opt-in pread page-in read chunk. Each page-in worker reads through its own
- * reusable scratch (owned by the job, one per thread) instead of an xmalloc
- * per tensor range; 4 MiB reads keep syscall count low on multi-GiB spans. */
+/* Each page-in worker reads through its own reusable scratch (owned by the
+ * job, one per thread) instead of an xmalloc per tensor range.  Keep the
+ * larger chunk on Apple where this path is the default; native CUDA/ROCm keep
+ * the historical 1 MiB opt-in footprint. */
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
 #define METAL_GRAPH_STREAM_PREAD_CHUNK (4u * 1024u * 1024u)
+#else
+#define METAL_GRAPH_STREAM_PREAD_CHUNK (1u * 1024u * 1024u)
+#endif
+
+#ifdef DS4_TEST_HOOKS
+typedef ssize_t (*metal_graph_stream_test_pread_fn)(int,
+                                                     void *,
+                                                     size_t,
+                                                     off_t);
+static metal_graph_stream_test_pread_fn g_metal_graph_stream_test_pread;
+static uint32_t g_metal_graph_stream_test_prepare_join_calls;
+#endif
+
+static ssize_t metal_graph_stream_pread_call(int fd,
+                                              void *buf,
+                                              size_t count,
+                                              off_t offset) {
+#ifdef DS4_TEST_HOOKS
+    if (g_metal_graph_stream_test_pread) {
+        return g_metal_graph_stream_test_pread(fd, buf, count, offset);
+    }
+#endif
+    return pread(fd, buf, count, offset);
+}
 
 static void metal_graph_stream_pagein_job_free_pread_scratch(
         metal_graph_stream_pagein_job *job) {
@@ -19378,7 +19429,10 @@ static bool metal_graph_stream_pread_range(
             (size_t)METAL_GRAPH_STREAM_PREAD_CHUNK : (size_t)rem;
         ssize_t nread;
         do {
-            nread = pread(model->fd, scratch, want, (off_t)pos);
+            nread = metal_graph_stream_pread_call(model->fd,
+                                                  scratch,
+                                                  want,
+                                                  (off_t)pos);
         } while (nread < 0 && errno == EINTR);
         if (nread <= 0) {
             ok = false;
@@ -19973,6 +20027,13 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
 
 static bool metal_graph_stream_prefill_layer_pagein_join(
         metal_graph_stream_pagein_job *job) {
+#ifdef DS4_TEST_HOOKS
+    if (job && job->started) {
+        /* Test-only accounting makes cleanup probes assert every active job
+         * is joined; it has no production state or synchronization effect. */
+        g_metal_graph_stream_test_prepare_join_calls++;
+    }
+#endif
     if (!job || !job->started) return true;
     const double t0 = job->profile ? now_sec() : 0.0;
     int rc = 0;
@@ -20150,6 +20211,40 @@ static bool metal_graph_stream_prepare_join_all(
             ok = false;
         }
         memset(&slots[i], 0, sizeof(slots[i]));
+    }
+    return ok;
+}
+
+/* All layer-major prefill exits after prepare workers are started funnel
+ * through this cleanup.  In particular, the initial ROCm full-layer loader
+ * can fail after layer 0's prepare job is live; returning directly there
+ * leaves a stack-owned job exposed to the worker and leaks its scratch. */
+#ifdef DS4_ROCM_BUILD
+static bool metal_graph_stream_prefill_layer_cleanup(
+        rocm_graph_stream_layer_expert_load *rocm_full_layer_load,
+        metal_graph_stream_prepare_slot      *layer_prepare_slots,
+        uint32_t                              n_prepare_slots,
+        bool                                  synchronize) {
+#else
+static bool metal_graph_stream_prefill_layer_cleanup(
+        metal_graph_stream_prepare_slot *layer_prepare_slots,
+        uint32_t                         n_prepare_slots,
+        bool                             synchronize) {
+#endif
+    bool ok = true;
+#ifdef DS4_ROCM_BUILD
+    if (!rocm_graph_stream_layer_expert_load_join(rocm_full_layer_load)) {
+        ok = false;
+    }
+#endif
+    if (!metal_graph_stream_prepare_join_all(layer_prepare_slots,
+                                             n_prepare_slots)) {
+        ok = false;
+    }
+    if (synchronize && ds4_gpu_synchronize() == 0) {
+        fprintf(stderr,
+                "ds4: Metal synchronize after layer-major prefill cleanup failed\n");
+        ok = false;
     }
     return ok;
 }
@@ -21595,6 +21690,40 @@ bad_line:
     return true;
 }
 
+static const uint16_t (*metal_graph_streaming_expert_builtin_hotlist(
+        uint32_t *count_out))[2] {
+    if (count_out) *count_out = 0;
+    if (g_ds4_shape.variant == DS4_VARIANT_PRO) {
+        if (count_out) *count_out = ds4_default_streaming_hotlist_pro_count;
+        return ds4_default_streaming_hotlist_pro;
+    }
+    if (g_ds4_shape.variant == DS4_VARIANT_FLASH) {
+        if (count_out) *count_out = ds4_default_streaming_hotlist_flash_count;
+        return ds4_default_streaming_hotlist_flash;
+    }
+    if (g_ds4_shape.variant == DS4_VARIANT_GLM52) {
+        if (count_out) *count_out = ds4_default_streaming_hotlist_glm52_count;
+        return ds4_default_streaming_hotlist_glm52;
+    }
+    return NULL;
+}
+
+static uint32_t metal_graph_streaming_expert_builtin_target(
+        uint32_t requested) {
+    uint32_t hotlist_count = 0;
+    (void)metal_graph_streaming_expert_builtin_hotlist(&hotlist_count);
+    return requested < hotlist_count ? requested : hotlist_count;
+}
+
+static bool metal_graph_streaming_expert_hotlist_should_skip(
+        bool     from_file,
+        bool     refresh_builtin_glm,
+        uint32_t current_count,
+        uint32_t target_count) {
+    return !from_file && !refresh_builtin_glm &&
+           current_count >= target_count;
+}
+
 static bool metal_graph_streaming_expert_hotlist_load_default(
         uint32_t    max_entries,
         int32_t     experts[DS4_MAX_LAYER][DS4_MAX_EXPERT],
@@ -21605,21 +21734,14 @@ static bool metal_graph_streaming_expert_hotlist_load_default(
     if (max_entries == 0 || !experts || !priorities || !counts || !seen || !loaded_out) {
         return false;
     }
-    const uint16_t (*hotlist)[2] = NULL;
     uint32_t hotlist_count = 0;
-    if (g_ds4_shape.variant == DS4_VARIANT_PRO) {
-        hotlist = ds4_default_streaming_hotlist_pro;
-        hotlist_count = ds4_default_streaming_hotlist_pro_count;
-    } else if (g_ds4_shape.variant == DS4_VARIANT_FLASH) {
-        hotlist = ds4_default_streaming_hotlist_flash;
-        hotlist_count = ds4_default_streaming_hotlist_flash_count;
-    } else if (g_ds4_shape.variant == DS4_VARIANT_GLM52) {
-        hotlist = ds4_default_streaming_hotlist_glm52;
-        hotlist_count = ds4_default_streaming_hotlist_glm52_count;
-    } else {
+    const uint16_t (*hotlist)[2] =
+        metal_graph_streaming_expert_builtin_hotlist(&hotlist_count);
+    if (!hotlist) {
         *loaded_out = 0;
         return true;
     }
+    if (max_entries > hotlist_count) max_entries = hotlist_count;
     uint32_t loaded = 0;
     for (uint32_t i = 0;
          i < hotlist_count && loaded < max_entries;
@@ -21638,6 +21760,23 @@ static bool metal_graph_streaming_expert_hotlist_load_default(
     }
     *loaded_out = loaded;
     return true;
+}
+
+static uint32_t metal_graph_streaming_expert_auto_preload_cap(
+        const char *env) {
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    uint32_t cap = 8192;
+#else
+    uint32_t cap = 4096;
+#endif
+    if (env && env[0]) {
+        char *end = NULL;
+        unsigned long v = strtoul(env, &end, 10);
+        if (end != env && *end == '\0') {
+            cap = v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
+        }
+    }
+    return cap;
 }
 
 static uint32_t metal_graph_streaming_expert_preload_count(
@@ -21661,26 +21800,9 @@ static uint32_t metal_graph_streaming_expert_preload_count(
          * thousands of preads into shared Metal buffers and trip the system
          * watchdog before decode begins. ROCm GLM52 uses indexed batch prefill
          * by default, which already populates the cache; explicit CLI preload
-         * counts and auto-preload env caps bypass that default.
-         *
-         * The Metal default depth is 8192: the bundled hotlists are
-         * hit-sorted, so a deeper seed covers more of the first-token expert
-         * working set and drops cold miss-preads. The result is still clamped
-         * to the cache byte budget below, and
-         * DS4_METAL_STREAMING_EXPERT_AUTO_PRELOAD_CAP overrides the depth as
-         * a diagnostic. */
-#ifdef DS4_ROCM_BUILD
-        uint32_t cap = 4096;
-#else
-        uint32_t cap = 8192;
-#endif
-        if (env && env[0]) {
-            char *end = NULL;
-            unsigned long v = strtoul(env, &end, 10);
-            if (end != env && *end == '\0') {
-                cap = v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
-            }
-        }
+         * counts and auto-preload env caps bypass that default. */
+        const uint32_t cap =
+            metal_graph_streaming_expert_auto_preload_cap(env);
         if (cap != 0 && preload > cap) preload = cap;
     }
     if (preload > cache_budget) preload = cache_budget;
@@ -21734,17 +21856,12 @@ static bool metal_graph_seed_streaming_expert_cache_layer_from_mapped_hotlist(
         metal_graph_streaming_expert_preload_count(g, cache_budget);
     if (preload_count == 0) return true;
 
-    const uint16_t (*hotlist)[2] = NULL;
     uint32_t hotlist_count = 0;
-    if (g_ds4_shape.variant == DS4_VARIANT_FLASH) {
-        hotlist = ds4_default_streaming_hotlist_flash;
-        hotlist_count = ds4_default_streaming_hotlist_flash_count;
-    } else {
-        hotlist = ds4_default_streaming_hotlist_pro;
-        hotlist_count = ds4_default_streaming_hotlist_pro_count;
-    }
-    const uint32_t target_count = preload_count < hotlist_count ?
-        preload_count : hotlist_count;
+    const uint16_t (*hotlist)[2] =
+        metal_graph_streaming_expert_builtin_hotlist(&hotlist_count);
+    const uint32_t target_count = metal_graph_streaming_expert_builtin_target(
+            preload_count);
+    if (!hotlist || target_count == 0) return true;
     if (ds4_gpu_stream_expert_cache_current_count() >= target_count) {
         return true;
     }
@@ -21754,12 +21871,12 @@ static bool metal_graph_seed_streaming_expert_cache_layer_from_mapped_hotlist(
     uint32_t n = 0;
     uint32_t loaded = 0;
     for (uint32_t i = 0;
-         i < hotlist_count && loaded < preload_count;
+         i < hotlist_count && loaded < target_count;
          i++) {
         const uint32_t hot_layer = hotlist[i][0];
         const uint32_t hot_expert = hotlist[i][1];
         if (hot_layer >= DS4_N_LAYER || hot_expert >= DS4_N_EXPERT) continue;
-        const uint32_t priority = preload_count - loaded;
+        const uint32_t priority = target_count - loaded;
         loaded++;
         if (hot_layer != il) continue;
         if (n >= DS4_MAX_EXPERT) return false;
@@ -31986,14 +32103,20 @@ static bool metal_graph_seed_streaming_expert_cache_from_hotlist(
     const bool from_file = path && path[0];
     const bool refresh_builtin_glm =
         !from_file && g_ds4_shape.variant == DS4_VARIANT_GLM52;
+    const uint32_t source_preload_count = from_file ? preload_count :
+        metal_graph_streaming_expert_builtin_target(preload_count);
     const bool profile =
         glm_graph_env_present("DS4_ROCM_STREAMING_EXPERT_HOTLIST_PROFILE",
                               "DS4_METAL_STREAMING_EXPERT_HOTLIST_PROFILE");
-    if (!from_file && !refresh_builtin_glm && current_count >= preload_count) {
+    if (metal_graph_streaming_expert_hotlist_should_skip(
+                from_file,
+                refresh_builtin_glm,
+                current_count,
+                source_preload_count)) {
         if (profile) {
             fprintf(stderr,
                     "ds4: streaming expert hotlist seed skipped preload=%u current=%u\n",
-                    preload_count,
+                    source_preload_count,
                     current_count);
         }
         return true;
@@ -32019,12 +32142,13 @@ static bool metal_graph_seed_streaming_expert_cache_from_hotlist(
                                                            &loaded)) {
             return false;
         }
-    } else if (!metal_graph_streaming_expert_hotlist_load_default(preload_count,
-                                                                  experts,
-                                                                  priorities,
-                                                                  counts,
-                                                                  seen,
-                                                                  &loaded)) {
+    } else if (!metal_graph_streaming_expert_hotlist_load_default(
+                       source_preload_count,
+                       experts,
+                       priorities,
+                       counts,
+                       seen,
+                       &loaded)) {
         return false;
     }
     if (loaded == 0) return true;
@@ -35538,6 +35662,18 @@ static bool metal_graph_prefill_layer_major(
                                                             layer_selected_addr,
                                                             layer_prepare_slots,
                                                             layer_prepare_ahead)) {
+#ifdef DS4_ROCM_BUILD
+                (void)metal_graph_stream_prefill_layer_cleanup(
+                        &rocm_full_layer_load,
+                        layer_prepare_slots,
+                        layer_prepare_ahead,
+                        true);
+#else
+                (void)metal_graph_stream_prefill_layer_cleanup(
+                        layer_prepare_slots,
+                        layer_prepare_ahead,
+                        true);
+#endif
                 return false;
             }
         } else {
@@ -35556,6 +35692,11 @@ static bool metal_graph_prefill_layer_major(
                                                         weights,
                                                         0,
                                                         n_tokens)) {
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                &rocm_full_layer_load,
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
         return false;
     }
 #endif
@@ -35582,16 +35723,18 @@ static bool metal_graph_prefill_layer_major(
     }
     if (!ok) {
 #ifdef DS4_ROCM_BUILD
-        (void)rocm_graph_stream_layer_expert_load_join(&rocm_full_layer_load);
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                &rocm_full_layer_load,
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
         (void)ds4_gpu_stream_expert_cache_release_layer_cache();
+#else
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
 #endif
-        if (layer_prepare) {
-            (void)metal_graph_stream_prepare_join_all(layer_prepare_slots,
-                                                      layer_prepare_ahead);
-        }
-        if (ds4_gpu_synchronize() == 0) {
-            fprintf(stderr, "ds4: Metal synchronize after layer-major prefill embed failure also failed\n");
-        }
         return false;
     }
 
@@ -35883,16 +36026,18 @@ static bool metal_graph_prefill_layer_major(
         }
         if (!ok) {
 #ifdef DS4_ROCM_BUILD
-            (void)rocm_graph_stream_layer_expert_load_join(&rocm_full_layer_load);
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    &rocm_full_layer_load,
+                    layer_prepare_slots,
+                    layer_prepare_ahead,
+                    true);
             (void)ds4_gpu_stream_expert_cache_release_layer_cache();
+#else
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    layer_prepare_slots,
+                    layer_prepare_ahead,
+                    true);
 #endif
-            if (layer_prepare) {
-                (void)metal_graph_stream_prepare_join_all(layer_prepare_slots,
-                                                          layer_prepare_ahead);
-            }
-            if (ds4_gpu_synchronize() == 0) {
-                fprintf(stderr, "ds4: Metal synchronize after layer-major prefill failure also failed\n");
-            }
             return false;
         }
         graph_power_note_prefill_layer(g, il, layer_elapsed);
@@ -35909,16 +36054,18 @@ static bool metal_graph_prefill_layer_major(
     }
     if (!ok) {
 #ifdef DS4_ROCM_BUILD
-        (void)rocm_graph_stream_layer_expert_load_join(&rocm_full_layer_load);
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                &rocm_full_layer_load,
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
         (void)ds4_gpu_stream_expert_cache_release_layer_cache();
+#else
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
 #endif
-        if (layer_prepare) {
-            (void)metal_graph_stream_prepare_join_all(layer_prepare_slots,
-                                                      layer_prepare_ahead);
-        }
-        if (ds4_gpu_synchronize() == 0) {
-            fprintf(stderr, "ds4: Metal synchronize after layer-major prefill failure also failed\n");
-        }
         return false;
     }
 #ifdef __APPLE__
@@ -62090,6 +62237,307 @@ typedef struct {
     const char *name;
     uint64_t bytes;
 } ds4_test_fake_tensor;
+
+#ifndef DS4_NO_GPU
+typedef struct {
+    uint64_t *offsets;
+    uint64_t *sizes;
+    uint32_t cap;
+    uint32_t count;
+} ds4_test_stream_readahead_runs;
+
+static void ds4_test_stream_readahead_run_sink(uint64_t offset,
+                                                uint64_t size,
+                                                void    *ud) {
+    ds4_test_stream_readahead_runs *runs = ud;
+    if (!runs) return;
+    if (runs->count < runs->cap) {
+        runs->offsets[runs->count] = offset;
+        runs->sizes[runs->count] = size;
+    }
+    runs->count++;
+}
+
+uint32_t ds4_test_stream_readahead_coalesce(
+        const uint64_t *offsets,
+        const uint64_t *ends,
+        uint32_t        n_spans,
+        uint64_t       *out_offsets,
+        uint64_t       *out_sizes,
+        uint32_t        out_cap,
+        uint64_t        model_size) {
+    if ((n_spans != 0 && (!offsets || !ends)) ||
+        (out_cap != 0 && (!out_offsets || !out_sizes))) {
+        return UINT32_MAX;
+    }
+    ds4_model_map_span *span_data = NULL;
+    if (n_spans != 0) {
+        span_data = calloc(n_spans, sizeof(span_data[0]));
+        if (!span_data) return UINT32_MAX;
+        for (uint32_t i = 0; i < n_spans; i++) {
+            span_data[i].off = offsets[i];
+            span_data[i].end = ends[i];
+        }
+    }
+    ds4_model_map_span_vec spans = {
+        .v = span_data,
+        .len = n_spans,
+        .cap = n_spans,
+        .max_tensor_bytes = 1,
+    };
+    ds4_model bound_model;
+    memset(&bound_model, 0, sizeof(bound_model));
+    const ds4_model *model = NULL;
+    if (model_size != UINT64_MAX) {
+        bound_model.size = model_size;
+        model = &bound_model;
+    }
+    ds4_test_stream_readahead_runs runs = {
+        .offsets = out_offsets,
+        .sizes = out_sizes,
+        .cap = out_cap,
+        .count = 0,
+    };
+    const uint32_t count = metal_graph_stream_coalesce_spans(
+            model,
+            &spans,
+            ds4_test_stream_readahead_run_sink,
+            &runs);
+    free(span_data);
+    return count;
+}
+
+bool ds4_test_stream_readahead_enabled(void) {
+    return metal_graph_stream_readahead_enabled();
+}
+
+bool ds4_test_stream_madvise_willneed_enabled(void) {
+    return metal_graph_stream_madvise_willneed_enabled();
+}
+
+uint32_t ds4_test_stream_pread_chunk(void) {
+    return METAL_GRAPH_STREAM_PREAD_CHUNK;
+}
+
+uint32_t ds4_test_stream_auto_preload_cap(void) {
+    const char *env = glm_graph_env_value(
+            "DS4_ROCM_STREAMING_EXPERT_AUTO_PRELOAD_CAP",
+            "DS4_METAL_STREAMING_EXPERT_AUTO_PRELOAD_CAP");
+    return metal_graph_streaming_expert_auto_preload_cap(env);
+}
+
+void ds4_test_stream_set_pread_hook(metal_graph_stream_test_pread_fn fn) {
+    g_metal_graph_stream_test_pread = fn;
+}
+
+bool ds4_test_stream_pread_range_fd(int fd,
+                                    uint64_t model_size,
+                                    uint64_t offset,
+                                    uint64_t size,
+                                    uint8_t *scratch,
+                                    uint64_t *read_bytes,
+                                    uint8_t *sink) {
+    ds4_model model;
+    memset(&model, 0, sizeof(model));
+    model.fd = fd;
+    model.size = model_size;
+    return metal_graph_stream_pread_range(&model,
+                                          offset,
+                                          size,
+                                          scratch,
+                                          read_bytes,
+                                          sink);
+}
+
+static void ds4_test_stream_shape_variant(int variant,
+                                          ds4_shape *saved_shape) {
+    *saved_shape = g_ds4_shape;
+    switch (variant) {
+    case DS4_VARIANT_FLASH:
+        g_ds4_shape = DS4_SHAPE_FLASH;
+        break;
+    case DS4_VARIANT_PRO:
+        g_ds4_shape = DS4_SHAPE_PRO;
+        break;
+    case DS4_VARIANT_GLM52:
+        g_ds4_shape = DS4_SHAPE_GLM52;
+        break;
+    default:
+        break;
+    }
+}
+
+static void ds4_test_stream_restore_shape(const ds4_shape *saved_shape) {
+    g_ds4_shape = *saved_shape;
+}
+
+uint32_t ds4_test_stream_builtin_count(int variant) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    uint32_t count = 0;
+    (void)metal_graph_streaming_expert_builtin_hotlist(&count);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return count;
+}
+
+uint32_t ds4_test_stream_builtin_target(int variant, uint32_t requested) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    const uint32_t target = metal_graph_streaming_expert_builtin_target(requested);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return target;
+}
+
+uint32_t ds4_test_stream_builtin_load_count(int variant,
+                                             uint32_t requested) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    int32_t (*experts)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*experts));
+    uint32_t (*priorities)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*priorities));
+    uint32_t *counts = calloc(DS4_MAX_LAYER, sizeof(*counts));
+    bool (*seen)[DS4_MAX_EXPERT] = calloc(DS4_MAX_LAYER, sizeof(*seen));
+    if (!experts || !priorities || !counts || !seen) {
+        free(experts);
+        free(priorities);
+        free(counts);
+        free(seen);
+        ds4_test_stream_restore_shape(&saved_shape);
+        return UINT32_MAX;
+    }
+    uint32_t loaded = 0;
+    const bool ok = metal_graph_streaming_expert_hotlist_load_default(
+            requested,
+            experts,
+            priorities,
+            counts,
+            seen,
+            &loaded);
+    free(experts);
+    free(priorities);
+    free(counts);
+    free(seen);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return ok ? loaded : UINT32_MAX;
+}
+
+uint32_t ds4_test_stream_hotlist_file_load_count(
+        const char *path,
+        uint32_t    requested) {
+    if (!path) return UINT32_MAX;
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(DS4_VARIANT_FLASH, &saved_shape);
+    int32_t (*experts)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*experts));
+    uint32_t (*priorities)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*priorities));
+    uint32_t *counts = calloc(DS4_MAX_LAYER, sizeof(*counts));
+    bool (*seen)[DS4_MAX_EXPERT] = calloc(DS4_MAX_LAYER, sizeof(*seen));
+    if (!experts || !priorities || !counts || !seen) {
+        free(experts);
+        free(priorities);
+        free(counts);
+        free(seen);
+        ds4_test_stream_restore_shape(&saved_shape);
+        return UINT32_MAX;
+    }
+    uint32_t loaded = 0;
+    const bool ok = metal_graph_streaming_expert_hotlist_load_file(
+            path,
+            requested,
+            experts,
+            priorities,
+            counts,
+            seen,
+            &loaded);
+    free(experts);
+    free(priorities);
+    free(counts);
+    free(seen);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return ok ? loaded : UINT32_MAX;
+}
+
+bool ds4_test_stream_hotlist_should_skip(bool     from_file,
+                                         bool     refresh_builtin_glm,
+                                         uint32_t current_count,
+                                         uint32_t requested,
+                                         int      variant) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    const uint32_t target = from_file ? requested :
+        metal_graph_streaming_expert_builtin_target(requested);
+    const bool skip = metal_graph_streaming_expert_hotlist_should_skip(
+            from_file,
+            refresh_builtin_glm,
+            current_count,
+            target);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return skip;
+}
+
+static void *ds4_test_stream_prepare_worker(void *arg) {
+    metal_graph_stream_pagein_job *job = arg;
+    if (job) job->ok = true;
+    return NULL;
+}
+
+bool ds4_test_stream_prepare_failure_cleanup(uint32_t n_jobs,
+                                             uint32_t fail_at,
+                                             uint32_t *started_out,
+                                             uint32_t *joined_out) {
+    if (n_jobs > DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD || fail_at >= n_jobs) {
+        return false;
+    }
+    metal_graph_stream_prepare_slot slots[DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD];
+    memset(slots, 0, sizeof(slots));
+    uint32_t started = 0;
+    for (uint32_t i = 0; i < n_jobs; i++) {
+        if (i == fail_at) break; /* injected prepare-start failure */
+        slots[i].layer = i;
+        slots[i].job.n_threads = 1;
+        const int rc = pthread_create(&slots[i].job.thread,
+                                      NULL,
+                                      ds4_test_stream_prepare_worker,
+                                      &slots[i].job);
+        if (rc != 0) {
+#ifdef DS4_ROCM_BUILD
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    NULL,
+                    slots,
+                    DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+                    false);
+#else
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    slots,
+                    DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+                    false);
+#endif
+            return false;
+        }
+        slots[i].job.started = true;
+        slots[i].active = true;
+        started++;
+    }
+    g_metal_graph_stream_test_prepare_join_calls = 0;
+#ifdef DS4_ROCM_BUILD
+    const bool ok = metal_graph_stream_prefill_layer_cleanup(
+            NULL,
+            slots,
+            DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+            false);
+#else
+    const bool ok = metal_graph_stream_prefill_layer_cleanup(
+            slots,
+            DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+            false);
+#endif
+    if (started_out) *started_out = started;
+    if (joined_out) *joined_out = g_metal_graph_stream_test_prepare_join_calls;
+    return ok;
+}
+#endif /* !DS4_NO_GPU */
 
 int ds4_test_tensor_to_entry(const char *name, int name_len) {
     ds4_tensor fake;
