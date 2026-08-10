@@ -63,17 +63,17 @@ throughput.
 Build the Metal quality scorer and use the Laguna fixture:
 
 ```zsh
-make gguf-tools/quality-testing/score_official
+make quality/score_official
 
-gguf-tools/quality-testing/score_official OLD.gguf \
-  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+quality/score_official OLD.gguf \
+  quality/data/laguna-openrouter-100/manifest.tsv \
   /tmp/old.tsv 4096 --quality
 
-gguf-tools/quality-testing/score_official NEW.gguf \
-  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+quality/score_official NEW.gguf \
+  quality/data/laguna-openrouter-100/manifest.tsv \
   /tmp/new.tsv 4096 --quality
 
-python3 gguf-tools/quality-testing/compare_scores.py /tmp/old.tsv /tmp/new.tsv
+python3 quality/compare_scores.py /tmp/old.tsv /tmp/new.tsv
 ```
 
 Lower average NLL is better, but inspect first-token, top-logprob, and ordering

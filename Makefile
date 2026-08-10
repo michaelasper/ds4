@@ -118,8 +118,8 @@ ds4-bench: ds4_bench.o ds4_help.o $(CORE_OBJS) | check-metal-sources
 ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_eval.o ds4_help.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.c ds4.h $(CORE_OBJS) rax.o | check-metal-sources
-	$(CC) $(QUALITY_CFLAGS) -I. -o $@ gguf-tools/quality-testing/score_official.c $(CORE_OBJS) rax.o $(METAL_LDLIBS)
+quality/score_official: quality/score_official.c ds4.h $(CORE_OBJS) rax.o | check-metal-sources
+	$(CC) $(QUALITY_CFLAGS) -I. -o $@ quality/score_official.c $(CORE_OBJS) rax.o $(METAL_LDLIBS)
 
 tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h ds4_tp.h
 	$(CC) $(CFLAGS) -I. -c -o $@ tests/test_metal_session_batch.c
@@ -341,4 +341,4 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 	./tests/test_mxfp4_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o ds4_streaming_test_hooks.o tests/test_ssd_streaming_hooks tests/test_ssd_streaming_hooks.o gguf-tools/quality-testing/score_official gguf-tools/quality-testing/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_metal_session_batch tests/test_sampling tests/*.o *.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o ds4_streaming_test_hooks.o tests/test_ssd_streaming_hooks tests/test_ssd_streaming_hooks.o quality/score_official quality/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_metal_session_batch tests/test_sampling tests/*.o *.o

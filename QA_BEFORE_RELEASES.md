@@ -133,10 +133,10 @@ tokenization, prompt rendering, sampling, logits, quantization, or graph math
 changes. Preserve the raw TSV, command, revision, model hash, and summary:
 
 ```zsh
-make gguf-tools/quality-testing/score_official
-gguf-tools/quality-testing/score_official \
+make quality/score_official
+quality/score_official \
   "$LAGUNA_TEST_MODEL" \
-  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+  quality/data/laguna-openrouter-100/manifest.tsv \
   /tmp/laguna-quality.tsv 4096 --quality
 ```
 
