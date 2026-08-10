@@ -54265,6 +54265,18 @@ static bool ds4_session_is_laguna(const ds4_session *s) {
 }
 
 #ifndef DS4_NO_GPU
+/* The DFlash support graph owns a separate KV/feature history from the
+ * Laguna target graph.  Any operation that invalidates the target timeline
+ * must invalidate this history as one unit too; in particular, a deferred
+ * feature injection must never survive across a target payload restore. */
+static void ds4_session_dflash_invalidate(ds4_session *s) {
+    if (!s) return;
+    s->dflash_synced = false;
+    s->dflash_deferred_rows = 0;
+    s->dflash_deferred_pos0 = 0;
+    s->dflash_defer_inject = false;
+}
+
 static void ds4_session_glm_reset_dense_cache(ds4_session *s) {
     if (s) s->glm_dense_cache_len = 0;
 }
@@ -55830,7 +55842,17 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
 }
 
 int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
-    if (!s || !fp) {
+    if (!s) {
+        payload_set_err(err, errlen, "invalid session payload load");
+        return 1;
+    }
+#ifndef DS4_NO_GPU
+    /* Payload restore replaces the Laguna target timeline.  Invalidate the
+     * independent DFlash support history before reading or validating any
+     * payload bytes so every failed load attempt is safe too. */
+    if (ds4_session_is_laguna(s)) ds4_session_dflash_invalidate(s);
+#endif
+    if (!fp) {
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
     }
@@ -56584,6 +56606,70 @@ void ds4_session_snapshot_free(ds4_session_snapshot *snap) {
     free(snap->ptr);
     memset(snap, 0, sizeof(*snap));
 }
+
+#ifdef DS4_TEST_HOOKS
+/* Exercise the payload-restore boundary without opening a model or allocating
+ * the production Laguna/DFlash graphs.  A malformed payload is sufficient:
+ * the loader must invalidate already-synced/deferred support state before it
+ * can reject the header, and snapshot restore must reach that same loader. */
+bool ds4_test_dflash_payload_invalidation(void) {
+#ifdef DS4_NO_GPU
+    return true;
+#else
+    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return true;
+
+    ds4_engine engine;
+    memset(&engine, 0, sizeof(engine));
+    engine.backend = DS4_BACKEND_METAL;
+
+    ds4_session session;
+    memset(&session, 0, sizeof(session));
+    session.engine = &engine;
+
+    const uint32_t bad_payload[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
+        DS4_SESSION_PAYLOAD_MAGIC,
+        DS4_SESSION_PAYLOAD_VERSION + 1u,
+    };
+    char err[128] = {0};
+
+    session.dflash_synced = true;
+    session.dflash_deferred_rows = 3u;
+    session.dflash_deferred_pos0 = 41u;
+    session.dflash_defer_inject = true;
+    FILE *fp = fmemopen((void *)bad_payload, sizeof(bad_payload), "rb");
+    if (!fp) return false;
+    const int payload_rc = ds4_session_load_payload(
+        &session, fp, sizeof(bad_payload), err, sizeof(err));
+    const bool payload_cleared =
+        payload_rc != 0 &&
+        !session.dflash_synced &&
+        session.dflash_deferred_rows == 0u &&
+        session.dflash_deferred_pos0 == 0u &&
+        !session.dflash_defer_inject;
+    fclose(fp);
+
+    session.dflash_synced = true;
+    session.dflash_deferred_rows = 2u;
+    session.dflash_deferred_pos0 = 17u;
+    session.dflash_defer_inject = true;
+    ds4_session_snapshot snap = {
+        .ptr = (uint8_t *)(uintptr_t)bad_payload,
+        .len = sizeof(bad_payload),
+        .cap = sizeof(bad_payload),
+    };
+    memset(err, 0, sizeof(err));
+    const int snapshot_rc = ds4_session_load_snapshot(
+        &session, &snap, err, sizeof(err));
+    const bool snapshot_cleared =
+        snapshot_rc != 0 &&
+        !session.dflash_synced &&
+        session.dflash_deferred_rows == 0u &&
+        session.dflash_deferred_pos0 == 0u &&
+        !session.dflash_defer_inject;
+    return payload_cleared && snapshot_cleared;
+#endif
+}
+#endif /* DS4_TEST_HOOKS */
 
 void ds4_engine_dump_tokens(ds4_engine *e, const ds4_tokens *tokens) {
     dump_tokens(&e->vocab, tokens);
@@ -63184,7 +63270,7 @@ void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled) {
     /* The target checkpoint remains valid, but a disabled DFlash cache may
      * miss arbitrary intervening tokens. Rebuild its last-window state on the
      * next enabled sync instead of guessing whether it stayed current. */
-    s->dflash_synced = false;
+    ds4_session_dflash_invalidate(s);
     s->dflash_baseline_ms = 0.0;
     s->dflash_baseline_tokens = 0;
     s->dflash_cycles_since_baseline = 0;
@@ -63196,9 +63282,6 @@ void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled) {
     s->dflash_best_draft = 0;
     s->dflash_best_ms_per_token = 0.0;
     s->dflash_stage_full_accepts = 0;
-    s->dflash_deferred_rows = 0;
-    s->dflash_deferred_pos0 = 0;
-    s->dflash_defer_inject = false;
     s->dflash_suspended = false;
     s->dflash_guard_decided = false;
 #endif
@@ -70950,10 +71033,7 @@ void ds4_session_invalidate(ds4_session *s) {
     s->mtp_draft_valid = false;
     ds4_session_dspark_capture_invalidate(s);
 #ifndef DS4_NO_GPU
-    s->dflash_synced = false;
-    s->dflash_deferred_rows = 0;
-    s->dflash_deferred_pos0 = 0;
-    s->dflash_defer_inject = false;
+    ds4_session_dflash_invalidate(s);
     ds4_session_glm_reset_dense_cache(s);
 #endif
 }
@@ -70965,10 +71045,7 @@ void ds4_session_rewind(ds4_session *s, int pos) {
     s->mtp_draft_valid = false;
     ds4_session_dspark_capture_invalidate(s);
 #ifndef DS4_NO_GPU
-    s->dflash_synced = false;
-    s->dflash_deferred_rows = 0;
-    s->dflash_deferred_pos0 = 0;
-    s->dflash_defer_inject = false;
+    ds4_session_dflash_invalidate(s);
     ds4_session_glm_cap_dense_cache(s);
 #endif
 }

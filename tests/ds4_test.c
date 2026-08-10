@@ -92,6 +92,7 @@ static void test_laguna_selector_parser(void) {
 #include <math.h>
 
 bool ds4_test_dspark_cache_window_crop(void);
+bool ds4_test_dflash_payload_invalidation(void);
 
 static ds4_engine *test_engine_fast;
 static ds4_engine *test_engine_quality;
@@ -14559,6 +14560,10 @@ static void test_dspark_verify_depth(void) {
 }
 
 #if defined(__APPLE__)
+static void test_dflash_payload_lifecycle(void) {
+    TEST_ASSERT(ds4_test_dflash_payload_invalidation());
+}
+
 /* Model-independent coverage for the supported product slice.  Keep this
  * list deliberately separate from test_metal_kernel_group: that historical
  * umbrella also runs GLM/DSpark and optional-source compatibility cases. */
@@ -14568,6 +14573,7 @@ static void test_laguna_metal_core(void) {
         return;
     }
 
+    test_dflash_payload_lifecycle();
     test_dflash_capture_nonfinite_sanitize();
     test_metal_f16_matvec_fast_nr0_4();
     test_metal_f16_prefill_matmul();
@@ -14614,6 +14620,9 @@ static const ds4_test_entry test_entries[] = {
      test_laguna_selector_parser, false},
 #ifndef DS4_NO_GPU
 #if defined(__APPLE__)
+    {"--dflash-payload-lifecycle", "dflash-payload-lifecycle",
+     "payload and snapshot restore invalidate Laguna DFlash support state",
+     test_dflash_payload_lifecycle, true},
     {"--laguna-metal-core", "laguna-metal-core",
      "model-independent Laguna Metal/DFlash kernel and topology regressions",
      test_laguna_metal_core, true},
