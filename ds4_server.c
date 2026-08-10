@@ -1,5 +1,4 @@
 #include "ds4.h"
-#include "ds4_distributed.h"
 #include "ds4_help.h"
 #include "ds4_kvstore.h"
 #include "rax.h"
@@ -13465,14 +13464,6 @@ static server_config parse_options(int argc, char **argv) {
                    "ds4-server: --kv-cache-cold-max-tokens must be 0 or >= --kv-cache-min-tokens");
         exit(2);
     }
-    char dist_err[256];
-    if (ds4_dist_prepare_engine_options(&c.engine.distributed,
-                                        &c.engine,
-                                        dist_err,
-                                        sizeof(dist_err)) != 0) {
-        server_log(DS4_LOG_DEFAULT, "ds4-server: %s", dist_err);
-        exit(2);
-    }
     return c;
 }
 
@@ -13517,15 +13508,6 @@ int main(int argc, char **argv) {
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &cfg.engine) != 0) {
         return 1;
-    }
-
-    if (cfg.engine.distributed.role == DS4_DISTRIBUTED_WORKER) {
-        ds4_dist_generation_options gen = {
-            .ctx_size = cfg.ctx_size,
-        };
-        int rc = ds4_dist_run(engine, &cfg.engine.distributed, &gen);
-        ds4_engine_close(engine);
-        return rc;
     }
 
     const int slot_count = cfg.batched_sessions > 0 ? cfg.batched_sessions : 1;
