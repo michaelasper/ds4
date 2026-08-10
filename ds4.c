@@ -18577,6 +18577,7 @@ typedef struct {
     metal_graph_stream_pagein_range *ranges;
     pthread_t *threads;
     struct metal_graph_stream_pagein_worker *workers;
+    uint8_t **pread_scratch;
     uint32_t n_ranges;
     uint32_t n_threads;
     uint32_t layer;
@@ -18597,6 +18598,7 @@ typedef struct {
 
 typedef struct metal_graph_stream_pagein_worker {
     metal_graph_stream_pagein_job *job;
+    uint8_t *pread_scratch;
     uint32_t first;
     uint32_t stride;
     uint64_t touched;
@@ -19335,14 +19337,31 @@ static bool metal_graph_stream_pagein_touch_range(
     return true;
 }
 
+/* Opt-in pread page-in read chunk. Each page-in worker reads through its own
+ * reusable scratch (owned by the job, one per thread) instead of an xmalloc
+ * per tensor range; 4 MiB reads keep syscall count low on multi-GiB spans. */
+#define METAL_GRAPH_STREAM_PREAD_CHUNK (4u * 1024u * 1024u)
+
+static void metal_graph_stream_pagein_job_free_pread_scratch(
+        metal_graph_stream_pagein_job *job) {
+    if (!job || !job->pread_scratch) return;
+    for (uint32_t t = 0; t < job->n_threads; t++) {
+        free(job->pread_scratch[t]);
+    }
+    free(job->pread_scratch);
+    job->pread_scratch = NULL;
+}
+
 static bool metal_graph_stream_pread_range(
         const ds4_model *model,
         uint64_t         offset,
         uint64_t         size,
+        uint8_t         *scratch,
         uint64_t        *read_bytes,
         uint8_t         *sink) {
     if (!model ||
         model->fd < 0 ||
+        !scratch ||
         offset > model->size ||
         size == 0 ||
         size > model->size - offset) {
@@ -19350,24 +19369,23 @@ static bool metal_graph_stream_pread_range(
     }
     if (offset > (uint64_t)LLONG_MAX) return false;
 
-    const size_t chunk = 1024u * 1024u;
-    uint8_t *buf = xmalloc(chunk);
     uint64_t pos = offset;
     uint64_t rem = size;
     uint8_t s = sink ? *sink : 0;
     bool ok = true;
     while (rem != 0) {
-        const size_t want = rem > (uint64_t)chunk ? chunk : (size_t)rem;
+        const size_t want = rem > (uint64_t)METAL_GRAPH_STREAM_PREAD_CHUNK ?
+            (size_t)METAL_GRAPH_STREAM_PREAD_CHUNK : (size_t)rem;
         ssize_t nread;
         do {
-            nread = pread(model->fd, buf, want, (off_t)pos);
+            nread = pread(model->fd, scratch, want, (off_t)pos);
         } while (nread < 0 && errno == EINTR);
         if (nread <= 0) {
             ok = false;
             break;
         }
-        s ^= buf[0];
-        s ^= buf[(size_t)nread - 1u];
+        s ^= scratch[0];
+        s ^= scratch[(size_t)nread - 1u];
         pos += (uint64_t)nread;
         rem -= (uint64_t)nread;
         if (read_bytes) {
@@ -19376,7 +19394,6 @@ static bool metal_graph_stream_pread_range(
         }
     }
     if (sink) *sink = s;
-    free(buf);
     return ok;
 }
 
@@ -19384,6 +19401,7 @@ static bool metal_graph_stream_prepare_range(
         const metal_graph_stream_pagein_job *job,
         uint64_t                             offset,
         uint64_t                             size,
+        uint8_t                             *pread_scratch,
         uint64_t                            *touched,
         uint8_t                             *sink) {
     if (!job) return false;
@@ -19391,6 +19409,7 @@ static bool metal_graph_stream_prepare_range(
         return metal_graph_stream_pread_range(job->model,
                                               offset,
                                               size,
+                                              pread_scratch,
                                               touched,
                                               sink);
     }
@@ -19424,11 +19443,13 @@ static void *metal_graph_stream_pagein_thread_main(void *arg) {
     const double t0 = job->profile ? now_sec() : 0.0;
     job->ok = true;
     for (uint32_t i = 0; i < job->n_ranges; i++) {
-        const bool ok = metal_graph_stream_prepare_range(job,
-                                                         job->ranges[i].off,
-                                                         job->ranges[i].size,
-                                                         &job->touched,
-                                                         &job->sink);
+        const bool ok = metal_graph_stream_prepare_range(
+                job,
+                job->ranges[i].off,
+                job->ranges[i].size,
+                job->pread_scratch ? job->pread_scratch[0] : NULL,
+                &job->touched,
+                &job->sink);
         if (!ok) {
             job->ok = false;
             break;
@@ -19453,6 +19474,7 @@ static void *metal_graph_stream_pagein_worker_main(void *arg) {
         const bool ok = metal_graph_stream_prepare_range(job,
                                                          job->ranges[i].off,
                                                          job->ranges[i].size,
+                                                         worker->pread_scratch,
                                                          &worker->touched,
                                                          &worker->sink);
         if (!ok) {
@@ -19895,6 +19917,13 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
     job->ranges = ranges;
     job->n_ranges = n_ranges;
     job->n_threads = n_threads;
+    if (pread_only) {
+        /* One reusable read scratch per worker thread, freed in the join. */
+        job->pread_scratch = xcalloc(n_threads, sizeof(job->pread_scratch[0]));
+        for (uint32_t t = 0; t < n_threads; t++) {
+            job->pread_scratch[t] = xmalloc(METAL_GRAPH_STREAM_PREAD_CHUNK);
+        }
+    }
     if (n_threads == 1) {
         const int rc = pthread_create(&job->thread,
                                       NULL,
@@ -19904,6 +19933,7 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
             fprintf(stderr,
                     "ds4: Metal streaming prefill layer page-in thread failed: %s\n",
                     strerror(rc));
+            metal_graph_stream_pagein_job_free_pread_scratch(job);
             free(ranges);
             memset(job, 0, sizeof(*job));
             return false;
@@ -19913,6 +19943,8 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
         job->workers = xcalloc(n_threads, sizeof(job->workers[0]));
         for (uint32_t t = 0; t < n_threads; t++) {
             job->workers[t].job = job;
+            job->workers[t].pread_scratch =
+                job->pread_scratch ? job->pread_scratch[t] : NULL;
             job->workers[t].first = t;
             job->workers[t].stride = n_threads;
             const int rc = pthread_create(&job->threads[t],
@@ -19926,6 +19958,7 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
                 for (uint32_t j = 0; j < t; j++) {
                     (void)pthread_join(job->threads[j], NULL);
                 }
+                metal_graph_stream_pagein_job_free_pread_scratch(job);
                 free(job->workers);
                 free(job->threads);
                 free(ranges);
@@ -19995,6 +20028,7 @@ static bool metal_graph_stream_prefill_layer_pagein_join(
                 "ds4: Metal streaming prefill layer page-in join failed: %s\n",
                 strerror(rc));
     }
+    metal_graph_stream_pagein_job_free_pread_scratch(job);
     free(job->workers);
     free(job->threads);
     free(job->ranges);
