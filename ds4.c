@@ -4499,24 +4499,6 @@ static bool tensor_type_is_dense_quant(uint32_t type) {
            type == DS4_TENSOR_Q4_0;
 }
 
-static void tensor_expect_glm_dense_quant_layout(
-        const ds4_tensor *t,
-        uint32_t          ndim,
-        uint64_t          d0,
-        uint64_t          d1,
-        uint64_t          d2) {
-    if (!t) ds4_die("internal error: missing tensor while validating GLM dense layout");
-    if (!tensor_type_is_glm_dense_quant(t->type)) {
-        fprintf(stderr,
-                "ds4: tensor %.*s has type %s, expected q8_0, q4_K, or q4_0\n",
-                (int)t->name.len,
-                t->name.ptr,
-                tensor_type_name(t->type));
-        exit(1);
-    }
-    tensor_expect_layout(t, t->type, ndim, d0, d1, d2);
-}
-
 static void tensor_expect_dense_quant_layout(
         const ds4_tensor *t,
         uint32_t          ndim,
@@ -5119,92 +5101,6 @@ static const ds4_layer_weights *weights_first_bound_layer(const ds4_weights *w) 
     return NULL;
 }
 
-/* Verify every tensor type and dimension used by the specialized pipeline.
- * For distributed sliced GGUFs, only the advertised local layer range is
- * required; token embedding and output head are validated when present. */
-static void weights_validate_glm_dsa_layout(
-        const ds4_weights *w,
-        uint32_t           layer_start,
-        uint32_t           layer_end,
-        bool               require_token_embd,
-        bool               require_output) {
-    const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_KEY_MLA;
-    const uint64_t q_nope = DS4_N_KEY_MLA - DS4_N_ROT;
-    const uint64_t index_q_dim =
-        (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM;
-
-    if (!w) ds4_die("internal error: missing weights while validating GLM layout");
-    if (layer_start >= DS4_N_LAYER) ds4_die("invalid first layer in GLM weight layout validation");
-    if (layer_end == UINT32_MAX) layer_end = DS4_N_LAYER - 1u;
-    if (layer_end >= DS4_N_LAYER || layer_end < layer_start) {
-        ds4_die("invalid layer range in GLM weight layout validation");
-    }
-
-    if (require_token_embd && !w->token_embd) ds4_die("required token embedding tensor is missing");
-    if (w->token_embd) {
-        tensor_expect_glm_dense_quant_layout(w->token_embd, 2, DS4_N_EMBD, DS4_N_VOCAB, 0);
-    }
-
-    const bool have_output = weights_have_output_head(w);
-    if (require_output && !have_output) ds4_die("required output head tensors are missing");
-    if (weights_have_partial_output_head(w) && !have_output) ds4_die("partial output head in GGUF");
-    if (have_output) {
-        tensor_expect_layout(w->output_norm, DS4_TENSOR_F32,  1, DS4_N_EMBD, 0, 0);
-        tensor_expect_glm_dense_quant_layout(w->output, 2, DS4_N_EMBD, DS4_N_VOCAB, 0);
-    }
-
-    for (uint32_t il = layer_start; il <= layer_end; il++) {
-        const ds4_layer_weights *l = &w->layer[il];
-        if (!weights_glm_dsa_layer_has_required(l, il)) {
-            fprintf(stderr, "ds4: required GLM tensors for layer %u are missing\n", il);
-            exit(1);
-        }
-
-        tensor_expect_layout(l->attn_norm,       DS4_TENSOR_F32,  1, DS4_N_EMBD, 0, 0);
-        tensor_expect_glm_dense_quant_layout(l->attn_q_a,        2, DS4_N_EMBD, DS4_N_LORA_Q, 0);
-        tensor_expect_layout(l->attn_q_a_norm,   DS4_TENSOR_F32,  1, DS4_N_LORA_Q, 0, 0);
-        tensor_expect_glm_dense_quant_layout(l->attn_q_b,        2, DS4_N_LORA_Q, q_dim, 0);
-        tensor_expect_glm_dense_quant_layout(l->attn_kv_a_mqa,   2, DS4_N_EMBD, DS4_N_HEAD_DIM, 0);
-        tensor_expect_layout(l->attn_kv_a_norm,  DS4_TENSOR_F32,  1, DS4_N_KV_LORA, 0, 0);
-        tensor_expect_glm_dense_quant_layout(l->attn_k_b,        3, q_nope, DS4_N_KV_LORA, DS4_N_HEAD);
-        tensor_expect_glm_dense_quant_layout(l->attn_v_b,        3, DS4_N_KV_LORA, DS4_N_VALUE_MLA, DS4_N_HEAD);
-        tensor_expect_glm_dense_quant_layout(l->attn_output,     2, DS4_N_HEAD * DS4_N_VALUE_MLA, DS4_N_EMBD, 0);
-        tensor_expect_glm_dense_quant_layout(l->indexer_attn_k,  2, DS4_N_EMBD, DS4_N_INDEXER_HEAD_DIM, 0);
-        tensor_expect_glm_dense_quant_layout(l->indexer_attn_q_b, 2, DS4_N_LORA_Q, index_q_dim, 0);
-        tensor_expect_layout(l->indexer_k_norm,  DS4_TENSOR_F32,  1, DS4_N_INDEXER_HEAD_DIM, 0, 0);
-        tensor_expect_layout(l->indexer_k_norm_b, DS4_TENSOR_F32, 1, DS4_N_INDEXER_HEAD_DIM, 0, 0);
-        tensor_expect_layout(l->indexer_proj,    DS4_TENSOR_F32,  2, DS4_N_EMBD, DS4_N_INDEXER_HEAD, 0);
-        tensor_expect_layout(l->ffn_norm,        DS4_TENSOR_F32,  1, DS4_N_EMBD, 0, 0);
-
-        if (il < DS4_N_LEADING_DENSE) {
-            tensor_expect_glm_dense_quant_layout(l->ffn_gate, 2, DS4_N_EMBD, DS4_N_FF_DENSE, 0);
-            tensor_expect_glm_dense_quant_layout(l->ffn_up,   2, DS4_N_EMBD, DS4_N_FF_DENSE, 0);
-            tensor_expect_glm_dense_quant_layout(l->ffn_down, 2, DS4_N_FF_DENSE, DS4_N_EMBD, 0);
-        } else {
-            tensor_expect_layout(l->ffn_gate_inp, DS4_TENSOR_F32, 2, DS4_N_EMBD, DS4_N_EXPERT, 0);
-            tensor_expect_layout(l->ffn_exp_probs_b, DS4_TENSOR_F32, 1, DS4_N_EXPERT, 0, 0);
-            tensor_expect_routed_expert(l->ffn_gate_exps, 3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
-            tensor_expect_routed_expert(l->ffn_up_exps,   3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
-            tensor_expect_routed_expert(l->ffn_down_exps, 3, DS4_N_FF_EXP, DS4_N_EMBD, DS4_N_EXPERT);
-            if (l->ffn_gate_exps->type != l->ffn_up_exps->type) {
-                fprintf(stderr, "ds4: GLM routed gate/up experts use different quant types in layer %u\n", il);
-                exit(1);
-            }
-            tensor_expect_glm_dense_quant_layout(l->ffn_gate_shexp, 2, DS4_N_EMBD, DS4_N_FF_EXP, 0);
-            tensor_expect_glm_dense_quant_layout(l->ffn_up_shexp,   2, DS4_N_EMBD, DS4_N_FF_EXP, 0);
-            tensor_expect_glm_dense_quant_layout(l->ffn_down_shexp, 2, DS4_N_FF_EXP, DS4_N_EMBD, 0);
-        }
-
-        if (DS4_N_NEXTN_PREDICT != 0 &&
-            il + DS4_N_NEXTN_PREDICT >= DS4_N_LAYER) {
-            tensor_expect_glm_dense_quant_layout(l->nextn_eh_proj, 2, 2u * DS4_N_EMBD, DS4_N_EMBD, 0);
-            tensor_expect_layout(l->nextn_enorm,   DS4_TENSOR_F32,  1, DS4_N_EMBD, 0, 0);
-            tensor_expect_layout(l->nextn_hnorm,   DS4_TENSOR_F32,  1, DS4_N_EMBD, 0, 0);
-            tensor_expect_layout(l->nextn_shared_head_norm, DS4_TENSOR_F32, 1, DS4_N_EMBD, 0, 0);
-        }
-    }
-}
-
 static void weights_validate_laguna_layout(
         const ds4_weights *w,
         uint32_t           layer_start,
@@ -5362,14 +5258,6 @@ static void weights_validate_layout(
         uint32_t           layer_end,
         bool               require_token_embd,
         bool               require_output) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
-        weights_validate_glm_dsa_layout(w,
-                                        layer_start,
-                                        layer_end,
-                                        require_token_embd,
-                                        require_output);
-        return;
-    }
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
         weights_validate_laguna_layout(w,
                                        layer_start,
