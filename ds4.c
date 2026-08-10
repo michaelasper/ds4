@@ -39469,6 +39469,20 @@ static sample_candidate *sample_arena_reserve(sample_arena *a, size_t n) {
     return a->v;
 }
 
+#ifdef DS4_TEST_HOOKS
+int ds4_test_sample_arena_lifecycle(void) {
+    sample_arena arena = {0};
+    sample_candidate *first = sample_arena_reserve(&arena, 17);
+    const size_t first_cap = arena.cap;
+    sample_candidate *reuse = sample_arena_reserve(&arena, 9);
+    sample_candidate *grown = sample_arena_reserve(&arena, first_cap + 1);
+    const bool ok = first != NULL && reuse == first && grown != NULL &&
+                    arena.cap > first_cap;
+    free(arena.v);
+    return ok ? 0 : 1;
+}
+#endif
+
 static int sample_candidate_cmp_desc(const void *a, const void *b) {
     const sample_candidate *ca = a;
     const sample_candidate *cb = b;
@@ -54165,6 +54179,19 @@ static void ds4_session_note_logits_dirty(ds4_session *s) {
     if (s) s->logits_gen++;
 }
 
+#ifdef DS4_TEST_HOOKS
+static ds4_test_logprob_stats g_ds4_test_logprob_stats;
+
+void ds4_test_logprob_stats_reset(void) {
+    memset(&g_ds4_test_logprob_stats, 0,
+           sizeof(g_ds4_test_logprob_stats));
+}
+
+void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out) {
+    if (out) *out = g_ds4_test_logprob_stats;
+}
+#endif
+
 #ifndef DS4_NO_GPU
 static bool ds4_dspark_stats_enabled(void);
 
@@ -66475,20 +66502,35 @@ int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p
  * for the sampled token's logprob and the top-k alternatives together, and
  * the scalar double-exp pass over the vocab dwarfs everything else in those
  * calls.  The computation keeps the original precision and accumulation
- * order, so a cached result is bit-identical to recomputation. */
-static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out) {
+ * order, so a cached result is bit-identical to recomputation.  The top-k
+ * observer supplies the max from its ranking pass so this helper only scans
+ * the vocabulary for the sum on a cold top-k request. */
+static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out,
+                                  bool have_max, float known_max_logit) {
     if (s->logsumexp_valid && s->logsumexp_gen == s->logits_gen) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.cache_hits++;
+#endif
         *logsum_out = s->logsumexp;
         return s->logsumexp_ok;
     }
-    float max_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v) && v > max_logit) max_logit = v;
+    float max_logit = known_max_logit;
+    if (!have_max) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.max_scans++;
+#endif
+        max_logit = DS4_NEG_INF;
+        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+            const float v = s->logits[i];
+            if (isfinite(v) && v > max_logit) max_logit = v;
+        }
     }
     double logsum = 0.0;
     bool ok = false;
     if (isfinite(max_logit)) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.sum_scans++;
+#endif
         double sum = 0.0;
         for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
             const float v = s->logits[i];
@@ -66515,6 +66557,9 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     }
 
     float max_logit = DS4_NEG_INF;
+#ifdef DS4_TEST_HOOKS
+    g_ds4_test_logprob_stats.max_scans++;
+#endif
     for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
         const float v = s->logits[i];
         if (!isfinite(v)) continue;
@@ -66531,7 +66576,7 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     if (!isfinite(max_logit)) return 0;
 
     double logsum = 0.0;
-    if (!ds4_session_logsumexp(s, &logsum)) return 0;
+    if (!ds4_session_logsumexp(s, &logsum, true, max_logit)) return 0;
     for (int i = 0; i < k && out[i].id >= 0; i++) {
         out[i].logprob = isfinite(out[i].logit) ? (float)((double)out[i].logit - logsum) : DS4_NEG_INF;
     }
@@ -66542,7 +66587,7 @@ int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
     if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
 
     double logsum = 0.0;
-    if (!ds4_session_logsumexp(s, &logsum)) return 0;
+    if (!ds4_session_logsumexp(s, &logsum, false, DS4_NEG_INF)) return 0;
     out->id = token;
     out->logit = s->logits[token];
     out->logprob = isfinite(out->logit) ? (float)((double)out->logit - logsum) : DS4_NEG_INF;
@@ -66561,6 +66606,85 @@ int ds4_session_set_logits(ds4_session *s, const float *logits, int n) {
     memcpy(s->logits, logits, (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
     return 0;
 }
+
+#ifdef DS4_TEST_HOOKS
+/* Exercise the cache without loading a model.  The probe deliberately uses
+ * the public logits setter so a mutation must advance the same generation
+ * counter as production callers. */
+int ds4_test_logprob_cache_probe(void) {
+    ds4_session s = {0};
+    float *initial = xmalloc((size_t)DS4_N_VOCAB * sizeof(initial[0]));
+    float *mutated = xmalloc((size_t)DS4_N_VOCAB * sizeof(mutated[0]));
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        initial[i] = -3.0f - (float)(i % 257u) * 0.001f;
+    }
+    initial[17] = 2.5f;
+    const uint32_t neg_inf_bits = 0xff800000u;
+    const uint32_t nan_bits = 0x7fc00000u;
+    memcpy(&initial[23], &neg_inf_bits, sizeof(neg_inf_bits));
+    memcpy(&initial[29], &nan_bits, sizeof(nan_bits));
+    memcpy(mutated, initial,
+           (size_t)DS4_N_VOCAB * sizeof(mutated[0]));
+    s.logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+    memcpy(s.logits, initial,
+           (size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+    /* A synthetic session has no eval entry point to mark its first logits. */
+    ds4_session_note_logits_dirty(&s);
+
+    ds4_test_logprob_stats_reset();
+    ds4_token_score top[4], top_again[4], token_before, token_after;
+    bool ok = ds4_session_top_logprobs(&s, top, 4) == 4;
+    ds4_test_logprob_stats stats = {0};
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 1 && stats.sum_scans == 1 &&
+         stats.cache_hits == 0 && top[0].id == 17;
+
+    /* Repeating the observer still scans to select the top entries, but must
+     * reuse the already accumulated normalizer. */
+    ok = ok && ds4_session_top_logprobs(&s, top_again, 4) == 4;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
+         stats.cache_hits == 1;
+    ok = ok && ds4_session_token_logprob(&s, 17, &token_before) == 1;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
+         stats.cache_hits == 2;
+
+    /* Check the cached arithmetic against an independent copy that uses the
+     * same max-then-sum order as the original implementation. */
+    float max_logit = DS4_NEG_INF;
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        if (isfinite(initial[i]) && initial[i] > max_logit) {
+            max_logit = initial[i];
+        }
+    }
+    double sum = 0.0;
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        if (isfinite(initial[i])) {
+            sum += exp((double)initial[i] - (double)max_logit);
+        }
+    }
+    const double reference_logsum = (double)max_logit + log(sum);
+    const float reference_logprob =
+        (float)((double)initial[17] - reference_logsum);
+    ok = ok && top[0].logprob == reference_logprob &&
+         top_again[0].logprob == reference_logprob &&
+         token_before.logprob == reference_logprob;
+
+    mutated[17] = 3.75f;
+    ok = ok && ds4_session_set_logits(&s, mutated, (int)DS4_N_VOCAB) == 0;
+    ok = ok && ds4_session_token_logprob(&s, 17, &token_after) == 1;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 3 && stats.sum_scans == 2 &&
+         stats.cache_hits == 2 && token_after.logprob != token_before.logprob &&
+         token_after.logit == 3.75f;
+
+    free(s.logits);
+    free(initial);
+    free(mutated);
+    return ok ? 0 : 1;
+}
+#endif
 
 /* Pay the one-time first-submission GPU cost (pipeline ramp plus model-heap
  * residency for the batched prefill kernels) outside any measured window.

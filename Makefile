@@ -3,7 +3,7 @@ UNAME_S := $(shell uname -s)
 
 ifeq ($(UNAME_S),Darwin)
 NATIVE_CPU_FLAG ?= -mcpu=native
-SAMPLING_TEST :=
+SAMPLING_TEST := tests/test_sampling
 METAL_EXACT_TEST := test-glm-q23-metal
 else
 NATIVE_CPU_FLAG ?= -march=native
@@ -202,6 +202,12 @@ tests/test_glm_q23_metal: tests/test_glm_q23_metal.o ds4_metal.o | check-metal-s
 
 test-glm-q23-metal: tests/test_glm_q23_metal
 	./tests/test_glm_q23_metal
+
+tests/test_sampling.o: tests/test_sampling.c ds4.h
+	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
+
+tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o ds4_gpu_args_cpu.o ds4_kvstore.o rax.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_agent_cpu.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS)
 	$(CC) $(CFLAGS) -o ds4 ds4_cli_cpu.o ds4_help.o linenoise.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
@@ -520,9 +526,7 @@ test: ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	./tests/test_engine_mgpu_placement
 	./tests/test_gpu_args
 	./tests/test_gpu_args_cli.sh
-ifneq ($(UNAME_S),Darwin)
 	./tests/test_sampling
-endif
 
 dspark-acceptance: ds4
 	DS4_DSPARK_MODEL="$(DS4_DSPARK_MODEL)" \

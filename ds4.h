@@ -400,6 +400,15 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
 int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
                                      int excluded_id);
 uint64_t ds4_test_mixed_native_count(void);
+typedef struct {
+    uint64_t max_scans;
+    uint64_t sum_scans;
+    uint64_t cache_hits;
+} ds4_test_logprob_stats;
+void ds4_test_logprob_stats_reset(void);
+void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out);
+int ds4_test_logprob_cache_probe(void);
+int ds4_test_sample_arena_lifecycle(void);
 #endif
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k);
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out);

@@ -277,6 +277,11 @@ static double now_sec(void) {
 }
 
 int main(void) {
+    CHECK(ds4_test_sample_arena_lifecycle() == 0,
+          "sampling arena reserve/reuse/grow/free lifecycle");
+    CHECK(ds4_test_logprob_cache_probe() == 0,
+          "logprob cache scans, reuse, and mutation invalidation");
+
     const uint32_t semantic_n = 4096;
     float *logits = malloc((size_t)semantic_n * sizeof(*logits));
     float *scratch = malloc((size_t)semantic_n * sizeof(*scratch));
