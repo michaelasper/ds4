@@ -17,7 +17,32 @@ OBJCFLAGS ?= -O3 -ffast-math $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -fo
 QUALITY_CFLAGS ?= -O3 $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c11
 
 LDLIBS ?= -lm -pthread
-METAL_SRCS := $(wildcard metal/*.metal)
+# Metal kernels are loaded from these files at runtime by ds4_metal.m.  Keep
+# the loader's environment-name/default-path pairs explicit for the source
+# check below, but do not make the files compile-time prerequisites of the
+# large Objective-C objects.
+METAL_SOURCE_SPECS := \
+	DS4_METAL_FLASH_ATTN_SOURCE=metal/flash_attn.metal \
+	DS4_METAL_DENSE_SOURCE=metal/dense.metal \
+	DS4_METAL_MOE_SOURCE=metal/moe.metal \
+	DS4_METAL_DSV4_HC_SOURCE=metal/dsv4_hc.metal \
+	DS4_METAL_UNARY_SOURCE=metal/unary.metal \
+	DS4_METAL_DSV4_KV_SOURCE=metal/dsv4_kv.metal \
+	DS4_METAL_DSV4_ROPE_SOURCE=metal/dsv4_rope.metal \
+	DS4_METAL_DSV4_MISC_SOURCE=metal/dsv4_misc.metal \
+	DS4_METAL_LAGUNA_SOURCE=metal/laguna.metal \
+	DS4_METAL_DFLASH_SOURCE=metal/dflash.metal \
+	DS4_METAL_ARGSORT_SOURCE=metal/argsort.metal \
+	DS4_METAL_CPY_SOURCE=metal/cpy.metal \
+	DS4_METAL_CONCAT_SOURCE=metal/concat.metal \
+	DS4_METAL_GET_ROWS_SOURCE=metal/get_rows.metal \
+	DS4_METAL_SUM_ROWS_SOURCE=metal/sum_rows.metal \
+	DS4_METAL_SOFTMAX_SOURCE=metal/softmax.metal \
+	DS4_METAL_REPEAT_SOURCE=metal/repeat.metal \
+	DS4_METAL_GLU_SOURCE=metal/glu.metal \
+	DS4_METAL_NORM_SOURCE=metal/norm.metal \
+	DS4_METAL_BIN_SOURCE=metal/bin.metal \
+	DS4_METAL_SET_ROWS_SOURCE=metal/set_rows.metal
 ROCM_SRCS := $(wildcard rocm/*.cuh)
 DS4_TEST_MODEL ?= ds4flash.gguf
 DS4_TEST_MTP ?= gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
@@ -71,12 +96,35 @@ DS4_TEST_METAL_OBJ :=
 endif
 TEST_CORE_OBJS := $(filter-out ds4_metal.o,$(CORE_OBJS)) $(DS4_TEST_METAL_OBJ)
 
-.PHONY: all help clean test test-metal-session-batch test-mxfp4-metal test-glm-q23-metal test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
+ifeq ($(UNAME_S),Darwin)
+METAL_SOURCE_ORDER_ONLY := | check-metal-sources
+else
+METAL_SOURCE_ORDER_ONLY :=
+endif
+
+.PHONY: all help clean test check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
+
+# Keep this check cheap and always current: the executable contains only the
+# host-side loader, while these source files are read and compiled at runtime.
+# A fixed pair list means a missing default cannot disappear from a wildcard;
+# an explicitly nonempty override is authoritative and the default is not
+# consulted, matching the fail-closed runtime override contract.
+check-metal-sources:
+	@set -eu; for spec in $(METAL_SOURCE_SPECS); do \
+		env_name=$${spec%%=*}; \
+		default_path=$${spec#*=}; \
+		override_path=$$(printenv "$$env_name" 2>/dev/null || true); \
+		if test -n "$$override_path"; then \
+			test -f "$$override_path" && test -r "$$override_path" || { echo "error: unreadable Metal source override $$env_name=$$override_path" >&2; exit 1; }; \
+		else \
+			test -f "$$default_path" && test -r "$$default_path" || { echo "error: missing runtime Metal source $$default_path (set $$env_name to override)" >&2; exit 1; }; \
+		fi; \
+	done
 
 ifeq ($(UNAME_S),Darwin)
 .PHONY: metal-decode-schedule-bench metal-prefill-variant-bench check-mxfp4-half-lut
 
-all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
+all: check-metal-sources ds4 ds4-server ds4-bench ds4-eval ds4-agent
 
 help:
 	@echo "DS4 build targets:"
@@ -91,28 +139,28 @@ help:
 	@echo "  make mtp-verify-depth  Run legacy MTP speculative verification smoke if MTP GGUF is present"
 	@echo "  make clean        Remove build outputs"
 
-ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
+ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS)
+ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-bench: ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS)
+ds4-bench: ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS)
+ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_eval.o ds4_help.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-agent: ds4_agent.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
+ds4-agent: ds4_agent.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_agent.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.c ds4.h $(CORE_OBJS) rax.o ds4_gpu_args.o
+gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.c ds4.h $(CORE_OBJS) rax.o ds4_gpu_args.o | check-metal-sources
 	$(CC) $(QUALITY_CFLAGS) -I. -o $@ gguf-tools/quality-testing/score_official.c $(CORE_OBJS) rax.o ds4_gpu_args.o $(METAL_LDLIBS)
 
 tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h
 	$(CC) $(CFLAGS) -I. -c -o $@ tests/test_metal_session_batch.c
 
-tests/test_metal_session_batch: tests/test_metal_session_batch.o $(CORE_OBJS)
+tests/test_metal_session_batch: tests/test_metal_session_batch.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 test-metal-session-batch: tests/test_metal_session_batch
@@ -121,7 +169,7 @@ test-metal-session-batch: tests/test_metal_session_batch
 speed-bench/metal_decode_schedule_bench.o: speed-bench/metal_decode_schedule_bench.c ds4.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
-speed-bench/metal_decode_schedule_bench: speed-bench/metal_decode_schedule_bench.o $(CORE_OBJS)
+speed-bench/metal_decode_schedule_bench: speed-bench/metal_decode_schedule_bench.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 metal-decode-schedule-bench: speed-bench/metal_decode_schedule_bench
@@ -129,7 +177,7 @@ metal-decode-schedule-bench: speed-bench/metal_decode_schedule_bench
 speed-bench/metal_prefill_variant_bench.o: speed-bench/metal_prefill_variant_bench.c ds4.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
-speed-bench/metal_prefill_variant_bench: speed-bench/metal_prefill_variant_bench.o $(CORE_OBJS)
+speed-bench/metal_prefill_variant_bench: speed-bench/metal_prefill_variant_bench.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 metal-prefill-variant-bench: speed-bench/metal_prefill_variant_bench
@@ -137,7 +185,7 @@ metal-prefill-variant-bench: speed-bench/metal_prefill_variant_bench
 tests/test_mxfp4_metal.o: tests/test_mxfp4_metal.c ds4_gpu.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
-tests/test_mxfp4_metal: tests/test_mxfp4_metal.o ds4_metal.o
+tests/test_mxfp4_metal: tests/test_mxfp4_metal.o ds4_metal.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 check-mxfp4-half-lut:
@@ -149,7 +197,7 @@ test-mxfp4-metal: check-mxfp4-half-lut tests/test_mxfp4_metal
 tests/test_glm_q23_metal.o: tests/test_glm_q23_metal.c ds4_gpu.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
-tests/test_glm_q23_metal: tests/test_glm_q23_metal.o ds4_metal.o
+tests/test_glm_q23_metal: tests/test_glm_q23_metal.o ds4_metal.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 test-glm-q23-metal: tests/test_glm_q23_metal
@@ -221,7 +269,7 @@ ds4-agent: ds4_agent.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o ds4_gpu_ar
 gguf-tools/quality-testing/score_official.o: gguf-tools/quality-testing/score_official.c ds4.h
 	$(CC) $(filter-out -ffast-math,$(QUALITY_CFLAGS)) -I. -c -o $@ $<
 
-gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.o $(CORE_OBJS) rax.o ds4_gpu_args.o
+gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.o $(CORE_OBJS) rax.o ds4_gpu_args.o $(METAL_SOURCE_ORDER_ONLY)
 	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
 
 cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_agent_cpu.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS)
@@ -316,10 +364,10 @@ ds4_eval_cpu.o: ds4_eval.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h
 ds4_agent_cpu.o: ds4_agent.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h ds4_web.h linenoise.h
 	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_agent.c
 
-ds4_metal.o: ds4_metal.m ds4_gpu.h $(METAL_SRCS)
+ds4_metal.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -c -o $@ ds4_metal.m
 
-ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h $(METAL_SRCS)
+ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -DDS4_TEST_HOOKS -c -o $@ ds4_metal.m
 
 ds4_cuda.o: ds4_cuda.cu ds4_gpu.h ds4_gpu_mgpu.h ds4_iq2_tables_cuda.inc \
@@ -448,14 +496,14 @@ test-cuda-mixed-batch: tests/test_cuda_mixed_batch
 	DS4_TEST_MODEL="$(DS4_TEST_MODEL)" ./tests/test_cuda_mixed_batch
 endif
 
-ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS)
+ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
 ifeq ($(UNAME_S),Darwin)
 	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
 else
 	$(NVCC) $(NVCCFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(CUDA_LDLIBS)
 endif
 
-ds4_agent_test: ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS)
+ds4_agent_test: ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
 ifeq ($(UNAME_S),Darwin)
 	$(CC) $(CFLAGS) -o $@ ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS) $(METAL_LDLIBS)
 else
