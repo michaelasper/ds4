@@ -54102,6 +54102,15 @@ struct ds4_session {
     float *logits;
     float *sample_probs;
     sample_arena sample_cands;
+    /* Logprob observers share one logsumexp per logits state.  logits_gen is
+     * bumped by every public entry point that can replace the s->logits
+     * content (eval/sync/speculative-commit/payload-load/set); the cache is
+     * recomputed by the first observer call after a bump. */
+    uint64_t logits_gen;
+    uint64_t logsumexp_gen;
+    double logsumexp;
+    bool logsumexp_valid;
+    bool logsumexp_ok;
     double last_sample_ms;
     float *mtp_logits;
     int greedy_splitkv_anchor_len;
@@ -54147,6 +54156,14 @@ struct ds4_session {
     bool mtp_draft_valid;
     bool greedy_splitkv_anchor_valid;
 };
+
+/* Marks the session's logits content as replaced.  Every public entry point
+ * that can write s->logits calls this on entry, which stales the shared
+ * logsumexp cache below.  Over-marking is harmless (it only forces a
+ * recompute), so entry points mark unconditionally. */
+static void ds4_session_note_logits_dirty(ds4_session *s) {
+    if (s) s->logits_gen++;
+}
 
 #ifndef DS4_NO_GPU
 static bool ds4_dspark_stats_enabled(void);
@@ -56592,6 +56609,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (s->distributed) {
         return ds4_dist_session_load_payload(s->distributed, s, fp, payload_bytes, err, errlen);
     }
@@ -57324,6 +57342,7 @@ int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, 
         payload_set_err(err, errlen, "invalid session snapshot load");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (s->distributed) {
         payload_set_err(err, errlen, "distributed session snapshots are not supported yet");
         return 1;
@@ -57767,6 +57786,7 @@ static bool ds4_session_greedy_splitkv_replay_exact(
 
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
+    ds4_session_note_logits_dirty(s);
     if (ds4_session_is_cpu(s) || ds4_session_is_glm(s)) {
         if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
         return ds4_session_argmax(s);
@@ -65291,6 +65311,7 @@ int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session sync", err, errlen)) return 1;
 #endif
+    ds4_session_note_logits_dirty(s);
     const bool mirror = ds4_session_tp_leader(s);
     if (mirror && prompt && prompt->len > 0) {
         if (!ds4_tp_send_sync(s->engine->tp.ctx, s->tp_session_id,
@@ -66359,6 +66380,7 @@ ds4_session_rewrite_result ds4_session_rewrite_from_common(
                  prompt->len, s->ctx_size);
         return DS4_SESSION_REWRITE_ERROR;
     }
+    ds4_session_note_logits_dirty(s);
     if (!s->checkpoint_valid) {
         snprintf(err, errlen, "session has no valid checkpoint");
         return DS4_SESSION_REWRITE_ERROR;
@@ -66448,6 +66470,41 @@ int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p
     return token;
 }
 
+/* The full-vocab double-precision softmax normalizer, computed once per
+ * logits state and shared by the logprob observers: a request typically asks
+ * for the sampled token's logprob and the top-k alternatives together, and
+ * the scalar double-exp pass over the vocab dwarfs everything else in those
+ * calls.  The computation keeps the original precision and accumulation
+ * order, so a cached result is bit-identical to recomputation. */
+static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out) {
+    if (s->logsumexp_valid && s->logsumexp_gen == s->logits_gen) {
+        *logsum_out = s->logsumexp;
+        return s->logsumexp_ok;
+    }
+    float max_logit = DS4_NEG_INF;
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        const float v = s->logits[i];
+        if (isfinite(v) && v > max_logit) max_logit = v;
+    }
+    double logsum = 0.0;
+    bool ok = false;
+    if (isfinite(max_logit)) {
+        double sum = 0.0;
+        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+            const float v = s->logits[i];
+            if (isfinite(v)) sum += exp((double)v - (double)max_logit);
+        }
+        logsum = (double)max_logit + log(sum);
+        ok = true;
+    }
+    s->logsumexp = logsum;
+    s->logsumexp_ok = ok;
+    s->logsumexp_gen = s->logits_gen;
+    s->logsumexp_valid = true;
+    *logsum_out = logsum;
+    return ok;
+}
+
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     if (!s || !out || k <= 0) return 0;
     if (k > (int)DS4_N_VOCAB) k = (int)DS4_N_VOCAB;
@@ -66473,12 +66530,8 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     }
     if (!isfinite(max_logit)) return 0;
 
-    double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v)) sum += exp((double)v - (double)max_logit);
-    }
-    const double logsum = (double)max_logit + log(sum);
+    double logsum = 0.0;
+    if (!ds4_session_logsumexp(s, &logsum)) return 0;
     for (int i = 0; i < k && out[i].id >= 0; i++) {
         out[i].logprob = isfinite(out[i].logit) ? (float)((double)out[i].logit - logsum) : DS4_NEG_INF;
     }
@@ -66488,19 +66541,8 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
     if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
 
-    float max_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v) && v > max_logit) max_logit = v;
-    }
-    if (!isfinite(max_logit)) return 0;
-
-    double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v)) sum += exp((double)v - (double)max_logit);
-    }
-    const double logsum = (double)max_logit + log(sum);
+    double logsum = 0.0;
+    if (!ds4_session_logsumexp(s, &logsum)) return 0;
     out->id = token;
     out->logit = s->logits[token];
     out->logprob = isfinite(out->logit) ? (float)((double)out->logit - logsum) : DS4_NEG_INF;
@@ -66515,6 +66557,7 @@ int ds4_session_copy_logits(ds4_session *s, float *out, int cap) {
 
 int ds4_session_set_logits(ds4_session *s, const float *logits, int n) {
     if (!s || !logits || n != (int)DS4_N_VOCAB) return 1;
+    ds4_session_note_logits_dirty(s);
     memcpy(s->logits, logits, (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
     return 0;
 }
@@ -67465,6 +67508,7 @@ int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session eval", err, errlen)) return 1;
 #endif
+    ds4_session_note_logits_dirty(s);
     bool probe_mtp = true;
 #ifndef DS4_NO_GPU
     if (s && s->engine && s->engine->support_kind == DS4_SUPPORT_DSPARK) {
@@ -68250,6 +68294,9 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
         if (err && errlen) snprintf(err, errlen, "decode batch has no session");
         return 1;
     }
+    for (int i = 0; i < count; i++) {
+        ds4_session_note_logits_dirty(items[i].session);
+    }
     ds4_engine *e = first->engine;
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_router_simd_topk_preflight(
@@ -68334,6 +68381,10 @@ int ds4_sessions_eval_batch_with_prefill(
                      "mixed prefill must extend a valid session checkpoint");
         }
         return 1;
+    }
+    ds4_session_note_logits_dirty(prefill_session);
+    for (int i = 0; i < count; i++) {
+        ds4_session_note_logits_dirty(items[i].session);
     }
     for (int i = 0; i < count; i++) {
         ds4_session *s = items[i].session;
@@ -68838,6 +68889,7 @@ int ds4_session_tp_spec_cycle(ds4_session *s, const int *drafts, int draft_n,
         snprintf(err, errlen, "tp: spec cycle outside worker mode");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (draft_n <= 0 || draft_n > DS4_DSPARK_MAX_BLOCK_SIZE) {
         snprintf(err, errlen, "tp: bad verify block size %d", draft_n);
         return 1;
@@ -72202,6 +72254,7 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                                         int *accepted, int accepted_cap,
                                         char *err, size_t errlen) {
     if (!s || max_tokens <= 0 || accepted_cap <= 0) return 0;
+    ds4_session_note_logits_dirty(s);
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_router_simd_topk_preflight(
             s->engine, "speculative eval", err, errlen)) return -1;
