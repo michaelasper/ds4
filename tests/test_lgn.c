@@ -1,4 +1,5 @@
 #include "../lgn.h"
+#include "../lgn_model.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -138,6 +139,78 @@ static void test_s21_topology(void) {
           "out-of-range topology returns zero");
     CHECK(!lgn_layer_is_swa(LGN_LAYER_COUNT),
           "out-of-range topology is not SWA");
+}
+
+static void test_s21_model_profile(void) {
+    const ds4_shape *shape = lgn_model_shape();
+    CHECK(shape != NULL, "Laguna model profile is available");
+    CHECK(shape->family == DS4_MODEL_FAMILY_LAGUNA,
+          "Laguna profile selects the Laguna family");
+    CHECK(shape->variant == DS4_VARIANT_LAGUNA_S21,
+          "Laguna profile selects S2.1");
+    CHECK(shape->n_layer == LGN_LAYER_COUNT && shape->n_embd == 3072u,
+          "Laguna profile dimensions");
+    CHECK(shape->n_vocab == 100352u && shape->n_expert == 256u,
+          "Laguna profile vocabulary and expert count");
+    CHECK(shape->n_head_kv == 8u && shape->n_head_dim == 128u,
+          "Laguna profile attention dimensions");
+    CHECK(shape->n_ff_dense == 12288u && shape->n_ff_exp == 1024u,
+          "Laguna profile feed-forward dimensions");
+    CHECK(shape->context_length == UINT64_C(262144) &&
+              shape->rope_orig_ctx == UINT64_C(8192),
+          "Laguna profile context limits");
+    CHECK(lgn_model_layer_head_count(0) == LGN_GLOBAL_HEAD_COUNT &&
+              lgn_model_layer_head_count(1) == LGN_SWA_HEAD_COUNT,
+          "private Laguna topology adapter");
+    CHECK(!lgn_model_layer_is_swa(0) && lgn_model_layer_is_swa(1),
+          "private Laguna SWA topology adapter");
+
+    ds4_tensor output_norm = { .type = 0 };
+    ds4_tensor output = { .type = 1 };
+    ds4_weights weights;
+    memset(&weights, 0, sizeof(weights));
+    CHECK(!lgn_weights_have_output_head(&weights),
+          "empty weights do not have an output head");
+    weights.output_norm = &output_norm;
+    CHECK(lgn_weights_have_partial_output_head(&weights) &&
+              !lgn_weights_have_output_head(&weights),
+          "one output tensor is a partial output head");
+    weights.output = &output;
+    CHECK(lgn_weights_have_output_head(&weights),
+          "paired output tensors form an output head");
+}
+
+static void test_model_admission(void) {
+    static const char key[] = "general.architecture";
+    uint8_t value[32] = {0};
+    uint64_t length = 6;
+    memcpy(value, &length, sizeof(length));
+    memcpy(value + sizeof(length), "laguna", 6);
+
+    ds4_kv kv = {
+        .key = { key, sizeof(key) - 1u },
+        .type = 8u, /* GGUF_VALUE_STRING */
+        .value_pos = 0,
+    };
+    ds4_model model = {
+        .map = value,
+        .size = sizeof(value),
+        .n_kv = 1,
+        .kv = &kv,
+    };
+    ds4_str arch = {0};
+    CHECK(lgn_model_is_laguna(&model, &arch),
+          "Laguna model admission accepts literal architecture");
+    CHECK(arch.len == 6u && memcmp(arch.ptr, "laguna", 6) == 0,
+          "Laguna model admission returns architecture span");
+
+    memcpy(value + sizeof(length), "glm-dsa", 7);
+    length = 7;
+    memcpy(value, &length, sizeof(length));
+    CHECK(!lgn_model_is_laguna(&model, NULL),
+          "Laguna model admission rejects non-Laguna architecture");
+    CHECK(!lgn_model_is_laguna(NULL, NULL),
+          "Laguna model admission rejects a missing model");
 }
 
 typedef struct {
@@ -391,6 +464,8 @@ int main(void) {
     test_ladder_parser();
     test_ladder_formatter();
     test_s21_topology();
+    test_s21_model_profile();
+    test_model_admission();
     test_laguna_pretokenizer();
     if (failures != 0) {
         fprintf(stderr, "test-lgn: %d failure(s)\n", failures);

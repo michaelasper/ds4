@@ -49,7 +49,7 @@ DS4_TEST_DFLASH ?=
 LAGUNA_TEST_MODEL ?=
 
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
-CORE_OBJS = ds4.o lgn.o ds4_ssd.o ds4_metal.o
+CORE_OBJS = ds4.o lgn.o lgn_model.o ds4_ssd.o ds4_metal.o
 
 DS4_TEST_METAL_OBJ := ds4_metal_test_hooks.o
 SSD_STREAMING_HOOK_TEST := tests/test_ssd_streaming_hooks
@@ -167,23 +167,26 @@ test-glm-q23-metal: tests/test_glm_q23_metal
 tests/test_sampling.o: tests/test_sampling.c ds4.h
 	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o ds4_kvstore.o rax.o ds4_ssd.o
+tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o lgn_model.o ds4_kvstore.o rax.o ds4_ssd.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/test_lgn.o: tests/test_lgn.c lgn.h
+tests/test_lgn.o: tests/test_lgn.c lgn.h lgn_model.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
-tests/test_lgn: tests/test_lgn.o lgn.o
+tests/test_lgn: tests/test_lgn.o lgn.o lgn_model.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test-lgn: tests/test_lgn
 	./tests/test_lgn
 
-ds4.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h
+ds4.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
 
 lgn.o: lgn.c lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn.c
+
+lgn_model.o: lgn_model.c lgn_model.h lgn.h
+	$(CC) $(CFLAGS) -c -o $@ lgn_model.c
 
 ds4_ssd.o: ds4_ssd.c ds4_ssd.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_ssd.c
@@ -221,19 +224,19 @@ ds4_metal.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -DDS4_TEST_HOOKS -c -o $@ ds4_metal.m
 
-ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h ds4_gpu_mgpu.h
+ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h ds4_gpu_mgpu.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h
+ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
 tests/test_ssd_streaming_hooks.o: tests/test_ssd_streaming_hooks.c
 	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
-ds4_streaming_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h
+ds4_streaming_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o ds4_help.o ds4_kvstore.o rax.o ds4_ssd.o ds4_metal_test_hooks.o | check-metal-sources
+tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o lgn_model.o ds4_help.o ds4_kvstore.o rax.o ds4_ssd.o ds4_metal_test_hooks.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)

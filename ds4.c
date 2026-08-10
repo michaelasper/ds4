@@ -42,6 +42,7 @@
 
 #include "ds4.h"
 #include "lgn.h"
+#include "lgn_model.h"
 
 /* GPU gate constants used by the retained internal Metal helper paths.  The
  * public transport protocol was removed; these values are intentionally
@@ -481,101 +482,6 @@ enum {
     DS4_DFLASH_CACHE_CAP      = 512,
 };
 
-typedef enum {
-    DS4_MODEL_FAMILY_DEEPSEEK4 = 0,
-    DS4_MODEL_FAMILY_GLM_DSA   = 1,
-    DS4_MODEL_FAMILY_LAGUNA    = 2,
-} ds4_model_family;
-
-typedef enum {
-    DS4_VARIANT_FLASH = 0,
-    DS4_VARIANT_PRO   = 1,
-    DS4_VARIANT_GLM52 = 2,
-    DS4_VARIANT_LAGUNA_S21 = 3,
-} ds4_variant;
-
-typedef struct {
-    const char *name;
-    ds4_model_family family;
-    ds4_variant variant;
-    uint32_t n_layer;
-    uint32_t n_embd;
-    uint32_t n_vocab;
-    uint32_t n_head;
-    uint32_t n_head_kv;
-    uint32_t n_head_dim;
-    uint32_t n_value_dim;
-    uint32_t n_rot;
-    uint32_t n_out_group;
-    uint32_t n_lora_q;
-    uint32_t n_lora_o;
-    uint32_t n_expert;
-    uint32_t n_expert_used;
-    uint32_t n_expert_shared;
-    uint32_t n_ff_exp;
-    uint32_t n_ff_shared;
-    uint32_t n_ff_dense;
-    uint32_t n_hash_layer;
-    uint32_t n_swa;
-    uint32_t n_indexer_head;
-    uint32_t n_indexer_head_dim;
-    uint32_t n_indexer_top_k;
-    uint32_t n_hc;
-    uint32_t n_hc_sinkhorn_iter;
-    uint32_t n_nextn_predict;
-    uint32_t n_leading_dense;
-    uint32_t n_kv_lora;
-    uint32_t n_key_mla;
-    uint32_t n_value_mla;
-    uint32_t n_rot_swa;
-    float rms_eps;
-    float hc_eps;
-    float expert_weight_scale;
-    float swiglu_clamp_exp;
-    float rope_freq_base;
-    float rope_scale_factor;
-    float rope_yarn_beta_fast;
-    float rope_yarn_beta_slow;
-    float rope_yarn_attn_factor;
-    float rope_freq_base_swa;
-    float compress_rope_freq_base;
-    uint64_t context_length;
-    uint64_t rope_orig_ctx;
-} ds4_shape;
-
-static const ds4_shape DS4_SHAPE_LAGUNA_S21 = {
-    .name = "Laguna S 2.1",
-    .family = DS4_MODEL_FAMILY_LAGUNA,
-    .variant = DS4_VARIANT_LAGUNA_S21,
-    .n_layer = 48,
-    .n_embd = 3072,
-    .n_vocab = 100352,
-    .n_head = 72,
-    .n_head_kv = 8,
-    .n_head_dim = 128,
-    .n_value_dim = 128,
-    .n_rot = 64,
-    .n_expert = 256,
-    .n_expert_used = 10,
-    .n_expert_shared = 1,
-    .n_ff_exp = 1024,
-    .n_ff_shared = 1024,
-    .n_ff_dense = 12288,
-    .n_swa = 512,
-    .n_leading_dense = 1,
-    .n_rot_swa = 128,
-    .rms_eps = 1.0e-6f,
-    .expert_weight_scale = 2.5f,
-    .rope_freq_base = 500000.0f,
-    .rope_scale_factor = 32.0f,
-    .rope_yarn_beta_fast = 32.0f,
-    .rope_yarn_beta_slow = 1.0f,
-    .rope_yarn_attn_factor = 1.0f,
-    .rope_freq_base_swa = 10000.0f,
-    .context_length = 262144,
-    .rope_orig_ctx = 8192,
-};
-
 static ds4_shape g_ds4_shape = {
     .name = "DeepSeek V4 Flash",
     .family = DS4_MODEL_FAMILY_DEEPSEEK4,
@@ -665,6 +571,11 @@ static uint32_t g_ds4_compress_ratios[DS4_MAX_LAYER] = {0};
 #define DS4_COMPRESS_ROPE_FREQ_BASE   (g_ds4_shape.compress_rope_freq_base)
 #define DS4_CONTEXT_LENGTH            (g_ds4_shape.context_length)
 #define DS4_ROPE_ORIG_CTX             (g_ds4_shape.rope_orig_ctx)
+
+/* Temporary source-compatible alias while Laguna shape ownership moves to
+ * lgn_model.c.  Execution code can retain the established fixed-shape reads;
+ * the immutable profile itself no longer lives in this orchestration unit. */
+#define DS4_SHAPE_LAGUNA_S21           (*lgn_model_shape())
 
 static int g_ds4_lock_fd = -1;
 
@@ -988,11 +899,6 @@ static inline DS4_MAYBE_UNUSED int32_t dot_q2_16(const uint8_t *q2, const int8_t
 #define DS4_GGUF_MAGIC 0x46554747u /* "GGUF", little endian. */
 #define DS4_MAX_DIMS   8
 
-typedef struct {
-    const char *ptr;
-    uint64_t len;
-} ds4_str;
-
 typedef ds4_tokens token_vec;
 
 typedef struct {
@@ -1018,7 +924,7 @@ static uint32_t ds4_layer_compress_ratio(uint32_t il) {
 static uint32_t ds4_layer_head_count(uint32_t il) {
     if (il >= DS4_N_LAYER) ds4_die("layer index is outside the loaded model layout");
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        const uint32_t n = lgn_layer_head_count(il);
+        const uint32_t n = lgn_model_layer_head_count(il);
         if (n == 0) ds4_die("Laguna layer topology is not initialized");
         return n;
     }
@@ -1028,7 +934,7 @@ static uint32_t ds4_layer_head_count(uint32_t il) {
 static bool ds4_laguna_layer_is_swa(uint32_t il) {
     if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return false;
     (void)ds4_layer_head_count(il);
-    return lgn_layer_is_swa(il);
+    return lgn_model_layer_is_swa(il);
 }
 
 static void ds4_die_errno(const char *what, const char *path) {
@@ -2008,39 +1914,6 @@ enum {
     DS4_TENSOR_MXFP4    = 39,
 };
 
-typedef struct {
-    ds4_str key;
-    uint32_t type;
-    uint64_t value_pos;
-} ds4_kv;
-
-typedef struct {
-    ds4_str name;
-    uint32_t ndim;
-    uint64_t dim[DS4_MAX_DIMS];
-    uint32_t type;
-    uint64_t rel_offset;
-    uint64_t abs_offset;
-    uint64_t elements;
-    uint64_t bytes;
-} ds4_tensor;
-
-typedef struct {
-    int fd;
-    const uint8_t *map;
-    uint64_t size;
-
-    uint32_t version;
-    uint64_t n_kv;
-    uint64_t n_tensors;
-    uint64_t alignment;
-    uint64_t tensor_data_pos;
-    uint64_t max_tensor_bytes;
-
-    ds4_kv *kv;
-    ds4_tensor *tensors;
-} ds4_model;
-
 static uint64_t scalar_value_size(uint32_t type) {
     switch (type) {
     case GGUF_VALUE_UINT8:
@@ -2231,16 +2104,6 @@ static bool model_get_f32_compat(const ds4_model *m, const char *key, float *out
         return true;
     }
     return false;
-}
-
-static bool model_get_bool(const ds4_model *m, const char *key, bool *out) {
-    ds4_kv *kv = model_find_kv(m, key);
-    if (!kv || kv->type != GGUF_VALUE_BOOL) return false;
-    ds4_cursor c = cursor_at(m, kv->value_pos);
-    uint8_t v = 0;
-    if (!cursor_read(&c, &v, sizeof(v))) return false;
-    *out = v != 0;
-    return true;
 }
 
 typedef struct {
@@ -4085,74 +3948,6 @@ static void ds4_vec_dot_iq2_xxs_pair_q8_K(
 }
 
 typedef struct {
-    ds4_tensor *hc_attn_fn;
-    ds4_tensor *hc_attn_scale;
-    ds4_tensor *hc_attn_base;
-    ds4_tensor *attn_norm;
-    ds4_tensor *attn_q;
-    ds4_tensor *attn_k;
-    ds4_tensor *attn_v;
-    ds4_tensor *attn_gate;
-    ds4_tensor *attn_q_norm;
-    ds4_tensor *attn_k_norm;
-    ds4_tensor *attn_q_a;
-    ds4_tensor *attn_q_a_norm;
-    ds4_tensor *attn_q_b;
-    ds4_tensor *attn_kv;
-    ds4_tensor *attn_kv_a_mqa;
-    ds4_tensor *attn_kv_a_norm;
-    ds4_tensor *attn_k_b;
-    ds4_tensor *attn_v_b;
-    ds4_tensor *attn_sinks;
-    ds4_tensor *attn_output;
-    ds4_tensor *attn_output_a;
-    ds4_tensor *attn_output_b;
-    ds4_tensor *attn_compressor_ape;
-    ds4_tensor *attn_compressor_kv;
-    ds4_tensor *attn_compressor_gate;
-    ds4_tensor *attn_compressor_norm;
-    ds4_tensor *indexer_attn_q_b;
-    ds4_tensor *indexer_attn_k;
-    ds4_tensor *indexer_k_norm;
-    ds4_tensor *indexer_k_norm_b;
-    ds4_tensor *indexer_proj;
-    ds4_tensor *indexer_compressor_ape;
-    ds4_tensor *indexer_compressor_kv;
-    ds4_tensor *indexer_compressor_gate;
-    ds4_tensor *indexer_compressor_norm;
-    ds4_tensor *hc_ffn_fn;
-    ds4_tensor *hc_ffn_scale;
-    ds4_tensor *hc_ffn_base;
-    ds4_tensor *ffn_norm;
-    ds4_tensor *ffn_gate_tid2eid;
-    ds4_tensor *ffn_gate;
-    ds4_tensor *ffn_up;
-    ds4_tensor *ffn_down;
-    ds4_tensor *ffn_gate_inp;
-    ds4_tensor *ffn_exp_probs_b;
-    ds4_tensor *ffn_gate_exps;
-    ds4_tensor *ffn_up_exps;
-    ds4_tensor *ffn_down_exps;
-    ds4_tensor *ffn_gate_shexp;
-    ds4_tensor *ffn_up_shexp;
-    ds4_tensor *ffn_down_shexp;
-    ds4_tensor *nextn_eh_proj;
-    ds4_tensor *nextn_enorm;
-    ds4_tensor *nextn_hnorm;
-    ds4_tensor *nextn_shared_head_norm;
-} ds4_layer_weights;
-
-typedef struct {
-    ds4_tensor *token_embd;
-    ds4_tensor *output_hc_base;
-    ds4_tensor *output_hc_fn;
-    ds4_tensor *output_hc_scale;
-    ds4_tensor *output_norm;
-    ds4_tensor *output;
-    ds4_layer_weights layer[DS4_MAX_LAYER];
-} ds4_weights;
-
-typedef struct {
     ds4_tensor *e_proj;
     ds4_tensor *h_proj;
     ds4_tensor *enorm;
@@ -4252,15 +4047,6 @@ static uint64_t required_u64_compat(const ds4_model *m, const char *key) {
 static float required_f32(const ds4_model *m, const char *key) {
     float v = 0.0f;
     if (!model_get_f32_compat(m, key, &v)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
-        exit(1);
-    }
-    return v;
-}
-
-static bool required_bool(const ds4_model *m, const char *key) {
-    bool v = false;
-    if (!model_get_bool(m, key, &v)) {
         fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
         exit(1);
     }
@@ -4726,7 +4512,7 @@ static void tensor_expect_routed_expert(
 static bool weights_have_output_head(const ds4_weights *w) {
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
         DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        return w && w->output_norm && w->output;
+        return lgn_weights_have_output_head(w);
     }
     return w &&
            w->output_hc_base &&
@@ -4739,7 +4525,7 @@ static bool weights_have_output_head(const ds4_weights *w) {
 static bool weights_have_partial_output_head(const ds4_weights *w) {
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
         DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        return w && (w->output_norm || w->output);
+        return lgn_weights_have_partial_output_head(w);
     }
     return w &&
            (w->output_hc_base ||
@@ -4750,30 +4536,7 @@ static bool weights_have_partial_output_head(const ds4_weights *w) {
 }
 
 static bool weights_laguna_layer_has_required(const ds4_layer_weights *l, uint32_t il) {
-    if (!l ||
-        !l->attn_norm ||
-        !l->attn_q ||
-        !l->attn_k ||
-        !l->attn_v ||
-        !l->attn_gate ||
-        !l->attn_q_norm ||
-        !l->attn_k_norm ||
-        !l->attn_output ||
-        !l->ffn_norm) {
-        return false;
-    }
-
-    if (il < DS4_N_LEADING_DENSE) {
-        return l->ffn_gate && l->ffn_up && l->ffn_down;
-    }
-    return l->ffn_gate_inp &&
-           l->ffn_exp_probs_b &&
-           l->ffn_gate_exps &&
-           l->ffn_up_exps &&
-           l->ffn_down_exps &&
-           l->ffn_gate_shexp &&
-           l->ffn_up_shexp &&
-           l->ffn_down_shexp;
+    return lgn_weights_laguna_layer_has_required(l, il);
 }
 
 static bool weights_layer_has_required(const ds4_layer_weights *l, uint32_t il) {
@@ -4845,149 +4608,11 @@ static void weights_validate_laguna_layout(
         uint32_t           layer_end,
         bool               require_token_embd,
         bool               require_output) {
-    if (!w) ds4_die("internal error: missing weights while validating Laguna layout");
-    if (layer_start >= DS4_N_LAYER) ds4_die("invalid first layer in Laguna weight layout validation");
-    if (layer_end == UINT32_MAX) layer_end = DS4_N_LAYER - 1u;
-    if (layer_end >= DS4_N_LAYER || layer_end < layer_start) {
-        ds4_die("invalid layer range in Laguna weight layout validation");
-    }
-
-    /* Poolside published two coherent recipes under the same Q4_K_M
-     * filename. The embedding type identifies full models; attention Q is
-     * the equivalent marker for layer-only weight views. */
-    const ds4_tensor *layout_marker = w->token_embd;
-    if (!layout_marker) layout_marker = w->layer[layer_start].attn_q;
-    if (!layout_marker) {
-        ds4_die("cannot identify Laguna quantization layout");
-    }
-    const bool signal_q8 = layout_marker->type == DS4_TENSOR_Q8_0;
-    const bool legacy_layout =
-        (w->token_embd && layout_marker->type == DS4_TENSOR_Q4_K) ||
-        (!w->token_embd && layout_marker->type == DS4_TENSOR_F16);
-    if (!signal_q8 && !legacy_layout) {
-        fprintf(stderr,
-                "ds4: unsupported Laguna quantization layout marker %s; "
-                "expected legacy Q4_K/F16 or Q8_0 signal weights\n",
-                tensor_type_name(layout_marker->type));
-        exit(1);
-    }
-
-    if (require_token_embd && !w->token_embd) ds4_die("required token embedding tensor is missing");
-    if (w->token_embd) {
-        tensor_expect_layout(w->token_embd,
-                             signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_Q4_K,
-                             2, DS4_N_EMBD, DS4_N_VOCAB, 0);
-    }
-
-    const bool have_output = weights_have_output_head(w);
-    if (require_output && !have_output) ds4_die("required output head tensors are missing");
-    if (weights_have_partial_output_head(w) && !have_output) ds4_die("partial output head in GGUF");
-    if (have_output) {
-        tensor_expect_layout(w->output_norm, DS4_TENSOR_F32,
-                             1, DS4_N_EMBD, 0, 0);
-        tensor_expect_layout(w->output,
-                             signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_Q6_K,
-                             2, DS4_N_EMBD, DS4_N_VOCAB, 0);
-    }
-
-    for (uint32_t il = layer_start; il <= layer_end; il++) {
-        const ds4_layer_weights *l = &w->layer[il];
-        if (!weights_laguna_layer_has_required(l, il)) {
-            fprintf(stderr, "ds4: required Laguna tensors for layer %u are missing\n", il);
-            exit(1);
-        }
-        const uint32_t n_head = ds4_layer_head_count(il);
-        const uint64_t q_dim = (uint64_t)n_head * DS4_N_HEAD_DIM;
-        const uint64_t kv_dim = (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM;
-
-        tensor_expect_layout(l->attn_norm, DS4_TENSOR_F32,
-                             1, DS4_N_EMBD, 0, 0);
-        const uint32_t attn_type =
-            signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_F16;
-        tensor_expect_layout(l->attn_q, attn_type,
-                             2, DS4_N_EMBD, q_dim, 0);
-        tensor_expect_layout(l->attn_k, attn_type,
-                             2, DS4_N_EMBD, kv_dim, 0);
-        tensor_expect_layout(l->attn_v, attn_type,
-                             2, DS4_N_EMBD, kv_dim, 0);
-        tensor_expect_layout(l->attn_gate, attn_type,
-                             2, DS4_N_EMBD, n_head, 0);
-        tensor_expect_layout(l->attn_q_norm, DS4_TENSOR_F32,
-                             1, DS4_N_HEAD_DIM, 0, 0);
-        tensor_expect_layout(l->attn_k_norm, DS4_TENSOR_F32,
-                             1, DS4_N_HEAD_DIM, 0, 0);
-        tensor_expect_layout(l->attn_output, attn_type,
-                             2, q_dim, DS4_N_EMBD, 0);
-        tensor_expect_layout(l->ffn_norm, DS4_TENSOR_F32,
-                             1, DS4_N_EMBD, 0, 0);
-
-        if (il < DS4_N_LEADING_DENSE) {
-            tensor_expect_layout(l->ffn_gate,
-                                 signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_Q4_K,
-                                 2, DS4_N_EMBD, DS4_N_FF_DENSE, 0);
-            tensor_expect_layout(l->ffn_up,
-                                 signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_Q4_K,
-                                 2, DS4_N_EMBD, DS4_N_FF_DENSE, 0);
-            tensor_expect_layout(l->ffn_down,
-                                 signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_Q6_K,
-                                 2, DS4_N_FF_DENSE, DS4_N_EMBD, 0);
-            continue;
-        }
-
-        tensor_expect_layout(l->ffn_gate_inp, DS4_TENSOR_F32,
-                             2, DS4_N_EMBD, DS4_N_EXPERT, 0);
-        tensor_expect_layout(l->ffn_exp_probs_b, DS4_TENSOR_F32,
-                             1, DS4_N_EXPERT, 0, 0);
-        /* Mixed files may spend more bits on selected layers, but all three
-         * routed projections within one layer must use a coherent layout. */
-        const uint32_t layer_routed_type = l->ffn_gate_exps->type;
-        if (layer_routed_type != DS4_TENSOR_Q4_K &&
-            layer_routed_type != DS4_TENSOR_Q3_K &&
-            layer_routed_type != DS4_TENSOR_Q2_K) {
-            fprintf(stderr,
-                    "ds4: Laguna routed experts for layer %u have unsupported type %s\n",
-                    il, tensor_type_name(layer_routed_type));
-            exit(1);
-        }
-        tensor_expect_layout(l->ffn_gate_exps, layer_routed_type,
-                             3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
-        tensor_expect_layout(l->ffn_up_exps, layer_routed_type,
-                             3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
-        const bool down_supported =
-            l->ffn_down_exps->type == layer_routed_type ||
-            (layer_routed_type == DS4_TENSOR_Q4_K &&
-             !signal_q8 &&
-             l->ffn_down_exps->type == DS4_TENSOR_Q6_K);
-        if (!down_supported) {
-            fprintf(stderr,
-                    "ds4: Laguna routed down tensor for layer %u has type %s, "
-                    "incompatible with %s gate/up experts\n",
-                    il,
-                    tensor_type_name(l->ffn_down_exps->type),
-                    tensor_type_name(layer_routed_type));
-            exit(1);
-        }
-        tensor_expect_layout(l->ffn_down_exps, l->ffn_down_exps->type,
-                             3, DS4_N_FF_EXP, DS4_N_EMBD, DS4_N_EXPERT);
-        tensor_expect_layout(l->ffn_gate_shexp,
-                             signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_Q4_K,
-                             2, DS4_N_EMBD, DS4_N_FF_SHARED, 0);
-        tensor_expect_layout(l->ffn_up_shexp,
-                             signal_q8 ? DS4_TENSOR_Q8_0 : DS4_TENSOR_Q4_K,
-                             2, DS4_N_EMBD, DS4_N_FF_SHARED, 0);
-        const uint32_t shared_down_type =
-            signal_q8 ? DS4_TENSOR_Q8_0 : l->ffn_down_shexp->type;
-        if (!signal_q8 &&
-            shared_down_type != DS4_TENSOR_Q4_K &&
-            shared_down_type != DS4_TENSOR_Q6_K) {
-            fprintf(stderr,
-                    "ds4: Laguna shared down tensor for layer %u has unsupported type %s\n",
-                    il, tensor_type_name(shared_down_type));
-            exit(1);
-        }
-        tensor_expect_layout(l->ffn_down_shexp, shared_down_type,
-                             2, DS4_N_FF_SHARED, DS4_N_EMBD, 0);
-    }
+    lgn_weights_validate_layout(w,
+                                layer_start,
+                                layer_end,
+                                require_token_embd,
+                                require_output);
 }
 
 static void weights_validate_layout(
@@ -5308,6 +4933,14 @@ static void dspark_weights_validate_layout(ds4_dspark_weights *dw) {
                                   1, 0);
 }
 
+static void config_validate_laguna_model(const ds4_model *m) {
+    g_ds4_shape = *lgn_model_shape();
+    memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
+    lgn_model_validate_config(m);
+}
+
+/* Generic metadata diagnostics remain local for retained DFlash support;
+ * Laguna's exact profile checks live in lgn_model.c. */
 static void config_expect_u32(const char *name, uint32_t got, uint32_t expected) {
     if (got == expected) return;
     fprintf(stderr, "ds4: expected %s=%u for %s, got %u\n",
@@ -5330,204 +4963,17 @@ static void config_expect_f32(const char *name, float got, float expected) {
     exit(1);
 }
 
-static void config_expect_bool(const char *name, bool got, bool expected) {
-    if (got == expected) return;
-    fprintf(stderr, "ds4: expected %s=%s for %s, got %s\n",
-            name, expected ? "true" : "false", DS4_MODEL_SHAPE_NAME, got ? "true" : "false");
-    exit(1);
-}
-
-static void config_validate_laguna_model(const ds4_model *m) {
-    g_ds4_shape = DS4_SHAPE_LAGUNA_S21;
-    memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
-
-    const uint32_t n_layer = required_u32(m, "laguna.block_count");
-    const uint64_t n_ctx = required_u64_compat(m, "laguna.context_length");
-    const uint32_t n_embd = required_u32(m, "laguna.embedding_length");
-    const uint32_t n_vocab = required_u32(m, "laguna.vocab_size");
-    const uint32_t n_ff_dense = required_u32(m, "laguna.feed_forward_length");
-    const uint32_t n_head_kv = required_u32(m, "laguna.attention.head_count_kv");
-    const uint32_t n_head_dim = required_u32(m, "laguna.attention.key_length");
-    const uint32_t n_value_dim = required_u32(m, "laguna.attention.value_length");
-    const uint32_t n_rot = required_u32(m, "laguna.rope.dimension_count");
-    const uint32_t n_rot_swa = required_u32(m, "laguna.rope.dimension_count_swa");
-    const uint32_t n_swa = required_u32(m, "laguna.attention.sliding_window");
-    const uint32_t n_expert = required_u32(m, "laguna.expert_count");
-    const uint32_t n_expert_used = required_u32(m, "laguna.expert_used_count");
-    const uint32_t n_ff_exp = required_u32(m, "laguna.expert_feed_forward_length");
-    const uint32_t n_ff_shared =
-        required_u32(m, "laguna.expert_shared_feed_forward_length");
-    const uint32_t expert_gating_func = required_u32(m, "laguna.expert_gating_func");
-    const uint32_t n_leading_dense = required_u32(m, "laguna.leading_dense_block_count");
-
-    config_expect_u32("block_count", n_layer, DS4_N_LAYER);
-    config_expect_u64("context_length", n_ctx, DS4_CONTEXT_LENGTH);
-    config_expect_u32("embedding_length", n_embd, DS4_N_EMBD);
-    config_expect_u32("vocab_size", n_vocab, DS4_N_VOCAB);
-    config_expect_u32("feed_forward_length", n_ff_dense, DS4_N_FF_DENSE);
-    config_expect_u32("attention.head_count_kv", n_head_kv, DS4_N_HEAD_KV);
-    config_expect_u32("attention.key_length", n_head_dim, DS4_N_HEAD_DIM);
-    config_expect_u32("attention.value_length", n_value_dim, DS4_N_VALUE_DIM);
-    config_expect_u32("rope.dimension_count", n_rot, DS4_N_ROT);
-    config_expect_u32("rope.dimension_count_swa", n_rot_swa, DS4_N_ROT_SWA);
-    config_expect_u32("attention.sliding_window", n_swa, DS4_N_SWA);
-    config_expect_u32("expert_count", n_expert, DS4_N_EXPERT);
-    config_expect_u32("expert_used_count", n_expert_used, DS4_N_EXPERT_USED);
-    config_expect_u32("expert_feed_forward_length", n_ff_exp, DS4_N_FF_EXP);
-    config_expect_u32("expert_shared_feed_forward_length", n_ff_shared, DS4_N_FF_SHARED);
-    config_expect_u32("expert_gating_func", expert_gating_func, 2);
-    config_expect_u32("leading_dense_block_count", n_leading_dense, DS4_N_LEADING_DENSE);
-
-    ds4_array_ref heads = {0};
-    if (!model_get_array(m, "laguna.attention.head_count", &heads) ||
-        (heads.type != GGUF_VALUE_UINT32 && heads.type != GGUF_VALUE_INT32) ||
-        heads.len != DS4_N_LAYER) {
-        ds4_die("laguna.attention.head_count must be an int32/uint32 array with one entry per layer");
-    }
-    ds4_cursor hc = cursor_at(m, heads.data_pos);
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        uint32_t got = 0;
-        if (heads.type == GGUF_VALUE_UINT32) {
-            if (!cursor_u32(&hc, &got)) ds4_die(hc.error);
-        } else {
-            int32_t v = 0;
-            if (!cursor_read(&hc, &v, sizeof(v))) ds4_die(hc.error);
-            if (v <= 0) ds4_die("Laguna head-count metadata contains a non-positive value");
-            got = (uint32_t)v;
-        }
-        const uint32_t expected = lgn_layer_head_count(il);
-        if (got != expected) {
-            fprintf(stderr,
-                    "ds4: unexpected Laguna head count at layer %u: got %u, expected %u\n",
-                    il, got, expected);
-            exit(1);
-        }
-    }
-
-    ds4_str rope_type = {0};
-    if (!model_get_string(m, "laguna.rope.scaling.type", &rope_type) ||
-        !ds4_streq(rope_type, "yarn")) {
-        ds4_die("Laguna requires rope.scaling.type=yarn");
-    }
-    config_expect_u64("rope.scaling.original_context_length",
-                      required_u64_compat(m, "laguna.rope.scaling.original_context_length"),
-                      DS4_ROPE_ORIG_CTX);
-    config_expect_f32("rope.freq_base",
-                      required_f32(m, "laguna.rope.freq_base"),
-                      DS4_ROPE_FREQ_BASE);
-    config_expect_f32("rope.freq_base_swa",
-                      required_f32(m, "laguna.rope.freq_base_swa"),
-                      DS4_ROPE_FREQ_BASE_SWA);
-    config_expect_f32("rope.scaling.factor",
-                      required_f32(m, "laguna.rope.scaling.factor"),
-                      DS4_ROPE_SCALE_FACTOR);
-    config_expect_f32("rope.scaling.yarn_attn_factor",
-                      required_f32(m, "laguna.rope.scaling.yarn_attn_factor"),
-                      DS4_ROPE_YARN_ATTN_FACTOR);
-    config_expect_f32("rope.scaling.yarn_beta_fast",
-                      required_f32(m, "laguna.rope.scaling.yarn_beta_fast"),
-                      DS4_ROPE_YARN_BETA_FAST);
-    config_expect_f32("rope.scaling.yarn_beta_slow",
-                      required_f32(m, "laguna.rope.scaling.yarn_beta_slow"),
-                      DS4_ROPE_YARN_BETA_SLOW);
-    config_expect_f32("attention.layer_norm_rms_epsilon",
-                      required_f32(m, "laguna.attention.layer_norm_rms_epsilon"),
-                      DS4_RMS_EPS);
-    config_expect_f32("expert_weights_scale",
-                      required_f32(m, "laguna.expert_weights_scale"),
-                      DS4_EXPERT_WEIGHT_SCALE);
-    config_expect_bool("expert_weights_norm",
-                       required_bool(m, "laguna.expert_weights_norm"),
-                       true);
-}
-
 /* Architecture admission is deliberately side-effect free.  Keep this
  * predicate ahead of every family validator: those validators select global
  * shape state, and a non-Laguna GGUF must never reach the legacy branches. */
-static bool config_model_is_laguna(const ds4_model *m, ds4_str *arch_out) {
-    ds4_str arch = {0};
-    if (!m || !model_get_string(m, "general.architecture", &arch)) return false;
-    if (arch_out) *arch_out = arch;
-    if (arch.len > SIZE_MAX) return false;
-    return lgn_architecture_is_supported(arch.ptr, (size_t)arch.len);
-}
-
 static void config_require_laguna_architecture(const ds4_model *m) {
-    ds4_str arch = {0};
-    if (!config_model_is_laguna(m, &arch)) {
-        if (!arch.ptr) {
-            ds4_die("GGUF general.architecture is required and must be literal laguna");
-        }
-        const int shown = arch.len > 128u ? 128 : (int)arch.len;
-        fprintf(stderr,
-                "ds4: unsupported GGUF general.architecture '%.*s%s'; "
-                "only literal laguna is supported\n",
-                shown,
-                arch.ptr,
-                arch.len > 128u ? "..." : "");
-        exit(1);
-    }
+    lgn_model_require_laguna_architecture(m);
 }
 
 static void config_validate_model(const ds4_model *m) {
     /* Fail closed before any legacy model-family selection or shape mutation. */
     config_require_laguna_architecture(m);
     config_validate_laguna_model(m);
-}
-
-static void weights_bind_output(
-        ds4_weights     *w,
-        const ds4_model *m,
-        bool             required,
-        bool             optional) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
-        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        if (required) {
-            w->output_norm = required_tensor(m, "output_norm.weight");
-            w->output      = required_tensor(m, "output.weight");
-        } else if (optional) {
-            w->output_norm = model_find_tensor(m, "output_norm.weight");
-            w->output      = model_find_tensor(m, "output.weight");
-        }
-    }
-
-    if (optional &&
-        weights_have_partial_output_head(w) &&
-        !weights_have_output_head(w)) {
-        ds4_die("partial output head in GGUF");
-    }
-}
-
-static void weights_bind_laguna_layer(ds4_layer_weights *l, const ds4_model *m, uint32_t il) {
-    l->attn_norm     = required_tensorf(m, "blk.%u.attn_norm.weight", il);
-    l->attn_q        = required_tensorf(m, "blk.%u.attn_q.weight", il);
-    l->attn_k        = required_tensorf(m, "blk.%u.attn_k.weight", il);
-    l->attn_v        = required_tensorf(m, "blk.%u.attn_v.weight", il);
-    l->attn_gate     = required_tensorf(m, "blk.%u.attn_gate.weight", il);
-    l->attn_q_norm   = required_tensorf(m, "blk.%u.attn_q_norm.weight", il);
-    l->attn_k_norm   = required_tensorf(m, "blk.%u.attn_k_norm.weight", il);
-    l->attn_output   = required_tensorf(m, "blk.%u.attn_output.weight", il);
-    l->ffn_norm      = required_tensorf(m, "blk.%u.ffn_norm.weight", il);
-
-    if (il < DS4_N_LEADING_DENSE) {
-        l->ffn_gate = required_tensorf(m, "blk.%u.ffn_gate.weight", il);
-        l->ffn_up   = required_tensorf(m, "blk.%u.ffn_up.weight", il);
-        l->ffn_down = required_tensorf(m, "blk.%u.ffn_down.weight", il);
-        return;
-    }
-
-    l->ffn_gate_inp    = required_tensorf(m, "blk.%u.ffn_gate_inp.weight", il);
-    l->ffn_exp_probs_b = required_tensorf(m, "blk.%u.exp_probs_b.bias", il);
-    l->ffn_gate_exps   = required_tensorf(m, "blk.%u.ffn_gate_exps.weight", il);
-    l->ffn_up_exps     = required_tensorf(m, "blk.%u.ffn_up_exps.weight", il);
-    l->ffn_down_exps   = required_tensorf(m, "blk.%u.ffn_down_exps.weight", il);
-    l->ffn_gate_shexp  = required_tensorf(m, "blk.%u.ffn_gate_shexp.weight", il);
-    l->ffn_up_shexp    = required_tensorf(m, "blk.%u.ffn_up_shexp.weight", il);
-    l->ffn_down_shexp  = required_tensorf(m, "blk.%u.ffn_down_shexp.weight", il);
-}
-
-static void weights_bind_layer(ds4_layer_weights *l, const ds4_model *m, uint32_t il) {
-    weights_bind_laguna_layer(l, m, il);
 }
 
 /* Bind tensor names once into the fixed DS4 layer layout.  This is the point
@@ -5540,34 +4986,23 @@ static void weights_bind(
         uint32_t         load_layer_end,
         bool             require_output,
         bool             optional_output) {
-    memset(w, 0, sizeof(*w));
-
-    const uint32_t executable_layers = DS4_N_LAYER;
-    uint32_t start = 0;
-    uint32_t end = executable_layers - 1u;
-    bool require_token_embd = true;
-    if (load_slice) {
-        if (load_layer_start >= executable_layers) ds4_die("invalid model load layer slice");
-        start = load_layer_start;
-        end = load_layer_end == UINT32_MAX ? executable_layers - 1u : load_layer_end;
-        if (end >= executable_layers || end < start) ds4_die("invalid model load layer slice");
-        require_token_embd = start == 0;
-    } else {
-        require_output = true;
-        optional_output = false;
-    }
-
-    if (require_token_embd) {
-        w->token_embd = required_tensor(m, "token_embd.weight");
-    } else {
-        w->token_embd = model_find_tensor(m, "token_embd.weight");
-    }
-    weights_bind_output(w, m, require_output, optional_output);
-
-    for (uint32_t il = start; il <= end; il++) {
-        weights_bind_layer(&w->layer[il], m, il);
-    }
-    weights_validate_layout(w, start, end, require_token_embd, require_output);
+    lgn_weights_bind(w,
+                     m,
+                     load_slice,
+                     load_layer_start,
+                     load_layer_end,
+                     require_output,
+                     optional_output);
+    /* Keep the orchestration boundary thin while retaining the established
+     * validation call site for callers that build a partial layer view. */
+    const uint32_t start = load_slice ? load_layer_start : 0;
+    const uint32_t end = load_slice ? load_layer_end : DS4_N_LAYER - 1u;
+    const bool require_token_embd = !load_slice || load_layer_start == 0;
+    weights_validate_layout(w,
+                            start,
+                            end,
+                            require_token_embd,
+                            load_slice ? require_output : true);
 }
 
 typedef struct {
