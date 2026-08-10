@@ -1,5 +1,4 @@
 #include "ds4.h"
-#include "ds4_distributed.h"
 #include "ds4_help.h"
 
 /* ds4-eval: small built-in benchmark integration test.
@@ -1192,7 +1191,7 @@ typedef struct {
 
 typedef struct {
     const char *model_path;
-    const char *mtp_path;
+    const char *dflash_path;
     const char *trace_path;
     const char *regrade_trace_path;
     const char *case_sequence;
@@ -1206,24 +1205,16 @@ typedef struct {
     float min_p;
     uint64_t seed;
     int pause_ms;
-    int power_percent;
-    uint32_t prefill_chunk;
-    uint32_t ssd_streaming_cache_experts;
-    uint64_t ssd_streaming_cache_bytes;
-    uint32_t ssd_streaming_full_layers;
-    uint32_t ssd_streaming_preload_experts;
-    uint64_t simulate_used_memory_bytes;
+    int dflash_draft_tokens;
+    float dflash_p_min;
     int soft_limit_reply_budget;
     int hard_limit_reply_budget;
     int soft_limit_think_close_rank;
     ds4_think_mode think_mode;
-    ds4_dist_options dist;
     bool plain;
     bool warm_weights;
     bool quality;
-    bool ssd_streaming;
-    bool ssd_streaming_cold;
-    bool ssd_streaming_full_layers_set;
+    bool dflash_p_min_set;
     bool self_test_extractors;
 } eval_config;
 
@@ -1442,16 +1433,6 @@ static int parse_int_arg(const char *s, const char *opt) {
     return (int)v;
 }
 
-static int parse_nonnegative_int_arg(const char *s, const char *opt) {
-    char *end = NULL;
-    long v = strtol(s, &end, 10);
-    if (s[0] == '\0' || *end != '\0' || v < 0 || v > INT_MAX) {
-        fprintf(stderr, "ds4-eval: invalid value for %s: %s\n", opt, s);
-        exit(2);
-    }
-    return (int)v;
-}
-
 static uint64_t parse_u64_arg(const char *s, const char *opt) {
     char *end = NULL;
     unsigned long long v = strtoull(s, &end, 10);
@@ -1480,31 +1461,47 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
     return argv[++*i];
 }
 
+static bool eval_option_is_unsupported(const char *arg) {
+    static const char *const options[] = {
+        "--cpu", "--cuda", "--rocm", "--gpu-vram", "--gpu-devices",
+        "--cuda-tensor-parallel",
+        "--ssd-streaming", "--ssd-streaming-cold",
+        "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
+        "--ssd-streaming-preload-experts", "--simulate-used-memory",
+        "--prefill-chunk", "--power",
+        "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
+        "--mtp", "--mtp-draft", "--mtp-margin", "--glm-mtp",
+        "--glm-mtp-timing", "--dspark", "--dspark-confidence",
+        "--dspark-strict", "--role", "--layers", "--listen",
+        "--coordinator", "--dist-prefill-chunk", "--dist-prefill-window",
+        "--dist-activation-bits", "--dist-replay-check", "--debug",
+        "--tensor-parallel", "--transport", "--rdma-device",
+        "--rdma-gid-index", "--tensor-parallel-token-prefill", "--debug-hash",
+        "--first-token-test",
+    };
+    for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+        if (!strcmp(arg, options[i])) return true;
+    }
+    return false;
+}
+
+static void eval_reject_unsupported_option(const char *arg) {
+    fprintf(stderr,
+            "ds4-eval: unsupported option %s; this product supports Laguna S2.1 on Apple Metal only\n",
+            arg);
+    exit(2);
+}
+
 static ds4_backend parse_backend(const char *s, const char *opt) {
     if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
-#ifdef DS4_ROCM_BUILD
-    if (!strcmp(s, "rocm")) return DS4_BACKEND_CUDA;
-#else
-    if (!strcmp(s, "cuda")) return DS4_BACKEND_CUDA;
-#endif
-    if (!strcmp(s, "cpu")) return DS4_BACKEND_CPU;
-    fprintf(stderr, "ds4-eval: invalid value for %s: %s\n", opt, s);
-#ifdef DS4_ROCM_BUILD
-    fprintf(stderr, "ds4-eval: valid backends are: metal, rocm, cpu\n");
-#else
-    fprintf(stderr, "ds4-eval: valid backends are: metal, cuda, cpu\n");
-#endif
+    fprintf(stderr,
+            "ds4-eval: unsupported option %s %s; this product supports Laguna S2.1 on Apple Metal only\n",
+            opt, s);
     exit(2);
 }
 
 static ds4_backend default_backend(void) {
-#ifdef DS4_NO_GPU
-    return DS4_BACKEND_CPU;
-#elif defined(__APPLE__)
     return DS4_BACKEND_METAL;
-#else
-    return DS4_BACKEND_CUDA;
-#endif
 }
 
 static void usage(FILE *fp, const char *topic) {
@@ -1533,27 +1530,20 @@ static eval_config parse_options(int argc, char **argv) {
             usage(stdout, topic);
             exit(0);
         }
-        char dist_parse_err[256] = {0};
-        ds4_dist_cli_parse_result dist_parse =
-            ds4_dist_parse_cli_arg(arg,
-                                   &i,
-                                   argc,
-                                   argv,
-                                   &c.dist,
-                                   dist_parse_err,
-                                   sizeof(dist_parse_err));
-        if (dist_parse == DS4_DIST_CLI_ERROR) {
-            fprintf(stderr,
-                    "ds4-eval: %s\n",
-                    dist_parse_err[0] ? dist_parse_err : "invalid distributed option");
-            exit(2);
+        if (eval_option_is_unsupported(arg)) {
+            eval_reject_unsupported_option(arg);
         }
-        if (dist_parse == DS4_DIST_CLI_MATCHED) continue;
 
         if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
             c.model_path = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--mtp")) {
-            c.mtp_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash")) {
+            c.dflash_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--dflash-draft")) {
+            c.dflash_draft_tokens = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--dflash-p-min")) {
+            c.dflash_p_min = parse_float_arg(
+                need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
+            c.dflash_p_min_set = true;
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {
             c.ctx_size = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
@@ -1588,63 +1578,8 @@ static eval_config parse_options(int argc, char **argv) {
             c.backend = parse_backend(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--metal")) {
             c.backend = DS4_BACKEND_METAL;
-#ifdef DS4_ROCM_BUILD
-        } else if (!strcmp(arg, "--rocm")) {
-            c.backend = DS4_BACKEND_CUDA;
-#else
-        } else if (!strcmp(arg, "--cuda")) {
-            c.backend = DS4_BACKEND_CUDA;
-#endif
-        } else if (!strcmp(arg, "--cpu")) {
-            c.backend = DS4_BACKEND_CPU;
         } else if (!strcmp(arg, "--quality")) {
             c.quality = true;
-        } else if (!strcmp(arg, "--ssd-streaming")) {
-            c.ssd_streaming = true;
-        } else if (!strcmp(arg, "--ssd-streaming-cold")) {
-            c.ssd_streaming_cold = true;
-        } else if (!strcmp(arg, "--ssd-streaming-cache-experts")) {
-            uint32_t experts = 0;
-            uint64_t bytes = 0;
-            if (!ds4_parse_streaming_cache_experts_arg(
-                    need_arg(&i, argc, argv, arg), &experts, &bytes)) {
-                fprintf(stderr,
-                        "ds4-eval: --ssd-streaming-cache-experts must be a positive count or <number>GB\n");
-                exit(2);
-            }
-            c.ssd_streaming_cache_experts = experts;
-            c.ssd_streaming_cache_bytes = bytes;
-        } else if (!strcmp(arg, "--ssd-streaming-full-layers")) {
-            int v = parse_nonnegative_int_arg(need_arg(&i, argc, argv, arg), arg);
-            c.ssd_streaming_full_layers = (uint32_t)v;
-            c.ssd_streaming_full_layers_set = true;
-        } else if (!strcmp(arg, "--ssd-streaming-preload-experts")) {
-            int v = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
-            if (v <= 0) {
-                fprintf(stderr, "ds4-eval: --ssd-streaming-preload-experts must be positive\n");
-                exit(2);
-            }
-            c.ssd_streaming_preload_experts = (uint32_t)v;
-        } else if (!strcmp(arg, "--simulate-used-memory")) {
-            if (!ds4_parse_gib_arg(need_arg(&i, argc, argv, arg),
-                                   &c.simulate_used_memory_bytes)) {
-                fprintf(stderr,
-                        "ds4-eval: --simulate-used-memory must be a positive GiB value, e.g. 64GB\n");
-                exit(2);
-            }
-        } else if (!strcmp(arg, "--prefill-chunk")) {
-            int v = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
-            if (v <= 0) {
-                fprintf(stderr, "ds4-eval: --prefill-chunk must be positive\n");
-                exit(2);
-            }
-            c.prefill_chunk = (uint32_t)v;
-        } else if (!strcmp(arg, "--power")) {
-            c.power_percent = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
-            if (c.power_percent < 1 || c.power_percent > 100) {
-                fprintf(stderr, "ds4-eval: --power must be between 1 and 100\n");
-                exit(2);
-            }
         } else if (!strcmp(arg, "--warm-weights")) {
             c.warm_weights = true;
         } else if (!strcmp(arg, "--think")) {
@@ -1664,16 +1599,6 @@ static eval_config parse_options(int argc, char **argv) {
         }
     }
     if (c.self_test_extractors || c.regrade_trace_path) return c;
-
-    char dist_err[256];
-    if (ds4_dist_prepare_engine_options(&c.dist, NULL, dist_err, sizeof(dist_err)) != 0) {
-        fprintf(stderr, "ds4-eval: %s\n", dist_err);
-        exit(2);
-    }
-    if (c.dist.role == DS4_DISTRIBUTED_WORKER) {
-        fprintf(stderr, "ds4-eval: --role worker is a serving mode; start workers with ./ds4\n");
-        exit(2);
-    }
 
     if (c.max_tokens > EVAL_MAX_CONTEXT) {
         fprintf(stderr,
@@ -4029,51 +3954,15 @@ static int parse_case_sequence(const char *arg, int ncases, int **seq_out, int *
     return 0;
 }
 
-static void log_context_memory(ds4_backend backend,
-                               int         ctx_size,
-                               uint32_t    prefill_chunk,
-                               bool        ssd_streaming) {
-    ds4_context_memory m =
-        ds4_context_memory_estimate_with_prefill_mode(backend,
-                                                      ctx_size,
-                                                      prefill_chunk,
-                                                      ssd_streaming);
+static void log_context_memory(ds4_backend backend, int ctx_size) {
+    ds4_context_memory m = ds4_context_memory_estimate(backend, ctx_size);
     fprintf(stderr,
-            "ds4-eval: context buffers %.2f MiB (ctx=%d, backend=%s, prefill_chunk=%u, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
+            "ds4-eval: context buffers %.2f MiB (ctx=%d, backend=%s, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
             (double)m.total_bytes / (1024.0 * 1024.0),
             ctx_size,
             ds4_backend_name(backend),
-            m.prefill_cap,
             m.raw_cap,
             m.comp_cap);
-}
-
-static int wait_distributed_route(ds4_session *session) {
-    char err[256] = {0};
-    char last[256] = {0};
-    unsigned ticks = 0;
-    const struct timespec delay = {0, 250000000L};
-
-    for (;;) {
-        int ready = ds4_session_distributed_route_ready(session, err, sizeof(err));
-        if (ready > 0) {
-            if (ticks) fprintf(stderr, "ds4-eval: distributed route ready\n");
-            return 0;
-        }
-        if (ready < 0) {
-            fprintf(stderr,
-                    "ds4-eval: distributed route readiness failed: %s\n",
-                    err[0] ? err : "unknown error");
-            return 1;
-        }
-        const char *why = err[0] ? err : "route incomplete";
-        if (strcmp(last, why) != 0 || (ticks % 20u) == 0) {
-            fprintf(stderr, "ds4-eval: waiting for distributed route: %s\n", why);
-            snprintf(last, sizeof(last), "%s", why);
-        }
-        nanosleep(&delay, NULL);
-        ticks++;
-    }
 }
 
 static const char *report_status_name(eval_status st) {
@@ -4153,33 +4042,16 @@ int main(int argc, char **argv) {
 
     ds4_engine_options opt = {
         .model_path = cfg.model_path,
-        .mtp_path = cfg.mtp_path,
+        .dflash_path = cfg.dflash_path,
         .backend = cfg.backend,
         .n_threads = cfg.threads,
         .context_size = cfg.ctx_size > 0 ? cfg.ctx_size : 0,
-        .mtp_draft_tokens = 1,
-        .mtp_margin = 3.0f,
-        .power_percent = cfg.power_percent,
-        .prefill_chunk = cfg.prefill_chunk,
-        .ssd_streaming_cache_experts = cfg.ssd_streaming_cache_experts,
-        .ssd_streaming_cache_bytes = cfg.ssd_streaming_cache_bytes,
-        .ssd_streaming_full_layers = cfg.ssd_streaming_full_layers,
-        .ssd_streaming_preload_experts = cfg.ssd_streaming_preload_experts,
-        .simulate_used_memory_bytes = cfg.simulate_used_memory_bytes,
+        .dflash_draft_tokens = cfg.dflash_draft_tokens,
+        .dflash_p_min = cfg.dflash_p_min,
+        .dflash_p_min_set = cfg.dflash_p_min_set,
         .warm_weights = cfg.warm_weights,
         .quality = cfg.quality,
-        .ssd_streaming = cfg.ssd_streaming,
-        .ssd_streaming_cold = cfg.ssd_streaming_cold,
-        .ssd_streaming_full_layers_set = cfg.ssd_streaming_full_layers_set,
-        .distributed = cfg.dist,
     };
-    char dist_err[256];
-    if (ds4_dist_prepare_engine_options(&cfg.dist, &opt, dist_err, sizeof(dist_err)) != 0) {
-        fprintf(stderr, "ds4-eval: %s\n", dist_err);
-        if (trace) fclose(trace);
-        free(case_sequence);
-        return 2;
-    }
 
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &opt) != 0) {
@@ -4210,10 +4082,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ds4-eval: model shape %s\n", ds4_engine_model_name(engine));
     eval_warn_think_max_downgraded(&cfg);
     trace_write_header(trace, &cfg, ds4_engine_model_name(engine), ncases, max_prompt_tokens);
-    log_context_memory(cfg.backend,
-                       cfg.ctx_size,
-                       cfg.prefill_chunk,
-                       cfg.ssd_streaming);
+    log_context_memory(cfg.backend, cfg.ctx_size);
 
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, cfg.ctx_size) != 0) {
@@ -4223,16 +4092,6 @@ int main(int argc, char **argv) {
         free(case_sequence);
         return 1;
     }
-    if (cfg.dist.role == DS4_DISTRIBUTED_COORDINATOR &&
-        wait_distributed_route(session) != 0)
-    {
-        ds4_session_free(session);
-        if (trace) fclose(trace);
-        ds4_engine_close(engine);
-        free(case_sequence);
-        return 1;
-    }
-
     eval_ui ui;
     bool split_ui = !cfg.plain && isatty(STDOUT_FILENO);
     tui_start(&ui, eval_cases, ncases, cfg.max_tokens, split_ui);
