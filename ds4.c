@@ -62591,7 +62591,7 @@ static void model_warm_weights_sharded(const ds4_model *m,
  * They are reached only when ds4_engine_create_with_gpu_config is called
  * with a non-NULL ds4_gpu_config. When the caller passes NULL (every
  * existing caller — ds4_engine_open shim, ds4_test, ds4_cli, ds4_server,
- * ds4_bench, ds4_eval, ds4_agent), these helpers are not invoked and the
+ * ds4_bench, and ds4_eval), these helpers are not invoked and the
  * engine state is byte-equivalent to the pre-multi-GPU CLI main branch.
  */
 

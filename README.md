@@ -6,7 +6,7 @@
 **DeepSeek V4 Flash**. It also supports **GLM 5.2**, **Laguna S 2.1**, and, on
 very high-memory machines, **DeepSeek V4 PRO**. It is self-contained and
 deliberately narrow, not a general GGUF runner. Model loading, prompt rendering,
-tool calls, KV state, the HTTP server, and the coding agent are built and tested
+tool calls, KV state, and the HTTP server are built and tested
 together.
 The repository also includes tools and data for GGUF, imatrix, quality, and speed.
 
@@ -197,13 +197,12 @@ systems. The current Q8_0-signal Q4_K_M and mixed Q2_K/Q3_K layouts run on
 Metal, CUDA, and ROCm. Linux validation covers NVIDIA GB10 in DGX Spark and the
 Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`) in Strix Halo.
 
-CLI, agent, and server use Laguna's native chat, interleaved reasoning, and
+CLI and server use Laguna's native chat, interleaved reasoning, and
 tagged tool-call formats:
 
 ```sh
 ./download_model.sh laguna-q4
 ./ds4 -m gguf/laguna-s-2.1-Q4_K_M.gguf -c 32768 -p "Explain this repository"
-./ds4-agent -m gguf/laguna-s-2.1-Q4_K_M.gguf -c 32768
 ./ds4-server -m gguf/laguna-s-2.1-Q4_K_M.gguf -c 32768
 ```
 
@@ -218,8 +217,6 @@ Laguna GGUF:
 ./download_model.sh laguna-dflash
 ./ds4 -m gguf/laguna-s-2.1-Q4_K_M.gguf \
   --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf --temp 0
-./ds4-agent -m gguf/laguna-s-2.1-Q4_K_M.gguf \
-  --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf
 ./ds4-server -m gguf/laguna-s-2.1-Q4_K_M.gguf \
   --dflash gguf/laguna-s-2.1-DFlash-Q8_0.gguf
 ```
@@ -243,7 +240,6 @@ For Strix Halo:
 ./download_model.sh laguna-q2-q3
 make strix-halo
 ./ds4 --rocm -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
-./ds4-agent --rocm -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
 ./ds4-server --rocm -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
 ```
 
@@ -253,7 +249,6 @@ For DGX Spark:
 ./download_model.sh laguna-q2-q3
 make cuda-spark
 ./ds4 --cuda -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
-./ds4-agent --cuda -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
 ./ds4-server --cuda -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf -c 8192
 ```
 
@@ -649,8 +644,8 @@ slow decode in exchange for being able to inspect the model at all.
 
 Use the coordinator exactly like normal `./ds4`: interactive chat, `/read`,
 and ordinary generation go through the same high-level session API. The same
-distributed options are also wired into `ds4-agent`, `ds4-eval`, and
-`ds4-bench`. For benchmarks, workers should already be running; `ds4-bench`
+distributed options are also wired into `ds4-eval` and `ds4-bench`. For
+benchmarks, workers should already be running; `ds4-bench`
 waits until a complete route is available.
 
 Useful tuning and diagnostics:
@@ -696,9 +691,9 @@ rebuild worker KV state by replaying the prefix when the route is available
 again. Workers also validate a rolling 64-bit token-prefix hash on every work
 item, so a restarted worker at position 0 cannot silently accept work for
 position N; it reports the mismatch and the coordinator replays the current
-transcript. Ctrl+C in the CLI and agent is cooperative: DwarfStar waits for the
+transcript. Ctrl+C in the CLI is cooperative: DwarfStar waits for the
 current distributed token or prefill chunk to drain before returning control,
-which avoids coordinator-caused KV splits. Saved agent/server sessions use the
+which avoids coordinator-caused KV splits. Saved server sessions use the
 same KV file format as single-machine sessions: during save the coordinator
 fetches worker-owned layer tensors and serializes one normal payload; during
 load it splits that payload over the currently registered route.
@@ -721,7 +716,7 @@ be recovered by replaying the token history on the same route, while transport
 failure drops the route and waits for a replacement worker. For persistent KV,
 the coordinator opens worker data connections and sends snapshot save/load
 messages for each worker-owned layer range; the disk payload remains a single
-agent/server cache file. The protocol has no
+server cache file. The protocol has no
 encryption or authentication, and is not release-stable yet; coordinator and
 workers should be built from the same commit and used on trusted machines and
 trusted networks.
@@ -791,7 +786,7 @@ The active verbs device and IPv4-mapped GID are selected automatically. If that
 is ambiguous, add `--rdma-device rdma_en6 --rdma-gid-index 1` on the worker and
 the matching `rdma_en1` flags on the coordinator. Use `--transport tcp` on both
 sides to force TCP. Tensor parallel roles are currently exposed by the `ds4`
-CLI, not by `ds4-server` or `ds4-agent`.
+CLI, not by `ds4-server`.
 
 Startup takes about 9 seconds per machine: each rank pre-faults its
 ~100 GiB shard from SSD and pins it through a Metal residency set.
@@ -845,12 +840,12 @@ aggregate serving throughput. Download and build the L40S target with:
 make cuda CUDA_ARCH=sm_89
 ```
 
-This is the interactive-agent setup used on the eight-L40S server:
+This is the interactive CLI setup used on the eight-L40S server:
 
 ```sh
 MODEL=gguf/DeepSeek-V4-Flash-Q4KExperts-F16HC-F16Compressor-F16Indexer-Q8Attn-Q8Shared-Q8Out-chat-v2-imatrix-0731.gguf
 
-./ds4-agent --cuda --cuda-tensor-parallel \
+./ds4 --cuda --cuda-tensor-parallel \
   --gpu-vram auto \
   --gpu-devices 0,2,4,6,1,3,5,7 \
   --model "$MODEL" \
@@ -870,9 +865,8 @@ across requests. The tested host is configured for up to 16 resident sessions:
   --host 0.0.0.0
 ```
 
-The equivalent local launchers are `./run-nvidia-tp-agent.sh` and
-`./run-nvidia-tp-server.sh`. The server launcher also enables the on-disk KV
-cache and defaults to the native 0731 MXFP4 GGUF. Set `DS4_MODEL` to use the Q4
+The equivalent local launcher is `./run-nvidia-tp-server.sh`. The server launcher
+also enables the on-disk KV cache and defaults to the native 0731 MXFP4 GGUF. Set `DS4_MODEL` to use the Q4
 file above instead. Reduce the session count or context size if the requested
 resident KV caches do not fit after model loading. CUDA TP, half-resident expert
 ownership, output sharding, pipelined prefill, and compatible grouped decode are
@@ -905,46 +899,13 @@ and inserting small sleeps between work units: during prefill it sleeps between
 layers, and during generation it sleeps between decoded tokens. This reduces
 sustained load without changing model output.
 
-The option is available on the CLI, server, agent, eval, and benchmark tools
+The option is available on the CLI, server, eval, and benchmark tools
 for DeepSeek models. GLM 5.2 currently accepts only `--power 100`. For example:
 
 ```sh
 ./ds4 --power 50
-./ds4-agent --power 70
 ./ds4-server --power 40 --ctx 100000
 ```
-
-## Native agent
-
-DwarfStar features a native coding agent that works in a different way
-than most other systems: the inference is controlled from within the agent
-itself, without socket/API boundaries, so the session is represented
-by the on-disk KV cache itself. Moreover the tools and the system prompt
-are all designed vertically for DeepSeek v4 Flash and PRO. This provides a
-few advantages:
-
-* Low latency experience, bounded mainly by the prefill speed limits. Displaying of generated text, tool calling, start of a new session are always instantaneous.
-* Live progress bar during prefill time.
-* No DSML tool calling conversion, the tools are handled natively in the LLM format.
-* KV cache mismatch are impossible by construction, the current state is always the truth.
-* Everything is tuned for this model.
-* Ability to switch saved sessions with `/list` and `/switch`; full KV sessions resume without a prefill stage.
-
-Agent sessions are stored in `~/.ds4/kvcache`. Use `/save` to persist the
-current session, `/list` to show saved sessions sorted by recent update time,
-and `/switch <sha>` to resume one of them. The session ID is stable across
-future saves and is derived from the first user prompt and creation time.
-`/del <sha>` removes a saved session. `/strip <sha>` keeps the rendered
-conversation text and title but removes the heavy KV payload; switching to a
-stripped session rebuilds the KV cache by prefilling the saved text.
-
-Use `--chdir /path/to/ds4` when launching `ds4-agent` from another directory,
-so relative runtime files such as `metal/*.metal` resolve from the project tree.
-
-However while the system already works, there is a lot of work to do
-in order to make it ready for prime time. When finally the agent will reach
-the wanted shape, we will *likely* split the server and the client creating a stateful
-session-based protocol that can recreate all that in a client-server way.
 
 ## Benchmarking
 
@@ -1625,7 +1586,7 @@ make cuda CUDA_ARCH=native
 ```
 
 CUDA builds accept `--gpu-vram N[,N,...]` and `--gpu-devices N[,N,...]` in the
-CLI, server, agent, and benchmark. VRAM values are per-device GiB budgets;
+CLI, server, and benchmark. VRAM values are per-device GiB budgets;
 `--gpu-vram auto` uses the free memory reported by CUDA. The device list controls
 the placement order and must have the same number of entries as an explicit
 budget list. Placement reserves graph and KV memory for the requested context
@@ -1701,7 +1662,7 @@ DS4_TEST_MODEL=/path/to/model.gguf make test-cuda-mixed-batch
 
 For GLM, run the same Metal session test with a GLM GGUF and run
 `tests/glm_long_context_smoke.sh /path/to/model.gguf`. The official 100-case
-quality scorers, two-Mac TCP/RDMA tests, CUDA matrix, and manual agent checks are
+quality scorers, two-Mac TCP/RDMA tests, and the CUDA matrix are
 release gates rather than quick local tests; follow
 [QA_BEFORE_RELEASES.md](QA_BEFORE_RELEASES.md).
 
@@ -1725,7 +1686,7 @@ first answer:
   alternatives at each step, which helps separate sampling choices from
   logit/model issues.
 - `ds4-server --trace` writes the rendered prompts, cache decisions, generated
-  text, and tool-parser events for a whole agent session.
+  text, and tool-parser events for a whole server session.
 
 ## Logo
 

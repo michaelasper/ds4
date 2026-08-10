@@ -31,8 +31,8 @@ assert_not_grep() {
 }
 
 # Binaries to check
-BINS=(./ds4 ./ds4-server ./ds4-bench ./ds4-agent)
-NAMES=(ds4 ds4-server ds4-bench ds4-agent)
+BINS=(./ds4 ./ds4-server ./ds4-bench)
+NAMES=(ds4 ds4-server ds4-bench)
 
 # 1: each binary's --help mentions both flags.
 for i in "${!BINS[@]}"; do

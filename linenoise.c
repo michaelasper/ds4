@@ -1479,11 +1479,11 @@ static void refreshMultiLine(struct linenoiseState *l, int flags) {
         }
     }
 
-    /* Some multiplexed users, such as ds4-agent, keep linenoise in a reserved
-     * terminal area below an output scroll region.  The reserved area depends
-     * on how many rows the edited input currently occupies.  Flush the cleanup
-     * phase first, then let the owner resize/reposition the prompt area before
-     * this refresh writes the new prompt. */
+    /* A multiplexed caller can keep linenoise in a reserved terminal area
+     * below an output scroll region. The reserved area depends on how many rows
+     * the edited input currently occupies. Flush the cleanup phase first, then
+     * let the owner resize/reposition the prompt area before this refresh writes
+     * the new prompt. */
     if ((flags & REFRESH_WRITE) && l->layout_callback) {
         if (write(fd,ab.b,ab.len) == -1) {} /* Can't recover. */
         abFree(&ab);
