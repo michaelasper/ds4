@@ -2779,6 +2779,205 @@ kernel void kernel_mul_mm_f16_f32_scaled(
     }
 }
 
+// Laguna dense-FFN Q8_0 gate/up pair with the SwiGLU folded into the tile
+// epilogue.  The tile shape, dequant, half staging, and MMA order mirror
+// kernel_mul_mm_q8_0_f32 exactly, so gate and up accumulators are bit-
+// identical to running the stock prefill matmul twice, and the epilogue
+// applies the same silu(g)*u expression as kernel_swiglu_f32.  Sharing the
+// staged activation tile between both weight tiles halves the RHS traffic
+// and the gate/up rows never touch device memory.  Q8_0 rows are 32-value
+// blocks, so K bounds are structural and only the output tile needs checks.
+//
+// shmem layout: main loop stages gate/up weight tiles at [0,4096) and
+// [4096,8192) plus the activation tile at [8192,10240); the epilogue reuses
+// [0,16384) as the two float accumulator tiles.
+kernel void kernel_mul_mm_q8_0_f32_pair_swiglu(
+        constant ds4_metal_args_mul_mm & args,
+        device const char * src0_gate,
+        device const char * src0_up,
+        device const char * src1,
+        device       char * dst,
+        threadgroup  char * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+
+    threadgroup half * sa_g = (threadgroup half *)(shmem);
+    threadgroup half * sa_u = (threadgroup half *)(shmem + 4096);
+    threadgroup half * sb   = (threadgroup half *)(shmem + 8192);
+
+    constexpr int NR0 = 64;
+    constexpr int NR1 = 32;
+
+    constexpr int NK  = 32;
+    constexpr int NL0 = NK/16;
+    constexpr int NL1 = NK/8;
+
+    const int im = tgpig.z;
+    const int r0 = tgpig.y*NR0;
+    const int r1 = tgpig.x*NR1;
+
+    // if this block is of 64x32 shape or smaller
+    const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
+    const short nr1 = (args.ne1 - r1 < NR1) ? (args.ne1 - r1) : NR1;
+
+    // a thread shouldn't load data outside of the matrix
+    const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
+    const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1; // 0 .. 31
+
+    const short il0 = (tiitg % NL0);
+
+    short il = il0;
+
+    const int i12 = im%args.ne12;
+    const int i13 = im/args.ne12;
+
+    const uint64_t offset0 = (i12/args.r2)*args.nb02 + (i13/args.r3)*args.nb03;
+    const short    offset1 = il0/2;
+
+    device const block_q8_0 * xg =
+        (device const block_q8_0 *)(src0_gate + args.nb01*(r0 + lr0) + offset0) + offset1;
+    device const block_q8_0 * xu =
+        (device const block_q8_0 *)(src0_up   + args.nb01*(r0 + lr0) + offset0) + offset1;
+
+    const short iy = 8*(tiitg % NL1);
+
+    device const float * y = (device const float *)(src1
+        + args.nb13*i13
+        + args.nb12*i12
+        + args.nb11*(r1 + lr1)
+        + args.nb10*iy);
+
+    simdgroup_half8x8 ma_g[4];
+    simdgroup_half8x8 ma_u[4];
+    simdgroup_half8x8 mb[2];
+
+    simdgroup_float8x8 mc_g[8];
+    simdgroup_float8x8 mc_u[8];
+
+    for (short i = 0; i < 8; i++){
+        mc_g[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+        mc_u[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+    }
+
+    for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
+        // load data and store to threadgroup memory
+        half4x4 temp_g;
+        half4x4 temp_u;
+        dequantize_q8_0(xg, il, temp_g);
+        dequantize_q8_0(xu, il, temp_u);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        FOR_UNROLL (short i = 0; i < 16; i++) {
+            const short sx = 2*il0 + i/8;
+            const short sy = (tiitg/NL0)/8;
+
+            const short lx = (tiitg/NL0)%8;
+            const short ly = i%8;
+
+            const short ib = 8*sx + sy;
+
+            // Pointer-form store matches the legacy tile layout.
+            *(sa_g + 64*ib + 8*ly + lx) = temp_g[i/4][i%4];
+            *(sa_u + 64*ib + 8*ly + lx) = temp_u[i/4][i%4];
+        }
+
+        if (FC_mul_mm_bc_inp) {
+            for (short i = 0; i < 8; ++i) {
+                const short sx = (tiitg%NL1);
+                const short sy = (tiitg/NL1)/8;
+
+                const short lx = i;
+                const short ly = (tiitg/NL1)%8;
+
+                const short ib = 4*sx + sy;
+
+                *(sb + 64*ib + 8*ly + lx) = loop_k + iy + i < args.ne00 ? (half)y[i] : 0;
+            }
+        } else {
+            const short sx = (tiitg%NL1);
+            const short sy = (tiitg/NL1)/8;
+
+            const short ly = (tiitg/NL1)%8;
+
+            const short ib = 4*sx + sy;
+
+            *(threadgroup half2x4 *)(sb + 64*ib + 8*ly) = (half2x4)(*((device float2x4 *) y));
+        }
+
+        il = (il + 2 < 2) ? il + 2 : il % 2;
+        xg = (il < 2) ? xg + 1 : xg;
+        xu = (il < 2) ? xu + 1 : xu;
+
+        y += NK;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // load matrices from threadgroup memory and conduct outer products
+        threadgroup const half * lsmag = (sa_g + 4*64*(sgitg%2));
+        threadgroup const half * lsmau = (sa_u + 4*64*(sgitg%2));
+        threadgroup const half * lsmb  = (sb + 2*64*(sgitg/2));
+
+        FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 4; i++) {
+                simdgroup_load(ma_g[i], lsmag + 64*i, 8, 0, false);
+                simdgroup_load(ma_u[i], lsmau + 64*i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 2; i++) {
+                simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 8; i++){
+                simdgroup_multiply_accumulate(mc_g[i], mb[i/4], ma_g[i%4], mc_g[i]);
+                simdgroup_multiply_accumulate(mc_u[i], mb[i/4], ma_u[i%4], mc_u[i]);
+            }
+
+            lsmag += 8*64;
+            lsmau += 8*64;
+            lsmb  += 4*64;
+        }
+    }
+
+    // Round-trip both accumulator sets through threadgroup memory so the
+    // SwiGLU pairs matching positions; the temp tiles overlap the staging
+    // tiles, which are dead after the final barrier above.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    threadgroup float * temp_g = (threadgroup float *) shmem;
+    threadgroup float * temp_u = temp_g + NR0*NR1;
+    threadgroup float * slice_g = temp_g + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+    threadgroup float * slice_u = temp_u + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+
+    for (short i = 0; i < 8; i++) {
+        simdgroup_store(mc_g[i], slice_g + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
+        simdgroup_store(mc_u[i], slice_u + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // The temp tiles keep the NR0 column stride of the staging layout, so
+    // partial tiles enumerate row/column pairs rather than a packed range.
+    device float * C = (device float *) dst +
+        r0 + (uint64_t)r1*args.ne0 + (uint64_t)im*args.ne1*args.ne0;
+    for (int e = tiitg; e < nr0*nr1; e += 128) {
+        const int j = e/nr0;
+        const int i = e%nr0;
+        const uint32_t idx = (uint32_t)j*NR0 + (uint32_t)i;
+        const float g = temp_g[idx];
+        const float u = temp_u[idx];
+        const float silu = g / (1.0f + exp(-g));
+        C[i + (uint64_t)j*args.ne0] = silu * u;
+    }
+}
+
 typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
 
 // Host-visible prefill matmul variants for F16 and Q8_0 weights.

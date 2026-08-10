@@ -605,6 +605,24 @@ static int g_initialized;
 static int g_quality_mode;
 static int g_tensor_matmul_suppressed;
 static int g_mpp_invalid_env_reported;
+/* Runtime selectors are captured once for each Metal initialization
+ * lifecycle.  Per-dispatch getenv reparsing would let a mid-graph env change
+ * select arithmetic that no longer matches the stock route. */
+static uint32_t g_q8_mv_ext_max_tokens = 16u;
+static uint32_t g_glm_grouped_moe_min_tokens = 96u;
+static int g_direct_kv_prefill_mode;
+
+/* Test-only route evidence.  Counters stay cold unless a focused test arms
+ * them, so normal inference pays no atomic/locking cost. */
+#ifdef DS4_TEST_HOOKS
+static int g_laguna_test_route_hooks;
+static uint64_t g_laguna_test_direct_kv_count;
+static uint64_t g_laguna_test_wrap_kv_count;
+static uint64_t g_laguna_test_fused_q8_count;
+static uint64_t g_laguna_test_stock_q8_count;
+static uint64_t g_laguna_test_fused_q8_bco_false_count;
+static uint64_t g_laguna_test_fused_q8_bco_true_count;
+#endif
 #define DS4_METAL_MAX_ROUTED_EXPERT_USED 8
 static int32_t g_routed_moe_selected_override[DS4_METAL_MAX_ROUTED_EXPERT_USED];
 static uint32_t g_routed_moe_selected_override_n;
@@ -2394,6 +2412,58 @@ static uint64_t ds4_gpu_env_u64(const char *name,
     if (value > max_value) value = max_value;
     return value;
 }
+
+static void ds4_gpu_snapshot_lifecycle_selectors(void) {
+    g_q8_mv_ext_max_tokens =
+        ds4_gpu_q8_mv_ext_max_tokens_parse(
+            getenv("DS4_METAL_Q8_MV_EXT_MAX_TOKENS"));
+    g_glm_grouped_moe_min_tokens =
+        ds4_gpu_laguna_moe_min_tokens_parse(
+            getenv("DS4_METAL_GLM_GROUPED_MOE_MIN_TOKENS"));
+    g_direct_kv_prefill_mode =
+        ds4_gpu_laguna_direct_kv_prefill_env_mode(
+            getenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL"));
+}
+
+uint32_t ds4_gpu_laguna_q8_mv_ext_max_tokens(void) {
+    return g_q8_mv_ext_max_tokens;
+}
+
+#ifdef DS4_TEST_HOOKS
+void ds4_gpu_test_laguna_route_counters_reset(void) {
+    g_laguna_test_direct_kv_count = 0;
+    g_laguna_test_wrap_kv_count = 0;
+    g_laguna_test_fused_q8_count = 0;
+    g_laguna_test_stock_q8_count = 0;
+    g_laguna_test_fused_q8_bco_false_count = 0;
+    g_laguna_test_fused_q8_bco_true_count = 0;
+    g_laguna_test_route_hooks = 1;
+}
+
+int ds4_gpu_test_laguna_route_counters(uint64_t *direct_kv,
+                                       uint64_t *wrap_kv,
+                                       uint64_t *fused_q8,
+                                       uint64_t *stock_q8) {
+    if (!g_initialized || !g_laguna_test_route_hooks) return 0;
+    if (direct_kv) *direct_kv = g_laguna_test_direct_kv_count;
+    if (wrap_kv) *wrap_kv = g_laguna_test_wrap_kv_count;
+    if (fused_q8) *fused_q8 = g_laguna_test_fused_q8_count;
+    if (stock_q8) *stock_q8 = g_laguna_test_stock_q8_count;
+    return 1;
+}
+
+int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
+                                        uint64_t *bco_true) {
+    if (!g_initialized || !g_laguna_test_route_hooks) return 0;
+    if (bco_false) *bco_false = g_laguna_test_fused_q8_bco_false_count;
+    if (bco_true) *bco_true = g_laguna_test_fused_q8_bco_true_count;
+    return 1;
+}
+
+void ds4_gpu_test_laguna_set_direct_kv_mode(int mode) {
+    g_direct_kv_prefill_mode = mode;
+}
+#endif
 
 static uint32_t ds4_gpu_glm_full_attention_max_cache_len(void) {
     /*
@@ -6677,6 +6747,22 @@ int ds4_gpu_init(void) {
     if (g_initialized) return 1;
 
     @autoreleasepool {
+        ds4_gpu_snapshot_lifecycle_selectors();
+        if (g_direct_kv_prefill_mode < 0) {
+            fprintf(stderr,
+                    "ds4: invalid DS4_METAL_LAGUNA_DIRECT_KV_PREFILL; "
+                    "expected unset, empty, 0, or literal 1\n");
+            return 0;
+        }
+#ifdef DS4_TEST_HOOKS
+        g_laguna_test_route_hooks = 0;
+        g_laguna_test_direct_kv_count = 0;
+        g_laguna_test_wrap_kv_count = 0;
+        g_laguna_test_fused_q8_count = 0;
+        g_laguna_test_stock_q8_count = 0;
+        g_laguna_test_fused_q8_bco_false_count = 0;
+        g_laguna_test_fused_q8_bco_true_count = 0;
+#endif
         ds4_gpu_decode_pipeline_fast_cache_reset();
         g_pair_compressor_store_missing_count = 0;
         g_device = MTLCreateSystemDefaultDevice();
@@ -11009,6 +11095,18 @@ void ds4_gpu_cleanup(void) {
         g_queue = nil;
         g_device = nil;
         g_metal_math_safe = 0;
+        g_q8_mv_ext_max_tokens = 16u;
+        g_glm_grouped_moe_min_tokens = 96u;
+        g_direct_kv_prefill_mode = 0;
+#ifdef DS4_TEST_HOOKS
+        g_laguna_test_route_hooks = 0;
+        g_laguna_test_direct_kv_count = 0;
+        g_laguna_test_wrap_kv_count = 0;
+        g_laguna_test_fused_q8_count = 0;
+        g_laguna_test_stock_q8_count = 0;
+        g_laguna_test_fused_q8_bco_false_count = 0;
+        g_laguna_test_fused_q8_bco_true_count = 0;
+#endif
         g_initialized = 0;
     }
 }
@@ -19429,8 +19527,7 @@ static int ds4_gpu_matmul_q8_0_legacy_tensor(
             return 1;
         }
 
-        const uint64_t mv_ext_max_tokens =
-            ds4_gpu_env_u64("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", 16u, 2u, 128u);
+        const uint64_t mv_ext_max_tokens = g_q8_mv_ext_max_tokens;
         if (n_tok <= mv_ext_max_tokens && (in_dim % 128u) == 0) {
             const int16_t nsg = 2;
             const int16_t nxpsg = short_row_nxpsg != 0 ?
@@ -19619,6 +19716,9 @@ int ds4_gpu_matmul_q8_0_tensor(
     int ok = ds4_gpu_matmul_q8_0_legacy_tensor(out, model_map, model_size,
                                                weight_offset, in_dim, out_dim,
                                                x, n_tok, false, 0);
+#ifdef DS4_TEST_HOOKS
+    if (ok && g_laguna_test_route_hooks) g_laguna_test_stock_q8_count++;
+#endif
     if (profile_prefill) {
         if (split_batch_for_profile && ds4_gpu_end_commands() == 0) {
             ok = 0;
@@ -20926,6 +21026,137 @@ int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
                                                    0);
 }
 
+/* Batched sibling of the decode-only fused dense Q8 gate/up+SwiGLU: one
+ * tiled pass computes both projections for all rows and applies SwiGLU in
+ * the tile epilogue, so the normed rows are read once and the gate/up rows
+ * never reach device memory.  The kernel mirrors kernel_mul_mm_q8_0_f32
+ * tile-for-tile, which is the kernel ordinary prefill uses while TensorOps
+ * is suppressed. */
+static int ds4_gpu_laguna_dense_q8_batch_pipeline_valid(
+        id<MTLComputePipelineState> pipeline) {
+    return pipeline && pipeline.threadExecutionWidth == 32u &&
+        pipeline.maxTotalThreadsPerThreadgroup >= 128u &&
+        (NSUInteger)(4u * 64u * 32u * sizeof(uint16_t)) <=
+            [g_device maxThreadgroupMemoryLength];
+}
+
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available(void) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    @autoreleasepool {
+        /* bco is a real function-constant specialization: aligned production
+         * shapes (out_dim % 64 == 0 and n_tok % 32 == 0) use false, while
+         * ragged tails use true. Warm and validate both before graph capture
+         * so a missing/old source cannot fail after attention or KV mutation. */
+        for (int bco = 0; bco <= 1; bco++) {
+            id<MTLComputePipelineState> pipeline =
+                ds4_gpu_get_mul_mm_pipeline(
+                    "kernel_mul_mm_q8_0_f32_pair_swiglu", false, bco != 0);
+            if (!ds4_gpu_laguna_dense_q8_batch_pipeline_valid(pipeline)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+}
+
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+        ds4_gpu_tensor       *mid,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                gate_offset,
+        uint64_t                up_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t                n_tok) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    if (!mid || !x || !model_map ||
+        n_tok == 0 || n_tok > UINT32_MAX ||
+        in_dim == 0 || (in_dim & 31u) != 0 ||
+        out_dim == 0 || in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
+        return 0;
+    }
+    if (n_tok > UINT64_MAX / in_dim || n_tok > UINT64_MAX / out_dim ||
+        n_tok * in_dim > UINT64_MAX / sizeof(float) ||
+        n_tok * out_dim > UINT64_MAX / sizeof(float)) {
+        return 0;
+    }
+
+    @autoreleasepool {
+        id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
+        id<MTLBuffer> midbuf = ds4_gpu_tensor_buffer(mid);
+        const uint64_t x_bytes = n_tok * in_dim * sizeof(float);
+        const uint64_t mid_bytes = n_tok * out_dim * sizeof(float);
+        if (!xbuf || !midbuf ||
+            ds4_gpu_tensor_bytes(x) < x_bytes ||
+            ds4_gpu_tensor_bytes(mid) < mid_bytes) {
+            fprintf(stderr, "ds4: Metal batched fused Q8_0 gate/up SwiGLU received undersized activation buffers\n");
+            return 0;
+        }
+
+        const uint64_t blocks = in_dim / 32;
+        if (blocks > UINT64_MAX / 34u) return 0;
+        const uint64_t row_bytes = blocks * 34;
+        if (row_bytes != 0 && out_dim > UINT64_MAX / row_bytes) return 0;
+        const uint64_t weight_bytes = out_dim * row_bytes;
+        if (gate_offset > model_size ||
+            weight_bytes > model_size - gate_offset ||
+            up_offset > model_size ||
+            weight_bytes > model_size - up_offset) {
+            fprintf(stderr, "ds4: Metal batched fused Q8_0 gate/up SwiGLU range is outside the mapped model\n");
+            return 0;
+        }
+
+        uint64_t gate_inner = 0;
+        uint64_t up_inner = 0;
+        id<MTLBuffer> gate_wbuf =
+            ds4_gpu_wrap_model_range(model_map, model_size, gate_offset, weight_bytes, &gate_inner);
+        id<MTLBuffer> up_wbuf =
+            ds4_gpu_wrap_model_range(model_map, model_size, up_offset, weight_bytes, &up_inner);
+        if (!gate_wbuf || !up_wbuf) return 0;
+
+        const bool bc_out = (out_dim % 64u) != 0 || (n_tok % 32u) != 0;
+        id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mm_pipeline(
+            "kernel_mul_mm_q8_0_f32_pair_swiglu", false, bc_out);
+        if (!pipeline) return 0;
+
+        ds4_gpu_mul_mm_args args =
+            ds4_gpu_make_mm_args(in_dim, out_dim, n_tok, row_bytes);
+
+        int owned = 0;
+        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+        if (!cb) return 0;
+        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        [enc setComputePipelineState:pipeline];
+        [enc setBytes:&args length:sizeof(args) atIndex:0];
+        [enc setBuffer:gate_wbuf offset:(NSUInteger)gate_inner atIndex:1];
+        [enc setBuffer:up_wbuf offset:(NSUInteger)up_inner atIndex:2];
+        [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:3];
+        [enc setBuffer:midbuf offset:ds4_gpu_tensor_offset(mid) atIndex:4];
+        [enc setThreadgroupMemoryLength:4u * 64u * 32u * sizeof(uint16_t)
+                                atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake(((NSUInteger)n_tok + 31u) / 32u,
+                                              ((NSUInteger)out_dim + 63u) / 64u,
+                                              1)
+             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        ds4_gpu_end_compute_encoder(cb, enc);
+
+        if (!ds4_gpu_finish_command_buffer(cb, owned,
+                                           "Laguna batched fused Q8_0 gate/up SwiGLU")) {
+            return 0;
+        }
+#ifdef DS4_TEST_HOOKS
+        if (g_laguna_test_route_hooks) {
+            g_laguna_test_fused_q8_count++;
+            if (bc_out) g_laguna_test_fused_q8_bco_true_count++;
+            else g_laguna_test_fused_q8_bco_false_count++;
+        }
+#endif
+    }
+
+    return 1;
+}
+
 int ds4_gpu_shared_gate_up_swiglu_q8_0_model_view_tensor(
         ds4_gpu_tensor       *gate,
         ds4_gpu_tensor       *up,
@@ -20990,8 +21221,7 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_rows_tensor(
         return 0;
     }
 
-    const uint64_t mv_ext_max_tokens =
-        ds4_gpu_env_u64("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", 16u, 2u, 128u);
+    const uint64_t mv_ext_max_tokens = g_q8_mv_ext_max_tokens;
     if (n_tok > mv_ext_max_tokens) return 0;
 
     @autoreleasepool {
@@ -36526,6 +36756,15 @@ int ds4_gpu_laguna_attention_prefill_tensor(
         float                 scale,
         int                   split_decode_rows) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
+    /* The selector is lifecycle-snapshotted and rejected during init. Keep
+     * this guard at the low-level entry as well so a malformed opt-in can
+     * never reach either the split-row or ordinary command encoder. */
+    if (g_direct_kv_prefill_mode < 0) {
+        fprintf(stderr,
+                "ds4: invalid DS4_METAL_LAGUNA_DIRECT_KV_PREFILL; "
+                "expected unset, empty, 0, or literal 1\n");
+        return 0;
+    }
     if (!heads || !key_cache || !value_cache || !staged_key ||
         !staged_value || !q || !k || !v || !gate || n_tokens == 0 ||
         pos0 > UINT32_MAX - n_tokens || cache_cap == 0 || n_head == 0 ||
@@ -36981,6 +37220,40 @@ int ds4_gpu_laguna_attention_prefill_tensor(
             .scale = scale,
             .pad0 = 0,
         };
+        /*
+         * Opt-in direct KV store for global layers.  When the whole chunk
+         * fits past pos0 the ring cannot wrap inside the chunk, so the f16
+         * conversion may land directly in the cache slot and the commit pass
+         * is folded away; attention then reads the chunk rows from the cache
+         * through the staged-slot view (staged row t == cache row pos0 + t).
+         * SWA layers keep the staged path: their ring can overwrite rows
+         * that early queries in the chunk still read.
+         */
+        const int direct_kv_mode = g_direct_kv_prefill_mode;
+        const bool direct_kv =
+            direct_kv_mode > 0 && cache_cap > 512u &&
+            (uint64_t)pos0 + (uint64_t)n_tokens <= (uint64_t)cache_cap;
+
+        /* The direct route deliberately reuses the already initialized
+         * linear f32->f16 staging PSO.  It must not probe a per-call rows PSO
+         * or execute a token division/modulo store kernel. */
+        const uint64_t kv_row_bytes =
+            (uint64_t)n_head_kv * head_dim * sizeof(uint16_t);
+        if (direct_kv &&
+            (uint64_t)pos0 > UINT64_MAX / kv_row_bytes) {
+            return 0;
+        }
+        const uint64_t cache_offset_bytes =
+            (uint64_t)pos0 * kv_row_bytes;
+        if (direct_kv &&
+            (cache_offset_bytes > (uint64_t)NSUIntegerMax ||
+             ds4_gpu_tensor_offset(key_cache) >
+                 (NSUIntegerMax - (NSUInteger)cache_offset_bytes) ||
+             ds4_gpu_tensor_offset(value_cache) >
+                 (NSUIntegerMax - (NSUInteger)cache_offset_bytes))) {
+            return 0;
+        }
+
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
@@ -36990,9 +37263,17 @@ int ds4_gpu_laguna_attention_prefill_tensor(
         [enc setBytes:&args length:sizeof(args) atIndex:0];
         [enc setBuffer:kbuf offset:ds4_gpu_tensor_offset(k) atIndex:1];
         [enc setBuffer:vbuf offset:ds4_gpu_tensor_offset(v) atIndex:2];
-        [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
+        [enc setBuffer:direct_kv ? keybuf : stagedkeybuf
+                offset:(direct_kv ?
+                            ds4_gpu_tensor_offset(key_cache) +
+                                (NSUInteger)cache_offset_bytes :
+                            ds4_gpu_tensor_offset(staged_key))
                 atIndex:3];
-        [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
+        [enc setBuffer:direct_kv ? valuebuf : stagedvaluebuf
+                offset:(direct_kv ?
+                            ds4_gpu_tensor_offset(value_cache) +
+                                (NSUInteger)cache_offset_bytes :
+                            ds4_gpu_tensor_offset(staged_value))
                 atIndex:4];
         [enc dispatchThreads:MTLSizeMake((NSUInteger)kv_values, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -37005,9 +37286,17 @@ int ds4_gpu_laguna_attention_prefill_tensor(
         [enc setBuffer:gatebuf offset:ds4_gpu_tensor_offset(gate) atIndex:2];
         [enc setBuffer:keybuf offset:ds4_gpu_tensor_offset(key_cache) atIndex:3];
         [enc setBuffer:valuebuf offset:ds4_gpu_tensor_offset(value_cache) atIndex:4];
-        [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
+        [enc setBuffer:direct_kv ? keybuf : stagedkeybuf
+                offset:(direct_kv ?
+                            ds4_gpu_tensor_offset(key_cache) +
+                                (NSUInteger)cache_offset_bytes :
+                            ds4_gpu_tensor_offset(staged_key))
                 atIndex:5];
-        [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
+        [enc setBuffer:direct_kv ? valuebuf : stagedvaluebuf
+                offset:(direct_kv ?
+                            ds4_gpu_tensor_offset(value_cache) +
+                                (NSUInteger)cache_offset_bytes :
+                            ds4_gpu_tensor_offset(staged_value))
                 atIndex:6];
         [enc setBuffer:headsbuf offset:ds4_gpu_tensor_offset(heads) atIndex:7];
         const uint32_t attention_groups = use_gqa6 ?
@@ -37018,23 +37307,34 @@ int ds4_gpu_laguna_attention_prefill_tensor(
              threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
-        enc = ds4_gpu_compute_encoder(cb);
-        [enc setComputePipelineState:commit_pipeline];
-        [enc setBytes:&args length:sizeof(args) atIndex:0];
-        [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
-                atIndex:1];
-        [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
-                atIndex:2];
-        [enc setBuffer:keybuf offset:ds4_gpu_tensor_offset(key_cache) atIndex:3];
-        [enc setBuffer:valuebuf offset:ds4_gpu_tensor_offset(value_cache) atIndex:4];
-        [enc dispatchThreads:MTLSizeMake((NSUInteger)kv_values, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        ds4_gpu_end_compute_encoder(cb, enc);
+        if (!direct_kv) {
+            enc = ds4_gpu_compute_encoder(cb);
+            [enc setComputePipelineState:commit_pipeline];
+            [enc setBytes:&args length:sizeof(args) atIndex:0];
+            [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
+                    atIndex:1];
+            [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
+                    atIndex:2];
+            [enc setBuffer:keybuf offset:ds4_gpu_tensor_offset(key_cache) atIndex:3];
+            [enc setBuffer:valuebuf offset:ds4_gpu_tensor_offset(value_cache) atIndex:4];
+            [enc dispatchThreads:MTLSizeMake((NSUInteger)kv_values, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            ds4_gpu_end_compute_encoder(cb, enc);
+        }
 
         if (!ds4_gpu_finish_command_buffer(cb, owned,
                                             "Laguna prefill attention")) {
             return 0;
         }
+        /* Count only a successfully submitted route.  This keeps the
+         * test-only evidence from turning a preflight failure into a false
+         * direct/wrap dispatch proof. */
+#ifdef DS4_TEST_HOOKS
+        if (g_laguna_test_route_hooks) {
+            if (direct_kv) g_laguna_test_direct_kv_count++;
+            else g_laguna_test_wrap_kv_count++;
+        }
+#endif
     }
     return 1;
 }
@@ -40552,7 +40852,11 @@ static bool ds4_gpu_glm_routed_moe_batch_grouped_available(
     if (!fast_default) {
         return false;
     }
-    if (n_tokens < 96u) return false;
+    /* Diagnostic threshold: the grouped batch pays off well before 96 tokens
+     * on some parts, so let the benchmark machine explore down to the
+     * 32-token structural floor of the routed mul_mm_id kernels. */
+    const uint64_t min_tokens = g_glm_grouped_moe_min_tokens;
+    if (n_tokens < min_tokens) return false;
 
     return ds4_gpu_get_pipeline(ds4_gpu_mul_mm_id_map0_name(n_expert)) != nil &&
            ds4_gpu_routed_mm_pipeline(gate_type) != nil &&
