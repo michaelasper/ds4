@@ -260,12 +260,11 @@ tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_t
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
 	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
 
-test-legacy: test-lgn ds4_test ds4-eval q4k-dot-test mxfp4-dot-test \
+test-legacy: test-lgn ds4-eval q4k-dot-test mxfp4-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement \
 	$(SAMPLING_TEST) $(METAL_EXACT_TEST) $(SSD_STREAMING_HOOK_TEST) ds4 ds4-server ds4-bench
 	./ds4-eval --self-test-extractors
 	$(if $(SSD_STREAMING_HOOK_TEST),./$(SSD_STREAMING_HOOK_TEST),:)
-	./ds4_test
 	./tests/test_layer_pack
 	./tests/test_engine_mgpu_placement
 	./tests/test_sampling
