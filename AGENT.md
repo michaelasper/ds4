@@ -1,56 +1,82 @@
 # Agent Notes
 
-`ds4.c` is a DeepSeek V4 Flash specific inference engine. It is not a generic
-GGUF runner. The goal is a small, readable, high-performance C codebase with
-Objective-C only where Metal requires it and Metal kernels under `metal/`.
+These notes are authoritative for the Laguna Metal-only refactor. The product
+target is Laguna S2.1 GGUF inference on Apple Metal; the historical ds4
+multi-model and multi-backend paths are cleanup work, not compatibility
+requirements.
 
-## Goals
+## Product boundary
 
-- Keep the production path as whole-model Metal graph inference.
-- Always make sure that the SSD streaming, CUDA, distributed inference, Metal default inference are not affected by fixes to other parts of the code.
-- Keep model loading mmap-backed for the Metal default case; do not eagerly copy the full GGUF. Keep the model loading for SSD streaming of routed experts explicit: allocated buffers, fast reads from disk, always try to hide loading of missing routed experts by loading them while performing the inference of the shared expert and routed experts already in RAM. Always try to hide loading of layers for prefill in SSD streaming mode using the inference time of the current layer as the next one is loaded.
-- Keep the CPU backend CPU-only and use it only as reference/debug code.
-- Preserve correctness before speed. Do not keep a faster path with unexplained attention, KV cache, or logits drift.
-- Make long local agent sessions practical through live KV reuse and disk KV checkpoints.
+- Support Laguna S2.1 GGUF only. Model loading must require the Laguna
+  architecture instead of falling back to DeepSeek or GLM metadata.
+- Support Apple Metal only. The production path is whole-model,
+  mmap-backed Metal inference; do not add eager copies or SSD expert
+  streaming.
+- Retain the CLI and server as supported product surfaces.
+- Retain DFlash as an explicitly Laguna-specific optional path for now.
+- Make no product promise for CPU, CUDA, ROCm, SSD streaming, distributed
+  inference, tensor parallelism, multi-GPU placement, MTP, DSpark, steering,
+  power controls, or custom prefill. Do not preserve these paths with new
+  compatibility flags.
+- Defer the ds4-to-Laguna rename until the implementation and documentation
+  cleanup is complete. Existing names, cache paths, payload identifiers, and
+  public symbols are temporary compatibility surfaces until that decision is
+  recorded in `FORK.md`.
 
-## Quality Rules
+## Implementation rules
 
-- Keep the implementation small, sharp, easy to understand. Try to write elegant code in a state of grace. Don't settle for the first thing that comes to mind, try to find the most minimal and better working design. Don't introduce slop: very fragile code that just patches specific cases, dead code, useless code and code ways more complicated of how it should be.
-- Comment important inference code where the model mechanics, cache lifetime, memory policy, or API orchestration are not obvious from the local code.
-- Prefer comments beside the implementation over separate design documents.
-- Keep comments instructive and compact: explain why a shape, ordering, cache boundary, or memory choice exists.
-- Keep public APIs narrow. CLI/server code should not know tensor internals.
-- Do not add permanent semantic variants behind flags. Diagnostic switches are fine when they validate the one release path.
-- Do not introduce C++.
+- Keep one canonical Laguna Metal execution path. Prefer deleting obsolete
+  branches over adding another semantic variant behind a flag.
+- Keep model loading mmap-backed and whole-model. Do not reintroduce an SSD,
+  distributed, or host-inference fallback while simplifying the runtime.
+- Keep Objective-C limited to the Metal runtime and use C for the rest of the
+  implementation. Do not introduce C++.
+- Keep public APIs narrow. CLI and server code should not know tensor or
+  pipeline internals.
+- Preserve correctness before speed. Any optimisation must retain attention,
+  KV-cache, logits, sampling, and session correctness on the Laguna path.
+- Retain DFlash only where it is exercised by Laguna and covered by a test;
+  do not use it as a reason to retain unrelated DeepSeek, GLM, or backend
+  compatibility code.
+- Comments should explain non-obvious model mechanics, cache lifetime,
+  memory policy, or API orchestration beside the implementation.
 
-## Safety
+## Repository layout
 
-- Avoid large CPU inference runs on macOS; the CPU path has previously exposed kernel VM failures with very large mappings.
-- Do not run multiple huge model processes concurrently. The instance lock is intentional.
-
-## Layout
-
-- `ds4.c`: model loading, tokenizer, CPU reference code, Metal graph scheduling,
-  sessions, disk-cache payload serialization.
-- `ds4_cli.c`: command line, linenoise REPL, interactive transcript handling.
-- `ds4_server.c`: OpenAI/Anthropic compatible HTTP API, worker queue, streaming,
-  tool-call mapping, disk KV cache policy.
+- `ds4.c`: model loading, tokenizer, Metal graph scheduling, sessions, and
+  disk-cache payload serialisation.
+- `ds4_cli.c`: command line and interactive transcript handling.
+- `ds4_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
+  streaming, tool-call mapping, and server-side KV-cache policy.
 - `ds4_metal.m`: Objective-C Metal runtime and kernel wrappers.
-- `metal/*.metal`: compute kernels.
+- `metal/*.metal`: Metal compute kernels.
 - `tests/`: unit and live integration tests.
-- `misc/`: ignored notes, experiments, and old planning material.
-
-This list is not complete, check the files for more info.
+- `FORK.md`: refactor boundary, deletion order, guardrails, and deferred
+  compatibility decisions.
 
 ## Testing
 
-Use `make` for build validation. Use `make test` for unit/regression tests when a
-model and Metal are available. Use live server tests only when intentionally
-testing the API surface.
+Use `make` for build validation and `make test` for the Laguna Metal test
+suite when an Apple Metal device and a Laguna S2.1 GGUF are available. At each
+major refactor boundary, verify:
 
-At every major change where one of the following could be affected, make sure to:
+1. A valid Laguna S2.1 model loads through the whole-model mmap Metal path.
+2. Non-Laguna architectures and unsupported backend/mode options are rejected
+   clearly rather than selecting a legacy fallback.
+3. CLI generation, server streaming, sessions, batching, and sampling remain
+   correct.
+4. The retained DFlash path passes its focused regression coverage.
 
-1. Test the normal Metal path and that speed is still at the level it was.
-2. Test the SSD streaming path.
-3. Test the distributed inference if it could be affected, but ask the user before doing so.
-4. Check if CUDA could be broken after the change, and ask the user to give you access to the CUDA machine to actually test if everything is still fine.
+Do not add new CPU, CUDA, ROCm, SSD, distributed, tensor-parallel, multi-GPU,
+MTP, DSpark, steering, power, or custom-prefill test obligations. Keep the
+benchmark/default Laguna S2.1 baseline frozen while this work proceeds on the
+refactor branch; compare against it rather than changing it.
+
+## Safety
+
+- Do not run multiple huge model processes concurrently; the instance lock is
+  intentional.
+- Do not delete a Metal source or compatibility layer until its callers,
+  runtime source list, build target, and focused test coverage have been
+  removed or updated together.
+- Do not commit or push refactor work unless explicitly requested.
