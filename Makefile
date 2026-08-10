@@ -51,7 +51,7 @@ DS4_DSPARK_SUPPORT ?= gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf
 LAGUNA_TEST_MODEL ?=
 
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
-CORE_OBJS = ds4.o lgn.o ds4_tp.o ds4_ssd.o ds4_metal.o ds4_layer_pack.o
+CORE_OBJS = ds4.o lgn.o ds4_ssd.o ds4_metal.o ds4_layer_pack.o
 
 DS4_TEST_METAL_OBJ := ds4_metal_test_hooks.o
 SSD_STREAMING_HOOK_TEST := tests/test_ssd_streaming_hooks
@@ -121,7 +121,7 @@ ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS) | check-metal-sources
 quality/score_official: quality/score_official.c ds4.h $(CORE_OBJS) rax.o | check-metal-sources
 	$(CC) $(QUALITY_CFLAGS) -I. -o $@ quality/score_official.c $(CORE_OBJS) rax.o $(METAL_LDLIBS)
 
-tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h ds4_tp.h
+tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h
 	$(CC) $(CFLAGS) -I. -c -o $@ tests/test_metal_session_batch.c
 
 tests/test_metal_session_batch: tests/test_metal_session_batch.o $(CORE_OBJS) | check-metal-sources
@@ -170,7 +170,7 @@ test-glm-q23-metal: tests/test_glm_q23_metal
 tests/test_sampling.o: tests/test_sampling.c ds4.h
 	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o ds4_kvstore.o rax.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
+tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o ds4_kvstore.o rax.o ds4_ssd.o ds4_layer_pack.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_lgn.o: tests/test_lgn.c lgn.h
@@ -193,9 +193,6 @@ ds4_ssd.o: ds4_ssd.c ds4_ssd.h
 
 ds4_cli.o: ds4_cli.c ds4.h ds4_ssd.h ds4_help.h linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_cli.c
-
-ds4_tp.o: ds4_tp.c ds4_tp.h ds4.h ds4_ssd.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_tp.c
 
 ds4_help.o: ds4_help.c ds4_help.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_help.c
@@ -242,7 +239,7 @@ ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h ds4_layer_pack.h lgn.
 tests/test_engine_mgpu_placement.o: tests/test_engine_mgpu_placement.c ds4.h ds4_gpu_mgpu.h ds4_layer_pack.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
-tests/test_engine_mgpu_placement: tests/test_engine_mgpu_placement.o ds4_cpu_test_hooks.o lgn.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
+tests/test_engine_mgpu_placement: tests/test_engine_mgpu_placement.o ds4_cpu_test_hooks.o lgn.o ds4_ssd.o ds4_layer_pack.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_ssd_streaming_hooks.o: tests/test_ssd_streaming_hooks.c
@@ -251,7 +248,7 @@ tests/test_ssd_streaming_hooks.o: tests/test_ssd_streaming_hooks.c
 ds4_streaming_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h ds4_layer_pack.h lgn.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o ds4_help.o ds4_kvstore.o rax.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o ds4_metal_test_hooks.o | check-metal-sources
+tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o ds4_help.o ds4_kvstore.o rax.o ds4_ssd.o ds4_layer_pack.o ds4_metal_test_hooks.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
@@ -295,12 +292,6 @@ test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-
 	DS4_TEST_SSD_STREAMING_CACHE_GB= \
 	DS4_TEST_SSD_STREAMING_CACHE_EXPERTS= \
 	DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS= \
-	DS4_TEST_TP_MODE= \
-	DS4_TEST_TP_TRANSPORT= \
-	DS4_TEST_TP_PORT= \
-	DS4_TEST_TP_LEADER_HOST= \
-	DS4_TEST_TP_LISTEN_HOST= \
-	DS4_TEST_TP_DISCONNECT= \
 	./tests/test_metal_session_batch
 
 dspark-acceptance: ds4

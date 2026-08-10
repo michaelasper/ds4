@@ -5,7 +5,6 @@
  */
 
 #include "ds4.h"
-#include "ds4_tp.h"
 
 #include <float.h>
 #include <math.h>
@@ -33,29 +32,6 @@ static const char *prompts[MAX_SESSION_COUNT] = {
 static void fail(const char *what, int session, int step) {
     fprintf(stderr, "FAIL: %s session=%d step=%d\n", what, session, step);
     exit(1);
-}
-
-static ds4_tp_transport tp_transport_from_env(void) {
-    const char *value = getenv("DS4_TEST_TP_TRANSPORT");
-    if (!value || !value[0] || strcmp(value, "auto") == 0) {
-        return DS4_TP_TRANSPORT_AUTO;
-    }
-    if (strcmp(value, "tcp") == 0) return DS4_TP_TRANSPORT_TCP;
-    if (strcmp(value, "rdma") == 0) return DS4_TP_TRANSPORT_RDMA;
-    fprintf(stderr, "FAIL: invalid DS4_TEST_TP_TRANSPORT=%s\n", value);
-    exit(1);
-}
-
-static int tp_port_from_env(void) {
-    const char *value = getenv("DS4_TEST_TP_PORT");
-    if (!value || !value[0]) return 19452;
-    char *end = NULL;
-    long port = strtol(value, &end, 10);
-    if (end == value || *end != '\0' || port < 1 || port > 65535) {
-        fprintf(stderr, "FAIL: invalid DS4_TEST_TP_PORT=%s\n", value);
-        exit(1);
-    }
-    return (int)port;
 }
 
 static int session_count_from_env(void) {
@@ -116,70 +92,14 @@ int main(void) {
     setenv("DS4_METAL_SESSION_BATCH_LOG", "1", 1);
     const int session_count = session_count_from_env();
 
-    const char *tp_mode = getenv("DS4_TEST_TP_MODE");
-    const bool tp_leader = tp_mode && strcmp(tp_mode, "leader") == 0;
-    const bool tp_worker = tp_mode && strcmp(tp_mode, "worker") == 0;
-    if (tp_mode && tp_mode[0] && !tp_leader && !tp_worker) {
-        fprintf(stderr, "FAIL: invalid DS4_TEST_TP_MODE=%s\n", tp_mode);
-        return 1;
-    }
-    const int tp_port = tp_port_from_env();
     ds4_engine_options opt = {
         .model_path = model,
         .backend = DS4_BACKEND_METAL,
         .n_threads = 1,
         .context_size = TEST_CTX,
     };
-    if (tp_leader) {
-        opt.tp.role = DS4_TP_LEADER;
-        opt.tp.listen_host = getenv("DS4_TEST_TP_LISTEN_HOST");
-        if (!opt.tp.listen_host || !opt.tp.listen_host[0]) {
-            opt.tp.listen_host = "0.0.0.0";
-        }
-        opt.tp.listen_port = tp_port;
-        opt.tp.transport = tp_transport_from_env();
-    } else if (tp_worker) {
-        opt.tp.role = DS4_TP_WORKER;
-        opt.tp.leader_host = getenv("DS4_TEST_TP_LEADER_HOST");
-        if (!opt.tp.leader_host || !opt.tp.leader_host[0]) {
-            fprintf(stderr, "FAIL: DS4_TEST_TP_LEADER_HOST is required for worker mode\n");
-            return 1;
-        }
-        opt.tp.leader_port = tp_port;
-        opt.tp.transport = tp_transport_from_env();
-    }
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &opt) != 0) fail("engine open", -1, -1);
-
-    if (tp_worker) {
-        const int worker_rc = ds4_tp_worker_run(engine, &opt.tp);
-        ds4_engine_close(engine);
-        return worker_rc;
-    }
-
-    ds4_tp *tp = NULL;
-    if (tp_leader) {
-        char tp_err[256] = "";
-        ds4_tp_identity identity = {
-            .gguf_bytes = ds4_engine_model_bytes(engine),
-            .model_id = (uint32_t)ds4_engine_model_id(engine),
-            .n_layer = (uint32_t)ds4_engine_layer_count(engine),
-            .n_embd = (uint32_t)ds4_engine_embd_dim(engine),
-            .n_vocab = (uint32_t)ds4_engine_vocab_size(engine),
-            .quant_bits = (uint32_t)ds4_engine_routed_quant_bits(engine),
-            .ctx_size = TEST_CTX,
-        };
-        ds4_engine_tp_gate_schedule(engine,
-                                    &identity.gate_slot_start,
-                                    &identity.gate_slot_step,
-                                    &identity.gates_per_token);
-        if (!ds4_tp_create(&tp, &opt.tp, &identity,
-                           tp_err, sizeof(tp_err)) ||
-            !ds4_engine_tp_bind(engine, tp, tp_err, sizeof(tp_err))) {
-            fprintf(stderr, "FAIL: TP leader setup: %s\n", tp_err);
-            return 1;
-        }
-    }
 
     ds4_tokens prompt[MAX_SESSION_COUNT] = {0};
     ds4_session *batched[MAX_SESSION_COUNT] = {0};
@@ -194,35 +114,6 @@ int main(void) {
             fprintf(stderr, "FAIL: prefill session=%d: %s\n", i, err);
             return 1;
         }
-    }
-
-    if (tp_leader && getenv("DS4_TEST_TP_DISCONNECT")) {
-        ds4_decode_item items[MAX_SESSION_COUNT];
-        for (int i = 0; i < session_count; i++) {
-            items[i].session = batched[i];
-            items[i].token = ds4_session_argmax(batched[i]);
-        }
-        fprintf(stderr, "TP_DISCONNECT_READY\n");
-        fflush(stderr);
-        usleep(1000 * 1000);
-        err[0] = '\0';
-        if (ds4_sessions_eval_batch(items, session_count,
-                                    err, sizeof(err)) == 0) {
-            fail("disconnect batch unexpectedly succeeded", -1, -1);
-        }
-        for (int i = 0; i < session_count; i++) {
-            if (ds4_session_pos(batched[i]) != 0) {
-                fail("disconnect did not invalidate checkpoint", i, -1);
-            }
-            ds4_session_free(batched[i]);
-            ds4_tokens_free(&prompt[i]);
-        }
-        ds4_engine_close(engine);
-        ds4_tp_free(tp);
-        fprintf(stderr,
-                "test_metal_session_batch DISCONNECT PASS invalidated=%d err=%s\n",
-                session_count, err[0] ? err : "unknown");
-        return 0;
     }
 
     const int vocab = ds4_engine_vocab_size(engine);
@@ -395,9 +286,7 @@ int main(void) {
     free(argmax);
     free(actual);
     free(expected);
-    if (tp) (void)ds4_tp_send_stop(tp);
     ds4_engine_close(engine);
-    ds4_tp_free(tp);
     fprintf(stderr,
             "test_metal_session_batch PASS sessions=%d steps=%d mixed_suffix=%d exact_logits=1\n",
             session_count, DECODE_STEPS, MIXED_SUFFIX_TOKENS);
