@@ -1,7 +1,7 @@
 #define DS4_SERVER_TEST
 #define DS4_SERVER_TEST_NO_MAIN
 #include "../ds4_server.c"
-#include "../ds4_laguna_ladder.h"
+#include "../lgn.h"
 #include "../ds4_gpu.h"
 
 /* These selectors are backend-independent, so keep their strict parser and
@@ -796,30 +796,30 @@ static void test_laguna_decode_ladder_parser(void) {
         (UINT64_C(1) << 47);
     uint64_t mask = UINT64_MAX;
 
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse(NULL, 48, &mask));
+    TEST_ASSERT(lgn_decode_ladder_parse(NULL, 48, &mask));
     TEST_ASSERT(mask == 0);
     mask = UINT64_MAX;
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse("", 48, &mask));
+    TEST_ASSERT(lgn_decode_ladder_parse("", 48, &mask));
     TEST_ASSERT(mask == 0);
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse(
+    TEST_ASSERT(lgn_decode_ladder_parse(
                     "7,15,23,31,39,47", 48, &mask));
     TEST_ASSERT(mask == (all_expected & ~UINT64_C(0x3)));
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse(
+    TEST_ASSERT(lgn_decode_ladder_parse(
                     "0,1,7,15,23,31,39,47", 48, &mask));
     TEST_ASSERT(mask == all_expected);
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse(
+    TEST_ASSERT(lgn_decode_ladder_parse(
                     "1,7,15,23,31,39", 48, &mask));
     TEST_ASSERT(mask == (all_expected & ~UINT64_C(0x800000000001)));
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse("47", 48, &mask));
+    TEST_ASSERT(lgn_decode_ladder_parse("47", 48, &mask));
     TEST_ASSERT(mask == (UINT64_C(1) << 47));
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse("0,63", 64, &mask));
+    TEST_ASSERT(lgn_decode_ladder_parse("0,63", 64, &mask));
     TEST_ASSERT(mask == ((UINT64_C(1) << 0) | (UINT64_C(1) << 63)));
 
     mask = UINT64_MAX;
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse(NULL, 65, &mask));
+    TEST_ASSERT(lgn_decode_ladder_parse(NULL, 65, &mask));
     TEST_ASSERT(mask == 0);
     mask = UINT64_MAX;
-    TEST_ASSERT(ds4_laguna_decode_ladder_parse("", 79, &mask));
+    TEST_ASSERT(lgn_decode_ladder_parse("", 79, &mask));
     TEST_ASSERT(mask == 0);
 
     static const char *invalid[] = {
@@ -828,14 +828,14 @@ static void test_laguna_decode_ladder_parser(void) {
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
         mask = UINT64_MAX;
-        TEST_ASSERT(!ds4_laguna_decode_ladder_parse(invalid[i], 48, &mask));
+        TEST_ASSERT(!lgn_decode_ladder_parse(invalid[i], 48, &mask));
         TEST_ASSERT(mask == 0);
     }
     mask = UINT64_MAX;
-    TEST_ASSERT(!ds4_laguna_decode_ladder_parse("0", 0, &mask));
+    TEST_ASSERT(!lgn_decode_ladder_parse("0", 0, &mask));
     TEST_ASSERT(mask == 0);
     mask = UINT64_MAX;
-    TEST_ASSERT(!ds4_laguna_decode_ladder_parse("0", 65, &mask));
+    TEST_ASSERT(!lgn_decode_ladder_parse("0", 65, &mask));
     TEST_ASSERT(mask == 0);
 }
 

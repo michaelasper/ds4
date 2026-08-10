@@ -43,9 +43,7 @@
 #include "ds4.h"
 #include "ds4_distributed.h"
 #include "ds4_tp.h"
-#ifdef __APPLE__
-#include "ds4_laguna_ladder.h"
-#endif
+#include "lgn.h"
 
 /* Wave-2 multi-GPU types are needed in every build because the engine
  * struct embeds ds4_gpu_config and the placement table. ds4_layer_pack.h
@@ -750,7 +748,6 @@ static ds4_shape g_ds4_shape = {
 };
 
 static uint32_t g_ds4_compress_ratios[DS4_MAX_LAYER] = {0};
-static uint32_t g_ds4_head_counts[DS4_MAX_LAYER] = {0};
 
 #define DS4_MODEL_SHAPE_NAME          (g_ds4_shape.name)
 #define DS4_MODEL_FAMILY              (g_ds4_shape.family)
@@ -1151,16 +1148,17 @@ static uint32_t ds4_layer_compress_ratio(uint32_t il) {
 static uint32_t ds4_layer_head_count(uint32_t il) {
     if (il >= DS4_N_LAYER) ds4_die("layer index is outside the loaded model layout");
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        const uint32_t n = g_ds4_head_counts[il];
-        if (n == 0) ds4_die("Laguna layer head count was not initialized");
+        const uint32_t n = lgn_layer_head_count(il);
+        if (n == 0) ds4_die("Laguna layer topology is not initialized");
         return n;
     }
     return DS4_N_HEAD;
 }
 
 static bool ds4_laguna_layer_is_swa(uint32_t il) {
-    return DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA &&
-           ds4_layer_head_count(il) == DS4_N_HEAD;
+    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return false;
+    (void)ds4_layer_head_count(il);
+    return lgn_layer_is_swa(il);
 }
 
 static uint32_t ds4_expected_layer_compress_ratio(uint32_t il) {
@@ -5984,7 +5982,6 @@ static void config_validate_fixed_shape(uint32_t n_layer) {
 /* Validate metadata values that affect semantics: attention shape, HC count,
  * expert routing, RoPE scaling, compression ratios, and SwiGLU clamp. */
 static void config_validate_deepseek4_model(const ds4_model *m) {
-    memset(g_ds4_head_counts, 0, sizeof(g_ds4_head_counts));
     const uint32_t n_layer = required_u32(m, "deepseek4.block_count");
     const uint32_t n_embd = required_u32(m, "deepseek4.embedding_length");
     const uint32_t n_vocab = required_u32(m, "deepseek4.vocab_size");
@@ -6099,7 +6096,6 @@ static void config_validate_deepseek4_model(const ds4_model *m) {
 static void config_validate_glm_dsa_model(const ds4_model *m) {
     g_ds4_shape = DS4_SHAPE_GLM52;
     memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
-    memset(g_ds4_head_counts, 0, sizeof(g_ds4_head_counts));
 
     const uint32_t n_layer = required_u32(m, "glm-dsa.block_count");
     const uint64_t n_ctx = required_u64_compat(m, "glm-dsa.context_length");
@@ -6168,7 +6164,6 @@ static void config_validate_glm_dsa_model(const ds4_model *m) {
 static void config_validate_laguna_model(const ds4_model *m) {
     g_ds4_shape = DS4_SHAPE_LAGUNA_S21;
     memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
-    memset(g_ds4_head_counts, 0, sizeof(g_ds4_head_counts));
 
     const uint32_t n_layer = required_u32(m, "laguna.block_count");
     const uint64_t n_ctx = required_u64_compat(m, "laguna.context_length");
@@ -6224,14 +6219,13 @@ static void config_validate_laguna_model(const ds4_model *m) {
             if (v <= 0) ds4_die("Laguna head-count metadata contains a non-positive value");
             got = (uint32_t)v;
         }
-        const uint32_t expected = (il % 4u) == 0 ? 48u : 72u;
+        const uint32_t expected = lgn_layer_head_count(il);
         if (got != expected) {
             fprintf(stderr,
                     "ds4: unexpected Laguna head count at layer %u: got %u, expected %u\n",
                     il, got, expected);
             exit(1);
         }
-        g_ds4_head_counts[il] = got;
     }
 
     ds4_str rope_type = {0};
@@ -52327,9 +52321,9 @@ static bool laguna_graph_forward_token(
     uint32_t fused_add3_count = 0;
     const char *decode_ladder_value =
         getenv("DS4_METAL_LAGUNA_DECODE_LADDER");
-    if (!ds4_laguna_decode_ladder_parse(decode_ladder_value,
-                                        (uint32_t)DS4_N_LAYER,
-                                        &decode_ladder_mask)) {
+    if (!lgn_decode_ladder_parse(decode_ladder_value,
+                                 (uint32_t)DS4_N_LAYER,
+                                 &decode_ladder_mask)) {
         fprintf(stderr,
                 "ds4: invalid DS4_METAL_LAGUNA_DECODE_LADDER='%s'; "
                 "expected a strictly increasing comma-separated list of "
@@ -52985,10 +52979,10 @@ static bool laguna_graph_forward_token(
     }
     if (ok && decode_ladder_flushes != 0 && !decode_ladder_reported) {
         char canonical[256];
-        if (ds4_laguna_decode_ladder_format(decode_ladder_mask,
-                                             (uint32_t)DS4_N_LAYER,
-                                             canonical,
-                                             sizeof(canonical))) {
+        if (lgn_decode_ladder_format(decode_ladder_mask,
+                                     (uint32_t)DS4_N_LAYER,
+                                     canonical,
+                                     sizeof(canonical))) {
             fprintf(stderr,
                     "ds4: Laguna decode command-buffer ladder enabled "
                     "(layers=%s; flushes=%u; completion=waited)\n",

@@ -1,18 +1,10 @@
-#ifndef DS4_LAGUNA_LADDER_H
-#define DS4_LAGUNA_LADDER_H
+#include "lgn.h"
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include <stdio.h>
 
-/* Parse the optional Laguna decode command-buffer ladder.  An unset/empty
- * value is disabled and succeeds for every model layer count.  A nonempty
- * value is a strict decimal comma list, increasing and bounded by the model
- * layer count; uint64_t masks support at most 64 requested layers. */
-static inline bool ds4_laguna_decode_ladder_parse(
-        const char *value,
-        uint32_t    layer_count,
-        uint64_t   *mask_out) {
+bool lgn_decode_ladder_parse(const char *value,
+                             uint32_t    layer_count,
+                             uint64_t   *mask_out) {
     if (!mask_out) return false;
     *mask_out = 0;
     if (!value || value[0] == '\0') return true;
@@ -51,14 +43,10 @@ static inline bool ds4_laguna_decode_ladder_parse(
     }
 }
 
-#ifdef __APPLE__
-#include <stdio.h>
-
-static inline bool ds4_laguna_decode_ladder_format(
-        uint64_t mask,
-        uint32_t layer_count,
-        char    *out,
-        size_t    out_size) {
+bool lgn_decode_ladder_format(uint64_t mask,
+                              uint32_t layer_count,
+                              char    *out,
+                              size_t   out_size) {
     if (!out || out_size == 0 || layer_count > 64u) return false;
 
     size_t used = 0;
@@ -74,6 +62,3 @@ static inline bool ds4_laguna_decode_ladder_format(
     }
     return true;
 }
-#endif
-
-#endif /* DS4_LAGUNA_LADDER_H */
