@@ -1085,6 +1085,10 @@ int ds4_gpu_test_laguna_route_counters(uint64_t *direct_kv,
                                        uint64_t *wrap_kv,
                                        uint64_t *fused_q8,
                                        uint64_t *stock_q8);
+int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
+                                        uint64_t *bco_true);
+/* Test-only malformed lifecycle injection for fail-before-mutation coverage. */
+void ds4_gpu_test_laguna_set_direct_kv_mode(int mode);
 #endif
 #endif
 

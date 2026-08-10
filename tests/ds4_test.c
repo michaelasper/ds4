@@ -5991,15 +5991,129 @@ static void test_laguna_prefill_direct_kv_ab(void) {
     ds4_gpu_cleanup();
 }
 
+/* A malformed direct-KV opt-in is rejected while taking the Metal lifecycle
+ * snapshot.  The second half forces the low-level defensive guard and uses
+ * poisoned cache rows to prove the split path cannot mutate KV before it
+ * returns failure. */
+static void test_laguna_prefill_direct_kv_invalid_mode(void) {
+    const uint32_t n_head = 12u;
+    const uint32_t n_head_kv = 2u;
+    const uint32_t head_dim = 128u;
+    const uint32_t cache_cap = 1024u;
+    const uint32_t n_tokens = 4u;
+    const uint32_t pos0 = 8u;
+    const uint64_t q_values = (uint64_t)n_tokens * n_head * head_dim;
+    const uint64_t kv_values = (uint64_t)n_tokens * n_head_kv * head_dim;
+    const uint64_t gate_values = (uint64_t)n_tokens * n_head;
+    const uint64_t cache_values = (uint64_t)cache_cap * n_head_kv * head_dim;
+    char *saved_direct = test_save_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL");
+
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", "01", 1) == 0);
+    ds4_gpu_cleanup();
+    /* Snapshot rejection happens before device, queue, or graph setup. */
+    TEST_ASSERT(ds4_gpu_init() == 0);
+
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", "0", 1) == 0);
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    ds4_gpu_test_laguna_route_counters_reset();
+    ds4_gpu_tensor *heads = ds4_gpu_tensor_alloc(q_values * sizeof(float));
+    ds4_gpu_tensor *key_cache =
+        ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+    ds4_gpu_tensor *value_cache =
+        ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+    ds4_gpu_tensor *staged_key =
+        ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+    ds4_gpu_tensor *staged_value =
+        ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+    ds4_gpu_tensor *q = ds4_gpu_tensor_alloc(q_values * sizeof(float));
+    ds4_gpu_tensor *k = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+    ds4_gpu_tensor *v = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+    ds4_gpu_tensor *gate =
+        ds4_gpu_tensor_alloc(gate_values * sizeof(float));
+    uint16_t *key_poison = malloc((size_t)cache_values * sizeof(uint16_t));
+    uint16_t *value_poison = malloc((size_t)cache_values * sizeof(uint16_t));
+    uint16_t *key_after = malloc((size_t)cache_values * sizeof(uint16_t));
+    uint16_t *value_after = malloc((size_t)cache_values * sizeof(uint16_t));
+    TEST_ASSERT(heads && key_cache && value_cache && staged_key &&
+                staged_value && q && k && v && gate && key_poison &&
+                value_poison && key_after && value_after);
+    if (!heads || !key_cache || !value_cache || !staged_key ||
+        !staged_value || !q || !k || !v || !gate || !key_poison ||
+        !value_poison || !key_after || !value_after) {
+        goto invalid_cleanup;
+    }
+    for (uint64_t i = 0; i < cache_values; i++) {
+        key_poison[i] = (uint16_t)(0x5100u | (i % 251u));
+        value_poison[i] = (uint16_t)(0xA100u | (i % 241u));
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    key_cache, 0, key_poison,
+                    cache_values * sizeof(uint16_t)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    value_cache, 0, value_poison,
+                    cache_values * sizeof(uint16_t)) != 0);
+
+    /* This setter is test-only: it simulates a malformed captured mode after
+     * a valid device lifecycle so the split branch itself is covered. */
+    ds4_gpu_test_laguna_set_direct_kv_mode(-1);
+    TEST_ASSERT(ds4_gpu_laguna_attention_prefill_tensor(
+                    heads, key_cache, value_cache, staged_key, staged_value,
+                    q, k, v, gate, pos0, n_tokens, cache_cap,
+                    n_head, n_head_kv, head_dim,
+                    1.0f / sqrtf((float)head_dim), 1) == 0);
+    ds4_gpu_test_laguna_set_direct_kv_mode(0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    key_cache, 0, key_after,
+                    cache_values * sizeof(uint16_t)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    value_cache, 0, value_after,
+                    cache_values * sizeof(uint16_t)) != 0);
+    TEST_ASSERT(memcmp(key_after, key_poison,
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    TEST_ASSERT(memcmp(value_after, value_poison,
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    {
+        uint64_t direct_count = 0;
+        uint64_t wrap_count = 0;
+        uint64_t fused_count = 0;
+        uint64_t stock_count = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_route_counters(
+                        &direct_count, &wrap_count,
+                        &fused_count, &stock_count) != 0);
+        TEST_ASSERT(direct_count == 0u && wrap_count == 0u &&
+                    fused_count == 0u && stock_count == 0u);
+    }
+    fprintf(stderr,
+            "ds4-test: malformed Laguna direct-KV mode rejected before "
+            "split dispatch; poisoned caches unchanged\n");
+
+invalid_cleanup:
+    free(value_after);
+    free(key_after);
+    free(value_poison);
+    free(key_poison);
+    ds4_gpu_tensor_free(gate);
+    ds4_gpu_tensor_free(v);
+    ds4_gpu_tensor_free(k);
+    ds4_gpu_tensor_free(q);
+    ds4_gpu_tensor_free(staged_value);
+    ds4_gpu_tensor_free(staged_key);
+    ds4_gpu_tensor_free(value_cache);
+    ds4_gpu_tensor_free(key_cache);
+    ds4_gpu_tensor_free(heads);
+    ds4_gpu_cleanup();
+    test_restore_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", saved_direct);
+}
+
 /*
  * Batched fused dense Q8 gate/up+SwiGLU against a double reference.  The
  * kernel stages activations as half and dequantizes Q8_0 to half exactly
  * like kernel_mul_mm_q8_0_f32, so the reference rounds both operands the
  * same way and accumulates in double; the kernel accumulates in float.
  */
-static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok) {
+static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok,
+                                                   uint32_t out_dim) {
     const uint32_t in_dim = 512u;
-    const uint32_t out_dim = 160u;
     const uint32_t blocks = in_dim / 32u;
     const uint64_t row_bytes = (uint64_t)blocks * 34u;
     const uint64_t weight_bytes = (uint64_t)out_dim * row_bytes;
@@ -6084,17 +6198,31 @@ static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok) {
     {
         uint64_t fused_count = 0;
         uint64_t stock_count = 0;
+        uint64_t bco_false_count = 0;
+        uint64_t bco_true_count = 0;
         TEST_ASSERT(ds4_gpu_test_laguna_route_counters(
                         NULL, NULL, &fused_count, &stock_count) != 0);
+        TEST_ASSERT(ds4_gpu_test_laguna_q8_bco_counters(
+                        &bco_false_count, &bco_true_count) != 0);
         TEST_ASSERT(fused_count ==
                     (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED
                          ? 1u : 0u));
         TEST_ASSERT(stock_count == 2u);
+        const bool expected_bco = out_dim % 64u != 0u || n_tok % 32u != 0u;
+        TEST_ASSERT(bco_false_count ==
+                    (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED &&
+                     !expected_bco ? 1u : 0u));
+        TEST_ASSERT(bco_true_count ==
+                    (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED &&
+                     expected_bco ? 1u : 0u));
         fprintf(stderr,
-                "ds4-test: Laguna Q8 route counters rows=%u fused=%llu stock=%llu\n",
-                n_tok,
+                "ds4-test: Laguna Q8 route counters rows=%u out=%u fused=%llu "
+                "stock=%llu bco_false=%llu bco_true=%llu\n",
+                n_tok, out_dim,
                 (unsigned long long)fused_count,
-                (unsigned long long)stock_count);
+                (unsigned long long)stock_count,
+                (unsigned long long)bco_false_count,
+                (unsigned long long)bco_true_count);
     }
     TEST_ASSERT(memcmp(mid_host, mid_stock_host,
                        (size_t)mid_values * sizeof(float)) == 0);
@@ -6151,8 +6279,8 @@ static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok) {
         const double rms = sqrt(sum_squared / (double)mid_values);
         fprintf(stderr,
                 "ds4-test: Laguna batched fused Q8 gate/up+SwiGLU "
-                "numeric rows=%u max_abs=%g rms=%g nonfinite=%zu\n",
-                n_tok, max_abs, rms, nonfinite);
+                "numeric rows=%u out=%u max_abs=%g rms=%g nonfinite=%zu\n",
+                n_tok, out_dim, max_abs, rms, nonfinite);
         TEST_ASSERT(nonfinite == 0u);
         TEST_ASSERT(max_abs < 5.0e-3);
         TEST_ASSERT(rms < 1.0e-3);
@@ -6178,11 +6306,21 @@ static void test_laguna_dense_q8_batch_swiglu(void) {
     ds4_gpu_cleanup();
     TEST_ASSERT(ds4_gpu_init() != 0);
     TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 128u);
+    /* Enabled preflight is intentionally first: an old dense source must
+     * fail here, before any stock, attention, or KV work is dispatched. */
+    const int first_batch_available =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available();
+    TEST_ASSERT(first_batch_available != 0);
+    if (first_batch_available == 0) {
+        ds4_gpu_cleanup();
+        test_restore_env("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", saved_mv_ceiling);
+        return;
+    }
     /* A lifecycle override changes the stock boundary, so exercise both
      * sides of the effective 128-row ceiling before changing the env. */
     ds4_gpu_set_quality(true);
-    test_laguna_dense_q8_batch_swiglu_case(128u);
-    test_laguna_dense_q8_batch_swiglu_case(129u);
+    test_laguna_dense_q8_batch_swiglu_case(128u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(129u, 160u);
     /* Changing the environment cannot hot-switch the already initialized
      * lifecycle; only a clean init may make 16 effective. */
     TEST_ASSERT(setenv("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", "16", 1) == 0);
@@ -6190,16 +6328,19 @@ static void test_laguna_dense_q8_batch_swiglu(void) {
     ds4_gpu_cleanup();
     TEST_ASSERT(ds4_gpu_init() != 0);
     TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 16u);
+    /* Aligned bounded production shape: both dimensions select bco=false. */
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available() != 0);
+    test_laguna_dense_q8_batch_swiglu_case(32u, 192u);
     /* Boundary rows stay on stock mul_mv_ext; larger rows compare the fused
      * pass bit-for-bit with stock and with the independent reference. */
-    test_laguna_dense_q8_batch_swiglu_case(1u);
-    test_laguna_dense_q8_batch_swiglu_case(2u);
-    test_laguna_dense_q8_batch_swiglu_case(16u);
-    test_laguna_dense_q8_batch_swiglu_case(17u);
-    test_laguna_dense_q8_batch_swiglu_case(64u);
-    test_laguna_dense_q8_batch_swiglu_case(48u);
-    test_laguna_dense_q8_batch_swiglu_case(33u);
-    test_laguna_dense_q8_batch_swiglu_case(129u);
+    test_laguna_dense_q8_batch_swiglu_case(1u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(2u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(16u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(17u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(64u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(48u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(33u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(129u, 160u);
     ds4_gpu_set_quality(false);
     ds4_gpu_cleanup();
     test_restore_env("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", saved_mv_ceiling);
@@ -11652,6 +11793,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-prefill-direct-kv-ab", "laguna-prefill-direct-kv-ab",
      "bit-exact A/B of the opt-in direct non-SWA prefill KV store",
      test_laguna_prefill_direct_kv_ab, false},
+    {"--laguna-prefill-direct-kv-invalid", "laguna-prefill-direct-kv-invalid",
+     "malformed direct-KV selector fails before split-row KV mutation",
+     test_laguna_prefill_direct_kv_invalid_mode, false},
     {"--laguna-dense-q8-batch-swiglu", "laguna-dense-q8-batch-swiglu",
      "batched fused dense Q8 gate/up+SwiGLU against a double reference",
      test_laguna_dense_q8_batch_swiglu, false},

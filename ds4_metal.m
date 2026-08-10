@@ -620,6 +620,8 @@ static uint64_t g_laguna_test_direct_kv_count;
 static uint64_t g_laguna_test_wrap_kv_count;
 static uint64_t g_laguna_test_fused_q8_count;
 static uint64_t g_laguna_test_stock_q8_count;
+static uint64_t g_laguna_test_fused_q8_bco_false_count;
+static uint64_t g_laguna_test_fused_q8_bco_true_count;
 #endif
 #define DS4_METAL_MAX_ROUTED_EXPERT_USED 8
 static int32_t g_routed_moe_selected_override[DS4_METAL_MAX_ROUTED_EXPERT_USED];
@@ -2433,6 +2435,8 @@ void ds4_gpu_test_laguna_route_counters_reset(void) {
     g_laguna_test_wrap_kv_count = 0;
     g_laguna_test_fused_q8_count = 0;
     g_laguna_test_stock_q8_count = 0;
+    g_laguna_test_fused_q8_bco_false_count = 0;
+    g_laguna_test_fused_q8_bco_true_count = 0;
     g_laguna_test_route_hooks = 1;
 }
 
@@ -2446,6 +2450,18 @@ int ds4_gpu_test_laguna_route_counters(uint64_t *direct_kv,
     if (fused_q8) *fused_q8 = g_laguna_test_fused_q8_count;
     if (stock_q8) *stock_q8 = g_laguna_test_stock_q8_count;
     return 1;
+}
+
+int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
+                                        uint64_t *bco_true) {
+    if (!g_initialized || !g_laguna_test_route_hooks) return 0;
+    if (bco_false) *bco_false = g_laguna_test_fused_q8_bco_false_count;
+    if (bco_true) *bco_true = g_laguna_test_fused_q8_bco_true_count;
+    return 1;
+}
+
+void ds4_gpu_test_laguna_set_direct_kv_mode(int mode) {
+    g_direct_kv_prefill_mode = mode;
 }
 #endif
 
@@ -6732,12 +6748,20 @@ int ds4_gpu_init(void) {
 
     @autoreleasepool {
         ds4_gpu_snapshot_lifecycle_selectors();
+        if (g_direct_kv_prefill_mode < 0) {
+            fprintf(stderr,
+                    "ds4: invalid DS4_METAL_LAGUNA_DIRECT_KV_PREFILL; "
+                    "expected unset, empty, 0, or literal 1\n");
+            return 0;
+        }
 #ifdef DS4_TEST_HOOKS
         g_laguna_test_route_hooks = 0;
         g_laguna_test_direct_kv_count = 0;
         g_laguna_test_wrap_kv_count = 0;
         g_laguna_test_fused_q8_count = 0;
         g_laguna_test_stock_q8_count = 0;
+        g_laguna_test_fused_q8_bco_false_count = 0;
+        g_laguna_test_fused_q8_bco_true_count = 0;
 #endif
         ds4_gpu_decode_pipeline_fast_cache_reset();
         g_pair_compressor_store_missing_count = 0;
@@ -11080,6 +11104,8 @@ void ds4_gpu_cleanup(void) {
         g_laguna_test_wrap_kv_count = 0;
         g_laguna_test_fused_q8_count = 0;
         g_laguna_test_stock_q8_count = 0;
+        g_laguna_test_fused_q8_bco_false_count = 0;
+        g_laguna_test_fused_q8_bco_true_count = 0;
 #endif
         g_initialized = 0;
     }
@@ -21006,16 +21032,28 @@ int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
  * never reach device memory.  The kernel mirrors kernel_mul_mm_q8_0_f32
  * tile-for-tile, which is the kernel ordinary prefill uses while TensorOps
  * is suppressed. */
+static int ds4_gpu_laguna_dense_q8_batch_pipeline_valid(
+        id<MTLComputePipelineState> pipeline) {
+    return pipeline && pipeline.threadExecutionWidth == 32u &&
+        pipeline.maxTotalThreadsPerThreadgroup >= 128u &&
+        (NSUInteger)(4u * 64u * 32u * sizeof(uint16_t)) <=
+            [g_device maxThreadgroupMemoryLength];
+}
+
 int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     @autoreleasepool {
-        id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mm_pipeline(
-            "kernel_mul_mm_q8_0_f32_pair_swiglu", false, true);
-        if (!pipeline || pipeline.threadExecutionWidth != 32u ||
-            pipeline.maxTotalThreadsPerThreadgroup < 128u ||
-            (NSUInteger)(4u * 64u * 32u * sizeof(uint16_t)) >
-                [g_device maxThreadgroupMemoryLength]) {
-            return 0;
+        /* bco is a real function-constant specialization: aligned production
+         * shapes (out_dim % 64 == 0 and n_tok % 32 == 0) use false, while
+         * ragged tails use true. Warm and validate both before graph capture
+         * so a missing/old source cannot fail after attention or KV mutation. */
+        for (int bco = 0; bco <= 1; bco++) {
+            id<MTLComputePipelineState> pipeline =
+                ds4_gpu_get_mul_mm_pipeline(
+                    "kernel_mul_mm_q8_0_f32_pair_swiglu", false, bco != 0);
+            if (!ds4_gpu_laguna_dense_q8_batch_pipeline_valid(pipeline)) {
+                return 0;
+            }
         }
         return 1;
     }
@@ -21108,7 +21146,11 @@ int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
             return 0;
         }
 #ifdef DS4_TEST_HOOKS
-        if (g_laguna_test_route_hooks) g_laguna_test_fused_q8_count++;
+        if (g_laguna_test_route_hooks) {
+            g_laguna_test_fused_q8_count++;
+            if (bc_out) g_laguna_test_fused_q8_bco_true_count++;
+            else g_laguna_test_fused_q8_bco_false_count++;
+        }
 #endif
     }
 
@@ -36670,6 +36712,15 @@ int ds4_gpu_laguna_attention_prefill_tensor(
         float                 scale,
         int                   split_decode_rows) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
+    /* The selector is lifecycle-snapshotted and rejected during init. Keep
+     * this guard at the low-level entry as well so a malformed opt-in can
+     * never reach either the split-row or ordinary command encoder. */
+    if (g_direct_kv_prefill_mode < 0) {
+        fprintf(stderr,
+                "ds4: invalid DS4_METAL_LAGUNA_DIRECT_KV_PREFILL; "
+                "expected unset, empty, 0, or literal 1\n");
+        return 0;
+    }
     if (!heads || !key_cache || !value_cache || !staged_key ||
         !staged_value || !q || !k || !v || !gate || n_tokens == 0 ||
         pos0 > UINT32_MAX - n_tokens || cache_cap == 0 || n_head == 0 ||
@@ -37135,12 +37186,6 @@ int ds4_gpu_laguna_attention_prefill_tensor(
          * that early queries in the chunk still read.
          */
         const int direct_kv_mode = g_direct_kv_prefill_mode;
-        if (direct_kv_mode < 0) {
-            fprintf(stderr,
-                    "ds4: invalid DS4_METAL_LAGUNA_DIRECT_KV_PREFILL; "
-                    "expected unset, empty, 0, or literal 1\n");
-            return 0;
-        }
         const bool direct_kv =
             direct_kv_mode > 0 && cache_cap > 512u &&
             (uint64_t)pos0 + (uint64_t)n_tokens <= (uint64_t)cache_cap;
