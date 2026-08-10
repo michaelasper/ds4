@@ -5191,15 +5191,25 @@ typedef struct {
 static int ds4_gpu_tp_world_is_two(void);
 
 static ds4_gpu_mv_dispatch ds4_gpu_make_q8_0_mv_dispatch(void) {
-    const uint64_t default_nsg = ds4_gpu_tp_world_is_two() ? 2u : 4u;
-    const int16_t nsg =
-        (int16_t)ds4_gpu_env_u64("DS4_METAL_Q8_MV_NSG", default_nsg, 1u, 8u);
-    return (ds4_gpu_mv_dispatch) {
-        .function_name = "kernel_mul_mv_q8_0_f32",
-        .nsg = nsg,
-        .nr0 = 2,
-        .smem = 32u * 2u * sizeof(float),
-    };
+    /* Decode recomputes this per matvec per layer per token, but the result
+     * depends only on the TP world and the process-constant nsg override,
+     * so memoize per TP mode instead of probing the environment each call. */
+    const int tp2 = ds4_gpu_tp_world_is_two() ? 1 : 0;
+    static ds4_gpu_mv_dispatch cache[2];
+    static int cache_valid[2];
+    if (!cache_valid[tp2]) {
+        const uint64_t default_nsg = tp2 ? 2u : 4u;
+        const int16_t nsg = (int16_t)ds4_gpu_env_u64(
+            "DS4_METAL_Q8_MV_NSG", default_nsg, 1u, 8u);
+        cache[tp2] = (ds4_gpu_mv_dispatch) {
+            .function_name = "kernel_mul_mv_q8_0_f32",
+            .nsg = nsg,
+            .nr0 = 2,
+            .smem = 32u * 2u * sizeof(float),
+        };
+        cache_valid[tp2] = 1;
+    }
+    return cache[tp2];
 }
 
 static ds4_gpu_mv_dispatch ds4_gpu_make_plain_mv_dispatch(
