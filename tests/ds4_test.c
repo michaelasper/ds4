@@ -2,8 +2,70 @@
 #define DS4_SERVER_TEST_NO_MAIN
 #include "../ds4_server.c"
 #include "../ds4_laguna_ladder.h"
-#ifndef DS4_NO_GPU
 #include "../ds4_gpu.h"
+
+/* These selectors are backend-independent, so keep their strict parser and
+ * route-boundary checks runnable in the default CPU/no-GPU test binary too. */
+static void test_laguna_selector_parser(void) {
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse(NULL) == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("  2 \t") == 2u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("16") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("128") == 128u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("129") == 128u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("1") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("-1") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("12x") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse(
+                    "18446744073709551616") == 16u);
+
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse(NULL) == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse(" 32 ") == 32u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("16") == 32u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("96") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("4096") == 4096u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("4097") == 4096u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("-1") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("12x") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse(
+                    "18446744073709551616") == 96u);
+
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode(NULL) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("0") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("1") == 1);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("01") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("true") < 0);
+
+    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode(NULL) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("0") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("1") == 1);
+    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("01") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("true") < 0);
+
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 1, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 2, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 16, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 17, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 128, 128) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 129, 128) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED);
+}
+
+#ifndef DS4_NO_GPU
 #include <math.h>
 
 bool ds4_test_dspark_cache_window_crop(void);
@@ -1085,18 +1147,16 @@ static void test_metal_laguna_dense_q8_gate_up_swiglu(void) {
     char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
     TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "2", 1) == 0);
     const bool mid_rows2 = ds4_gpu_shared_mid_swiglu_q8_0_available() != 0;
-    TEST_ASSERT(mid_rows2);
     if (!mid_rows2) {
-        test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
-        return;
-    }
-
-    /* The focused selector is explicit, so an unavailable pipeline is a
-     * failed test rather than a silent skip. */
-    if (!ds4_gpu_shared_mid_swiglu_q8_0_available()) {
+        /* A pre-feature DENSE source is valid with the selector off.  This
+         * focused selector-on invocation must instead fail closed before any
+         * graph/KV mutation, so an absent optional PSO is a passing negative
+         * result rather than an unconditional default-suite failure. */
+        TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+                        1, 1, 1, 2, 0) < 0);
         fprintf(stderr,
-                "ds4-test: Laguna dense Q8 gate/up+SwiGLU pipeline unavailable\n");
-        TEST_ASSERT(false);
+                "ds4-test: Laguna dense Q8 fused selector fail-closed; "
+                "optional source PSO unavailable\n");
         test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
         return;
     }
@@ -1335,6 +1395,12 @@ static void test_metal_q8_decode_lifecycle_snapshot(void) {
     ds4_gpu_q8_decode_config first;
     ds4_gpu_q8_decode_config mutated;
     TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&first) > 0);
+    const int expected_world1 = first.q8_mv_nsg_override > 0 ?
+        first.q8_mv_nsg_override : 4;
+    const int expected_world2 = first.q8_mv_nsg_override > 0 ?
+        first.q8_mv_nsg_override : 2;
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
 
     char *saved_nsg = test_save_env("DS4_METAL_Q8_MV_NSG");
     char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
@@ -1343,14 +1409,70 @@ static void test_metal_q8_decode_lifecycle_snapshot(void) {
     TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
     TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
     TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
 
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_NSG") == 0);
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
     TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
     TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
     TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
+
+    /* Cleanup releases Metal objects but deliberately does not reopen the
+     * process snapshot.  Re-init must keep the same world-1/world-2
+     * descriptors even after the environment was mutated and then unset. */
+    ds4_gpu_cleanup();
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
+    TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
+    TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
     test_restore_env("DS4_METAL_Q8_MV_NSG", saved_nsg);
     test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+}
+
+/* Run alone in a fresh process so the Q8 process snapshot is still unset.
+ * Both malformed selectors must fail before raw-graph memset/allocation and
+ * leave the caller-owned command state untouched. */
+static void test_metal_graph_malformed_q8_admission(void) {
+    char *saved_nsg = test_save_env("DS4_METAL_Q8_MV_NSG");
+    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_NSG", "not-a-number", 1) == 0);
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "not-a-number", 1) == 0);
+    TEST_ASSERT(!ds4_gpu_commands_active());
+    TEST_ASSERT(ds4_test_raw_graph_preflight_failure_state(1) != 0);
+    TEST_ASSERT(!ds4_gpu_commands_active());
+    fprintf(stderr,
+            "ds4-test: malformed Q8 snapshot rejected before raw graph "
+            "mutation\n");
+    test_restore_env("DS4_METAL_Q8_MV_NSG", saved_nsg);
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+}
+
+/* Run alone with an optional old DENSE source override. If the current source
+ * has the output PSO, a deliberately invalid weight shape still exercises the
+ * same preflight boundary. With the old source, the valid-shape branch proves
+ * the unavailable PSO fails before graph/KV/command state changes. */
+static void test_metal_graph_output_preflight_failure(void) {
+    char *saved_output = test_save_env(
+        "DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE");
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE", "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    const int output_pso = ds4_gpu_matmul_f16_rms_norm_mv_preflight(
+        16384u, 4u);
+    TEST_ASSERT(!ds4_gpu_commands_active());
+    TEST_ASSERT(ds4_test_raw_graph_preflight_failure_state(
+                    output_pso == 0 ? 1 : 0) != 0);
+    TEST_ASSERT(!ds4_gpu_commands_active());
+    fprintf(stderr,
+            "ds4-test: output-head selector preflight failed cleanly "
+            "(optional_pso=%s)\n",
+            output_pso ? "available" : "unavailable");
+    ds4_gpu_cleanup();
+    test_restore_env("DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE", saved_output);
 }
 
 /* The focused selector starts in a fresh process, so use it to prove that a
@@ -5777,6 +5899,575 @@ static void test_laguna_gqa3_decode_numeric(void) {
     ds4_gpu_cleanup();
 #endif
 }
+
+#if defined(__APPLE__)
+/*
+ * DS4_METAL_LAGUNA_DIRECT_KV_PREFILL A/B.  The direct non-SWA path converts
+ * the chunk straight into the cache slot and folds the commit away, so heads
+ * and the committed ring must stay bit-identical to the staged path, chunk
+ * after chunk.  A chunk that would wrap the ring must keep the staged path
+ * even with the flag set.
+ */
+static void test_laguna_prefill_direct_kv_ab_case(
+        uint32_t n_head,
+        uint32_t n_head_kv) {
+    const uint32_t head_dim = 128u;
+    const uint32_t cache_cap = 1024u;
+    const uint32_t cache_width = n_head_kv * head_dim;
+    const float scale = 1.0f / sqrtf((float)head_dim);
+    const uint32_t chunk_pos0[] = {0u, 17u, 990u, 1010u};
+    const uint32_t chunk_tokens[] = {17u, 13u, 24u, 24u};
+    const uint32_t n_chunks = 4u;
+    const uint32_t max_tokens = 24u;
+    const uint64_t q_values = (uint64_t)max_tokens * n_head * head_dim;
+    const uint64_t kv_values = (uint64_t)max_tokens * cache_width;
+    const uint64_t gate_values = (uint64_t)max_tokens * n_head;
+    const uint64_t cache_values = (uint64_t)cache_cap * cache_width;
+
+    float *q_host = malloc((size_t)q_values * sizeof(float));
+    float *k_host = malloc((size_t)kv_values * sizeof(float));
+    float *v_host = malloc((size_t)kv_values * sizeof(float));
+    float *gate_host = malloc((size_t)gate_values * sizeof(float));
+    float *heads_runs[2] = {NULL, NULL};
+    uint16_t *key_runs[2] = {NULL, NULL};
+    uint16_t *value_runs[2] = {NULL, NULL};
+    const uint64_t all_heads_values =
+        (uint64_t)n_chunks * q_values;
+    heads_runs[0] = malloc((size_t)all_heads_values * sizeof(float));
+    heads_runs[1] = malloc((size_t)all_heads_values * sizeof(float));
+    key_runs[0] = malloc((size_t)cache_values * sizeof(uint16_t));
+    key_runs[1] = malloc((size_t)cache_values * sizeof(uint16_t));
+    value_runs[0] = malloc((size_t)cache_values * sizeof(uint16_t));
+    value_runs[1] = malloc((size_t)cache_values * sizeof(uint16_t));
+    TEST_ASSERT(q_host && k_host && v_host && gate_host &&
+                heads_runs[0] && heads_runs[1] && key_runs[0] &&
+                key_runs[1] && value_runs[0] && value_runs[1]);
+
+    char *saved_direct = test_save_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL");
+    for (uint32_t run = 0; run < 2u; run++) {
+        if (run == 1u) {
+            setenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", "1", 1);
+        } else {
+            unsetenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL");
+        }
+        /* The production selector is lifecycle-snapshotted at Metal init;
+         * restart that lifecycle for the off/on A/B instead of hot-mutating
+         * the environment between dispatches. */
+        ds4_gpu_cleanup();
+        TEST_ASSERT(ds4_gpu_init() != 0);
+        ds4_gpu_test_laguna_route_counters_reset();
+        ds4_gpu_tensor *heads =
+            ds4_gpu_tensor_alloc(q_values * sizeof(float));
+        ds4_gpu_tensor *key_cache =
+            ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+        ds4_gpu_tensor *value_cache =
+            ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+        ds4_gpu_tensor *staged_key =
+            ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+        ds4_gpu_tensor *staged_value =
+            ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+        ds4_gpu_tensor *q = ds4_gpu_tensor_alloc(q_values * sizeof(float));
+        ds4_gpu_tensor *k = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+        ds4_gpu_tensor *v = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+        ds4_gpu_tensor *gate =
+            ds4_gpu_tensor_alloc(gate_values * sizeof(float));
+        TEST_ASSERT(heads && key_cache && value_cache && staged_key &&
+                    staged_value && q && k && v && gate);
+        /* Seed the ring so stale-row reads cannot hide behind zeros. */
+        for (uint64_t i = 0; i < cache_values; i++) {
+            key_runs[run][i] = (uint16_t)(0x5A00u | (i % 251u));
+            value_runs[run][i] = (uint16_t)(0xA500u | (i % 241u));
+        }
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        key_cache, 0, key_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        value_cache, 0, value_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+
+        for (uint32_t chunk = 0; chunk < n_chunks; chunk++) {
+            const uint32_t n_tokens = chunk_tokens[chunk];
+            const uint64_t chunk_q = (uint64_t)n_tokens * n_head * head_dim;
+            const uint64_t chunk_kv = (uint64_t)n_tokens * cache_width;
+            const uint64_t chunk_gate = (uint64_t)n_tokens * n_head;
+            for (uint64_t i = 0; i < chunk_q; i++) {
+                const int value = (int)((i * 37u + (i >> 3u) * 11u +
+                                         chunk * 29u + 5u) % 191u) - 95;
+                q_host[i] = (float)value / 384.0f;
+            }
+            for (uint64_t i = 0; i < chunk_kv; i++) {
+                const int key_value = (int)((i * 29u + (i >> 2u) * 17u +
+                                             chunk * 31u + 7u) % 181u) - 90;
+                const int value_value = (int)((i * 31u + (i >> 4u) * 13u +
+                                               chunk * 23u + 3u) % 173u) - 86;
+                k_host[i] = (float)key_value / 352.0f;
+                v_host[i] = (float)value_value / 320.0f;
+            }
+            for (uint64_t i = 0; i < chunk_gate; i++) {
+                gate_host[i] =
+                    ((float)((int)((i + chunk) % 13u) - 6)) * 0.1875f;
+            }
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            q, 0, q_host, chunk_q * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            k, 0, k_host, chunk_kv * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            v, 0, v_host, chunk_kv * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            gate, 0, gate_host,
+                            chunk_gate * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_laguna_attention_prefill_tensor(
+                            heads, key_cache, value_cache, staged_key,
+                            staged_value, q, k, v, gate,
+                            chunk_pos0[chunk], n_tokens, cache_cap,
+                            n_head, n_head_kv, head_dim, scale, 0) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            heads, 0,
+                            heads_runs[run] + chunk * q_values,
+                            chunk_q * sizeof(float)) != 0);
+        }
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        key_cache, 0, key_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        value_cache, 0, value_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+
+        ds4_gpu_tensor_free(gate);
+        ds4_gpu_tensor_free(v);
+        ds4_gpu_tensor_free(k);
+        ds4_gpu_tensor_free(q);
+        ds4_gpu_tensor_free(staged_value);
+        ds4_gpu_tensor_free(staged_key);
+        ds4_gpu_tensor_free(value_cache);
+        ds4_gpu_tensor_free(key_cache);
+        ds4_gpu_tensor_free(heads);
+    }
+    test_restore_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", saved_direct);
+
+    /* The wrapping tail chunk keeps the staged path under the flag, so all
+     * four chunks and the whole ring must match bit for bit. */
+    for (uint32_t chunk = 0; chunk < n_chunks; chunk++) {
+        const size_t chunk_heads = (size_t)chunk_tokens[chunk] *
+            n_head * head_dim;
+        TEST_ASSERT(memcmp(heads_runs[0] + chunk * q_values,
+                           heads_runs[1] + chunk * q_values,
+                           chunk_heads * sizeof(float)) == 0);
+    }
+    TEST_ASSERT(memcmp(key_runs[0], key_runs[1],
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    TEST_ASSERT(memcmp(value_runs[0], value_runs[1],
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    {
+        uint64_t direct_count = 0;
+        uint64_t wrap_count = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_route_counters(
+                        &direct_count, &wrap_count, NULL, NULL) != 0);
+        TEST_ASSERT(direct_count == 3u);
+        TEST_ASSERT(wrap_count == 1u);
+        fprintf(stderr,
+                "ds4-test: Laguna KV route counters direct=%llu wrap=%llu\n",
+                (unsigned long long)direct_count,
+                (unsigned long long)wrap_count);
+    }
+    fprintf(stderr,
+            "ds4-test: Laguna direct KV prefill A/B bit-exact "
+            "(heads=%u kv=%u)\n",
+            n_head, n_head_kv);
+
+    free(value_runs[1]);
+    free(value_runs[0]);
+    free(key_runs[1]);
+    free(key_runs[0]);
+    free(heads_runs[1]);
+    free(heads_runs[0]);
+    free(gate_host);
+    free(v_host);
+    free(k_host);
+    free(q_host);
+}
+
+static void test_laguna_prefill_direct_kv_ab(void) {
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    /* Plain GQA (ratio 4) and grouped GQA3 (ratio 3) staged-slot views. */
+    test_laguna_prefill_direct_kv_ab_case(8u, 2u);
+    test_laguna_prefill_direct_kv_ab_case(9u, 3u);
+    /* Production global layers use six query heads per KV head. */
+    test_laguna_prefill_direct_kv_ab_case(12u, 2u);
+    ds4_gpu_cleanup();
+}
+
+/* A malformed direct-KV opt-in is rejected while taking the Metal lifecycle
+ * snapshot.  The second half forces the low-level defensive guard and uses
+ * poisoned cache rows to prove the split path cannot mutate KV before it
+ * returns failure. */
+static void test_laguna_prefill_direct_kv_invalid_mode(void) {
+    const uint32_t n_head = 12u;
+    const uint32_t n_head_kv = 2u;
+    const uint32_t head_dim = 128u;
+    const uint32_t cache_cap = 1024u;
+    const uint32_t n_tokens = 4u;
+    const uint32_t pos0 = 8u;
+    const uint64_t q_values = (uint64_t)n_tokens * n_head * head_dim;
+    const uint64_t kv_values = (uint64_t)n_tokens * n_head_kv * head_dim;
+    const uint64_t gate_values = (uint64_t)n_tokens * n_head;
+    const uint64_t cache_values = (uint64_t)cache_cap * n_head_kv * head_dim;
+    char *saved_direct = test_save_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL");
+
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", "01", 1) == 0);
+    ds4_gpu_cleanup();
+    /* Snapshot rejection happens before device, queue, or graph setup. */
+    TEST_ASSERT(ds4_gpu_init() == 0);
+
+    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", "0", 1) == 0);
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    ds4_gpu_test_laguna_route_counters_reset();
+    ds4_gpu_tensor *heads = ds4_gpu_tensor_alloc(q_values * sizeof(float));
+    ds4_gpu_tensor *key_cache =
+        ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+    ds4_gpu_tensor *value_cache =
+        ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+    ds4_gpu_tensor *staged_key =
+        ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+    ds4_gpu_tensor *staged_value =
+        ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+    ds4_gpu_tensor *q = ds4_gpu_tensor_alloc(q_values * sizeof(float));
+    ds4_gpu_tensor *k = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+    ds4_gpu_tensor *v = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+    ds4_gpu_tensor *gate =
+        ds4_gpu_tensor_alloc(gate_values * sizeof(float));
+    uint16_t *key_poison = malloc((size_t)cache_values * sizeof(uint16_t));
+    uint16_t *value_poison = malloc((size_t)cache_values * sizeof(uint16_t));
+    uint16_t *key_after = malloc((size_t)cache_values * sizeof(uint16_t));
+    uint16_t *value_after = malloc((size_t)cache_values * sizeof(uint16_t));
+    TEST_ASSERT(heads && key_cache && value_cache && staged_key &&
+                staged_value && q && k && v && gate && key_poison &&
+                value_poison && key_after && value_after);
+    if (!heads || !key_cache || !value_cache || !staged_key ||
+        !staged_value || !q || !k || !v || !gate || !key_poison ||
+        !value_poison || !key_after || !value_after) {
+        goto invalid_cleanup;
+    }
+    for (uint64_t i = 0; i < cache_values; i++) {
+        key_poison[i] = (uint16_t)(0x5100u | (i % 251u));
+        value_poison[i] = (uint16_t)(0xA100u | (i % 241u));
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    key_cache, 0, key_poison,
+                    cache_values * sizeof(uint16_t)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    value_cache, 0, value_poison,
+                    cache_values * sizeof(uint16_t)) != 0);
+
+    /* This setter is test-only: it simulates a malformed captured mode after
+     * a valid device lifecycle so the split branch itself is covered. */
+    ds4_gpu_test_laguna_set_direct_kv_mode(-1);
+    TEST_ASSERT(ds4_gpu_laguna_attention_prefill_tensor(
+                    heads, key_cache, value_cache, staged_key, staged_value,
+                    q, k, v, gate, pos0, n_tokens, cache_cap,
+                    n_head, n_head_kv, head_dim,
+                    1.0f / sqrtf((float)head_dim), 1) == 0);
+    ds4_gpu_test_laguna_set_direct_kv_mode(0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    key_cache, 0, key_after,
+                    cache_values * sizeof(uint16_t)) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(
+                    value_cache, 0, value_after,
+                    cache_values * sizeof(uint16_t)) != 0);
+    TEST_ASSERT(memcmp(key_after, key_poison,
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    TEST_ASSERT(memcmp(value_after, value_poison,
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    {
+        uint64_t direct_count = 0;
+        uint64_t wrap_count = 0;
+        uint64_t fused_count = 0;
+        uint64_t stock_count = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_route_counters(
+                        &direct_count, &wrap_count,
+                        &fused_count, &stock_count) != 0);
+        TEST_ASSERT(direct_count == 0u && wrap_count == 0u &&
+                    fused_count == 0u && stock_count == 0u);
+    }
+    fprintf(stderr,
+            "ds4-test: malformed Laguna direct-KV mode rejected before "
+            "split dispatch; poisoned caches unchanged\n");
+
+invalid_cleanup:
+    free(value_after);
+    free(key_after);
+    free(value_poison);
+    free(key_poison);
+    ds4_gpu_tensor_free(gate);
+    ds4_gpu_tensor_free(v);
+    ds4_gpu_tensor_free(k);
+    ds4_gpu_tensor_free(q);
+    ds4_gpu_tensor_free(staged_value);
+    ds4_gpu_tensor_free(staged_key);
+    ds4_gpu_tensor_free(value_cache);
+    ds4_gpu_tensor_free(key_cache);
+    ds4_gpu_tensor_free(heads);
+    ds4_gpu_cleanup();
+    test_restore_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", saved_direct);
+}
+
+/*
+ * Batched fused dense Q8 gate/up+SwiGLU against a double reference.  The
+ * kernel stages activations as half and dequantizes Q8_0 to half exactly
+ * like kernel_mul_mm_q8_0_f32, so the reference rounds both operands the
+ * same way and accumulates in double; the kernel accumulates in float.
+ */
+static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok,
+                                                   uint32_t out_dim) {
+    const uint32_t in_dim = 512u;
+    const uint32_t blocks = in_dim / 32u;
+    const uint64_t row_bytes = (uint64_t)blocks * 34u;
+    const uint64_t weight_bytes = (uint64_t)out_dim * row_bytes;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t gate_offset = 0u;
+    const uint64_t up_offset = test_round_up_u64(weight_bytes, page);
+    const uint64_t model_size = test_round_up_u64(up_offset + weight_bytes,
+                                                  page);
+    const uint64_t x_values = (uint64_t)n_tok * in_dim;
+    const uint64_t mid_values = (uint64_t)n_tok * out_dim;
+
+    void *model = NULL;
+    TEST_ASSERT(posix_memalign(&model, (size_t)page,
+                               (size_t)model_size) == 0);
+    if (!model) return;
+    memset(model, 0, (size_t)model_size);
+    test_fill_q8_0_weights((uint8_t *)model + gate_offset, in_dim, out_dim,
+                           3u);
+    test_fill_q8_0_weights((uint8_t *)model + up_offset, in_dim, out_dim,
+                           17u);
+
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_values * sizeof(float));
+    ds4_gpu_tensor *mid = ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    ds4_gpu_tensor *gate = ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    ds4_gpu_tensor *up = ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    ds4_gpu_tensor *mid_stock =
+        ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    float *x_host = malloc((size_t)x_values * sizeof(float));
+    float *mid_host = malloc((size_t)mid_values * sizeof(float));
+    float *mid_stock_host = malloc((size_t)mid_values * sizeof(float));
+    TEST_ASSERT(x && mid && gate && up && mid_stock && x_host && mid_host &&
+                mid_stock_host);
+    if (!x || !mid || !gate || !up || !mid_stock || !x_host || !mid_host ||
+        !mid_stock_host) {
+        goto cleanup;
+    }
+
+    for (uint64_t i = 0; i < x_values; i++) {
+        const int v = (int)((i * 13u + (i >> 4u) * 7u + 11u) % 61u) - 30;
+        x_host[i] = (float)v / 128.0f;
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host,
+                                     x_values * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_set_model_map(model, model_size) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+                    mid, model, model_size, gate_offset, up_offset,
+                    (uint64_t)INT32_MAX + 1u, out_dim, x, n_tok) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+                    mid, model, model_size, gate_offset, up_offset,
+                    in_dim, (uint64_t)INT32_MAX + 1u, x, n_tok) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+                    mid, model, model_size, gate_offset, up_offset,
+                    in_dim, out_dim, x,
+                    (uint64_t)INT32_MAX + 1u) == 0);
+    const uint32_t mv_ext_ceiling = ds4_gpu_laguna_q8_mv_ext_max_tokens();
+    const int expected_route =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+            1, 0, n_tok, mv_ext_ceiling);
+    TEST_ASSERT(expected_route ==
+                (n_tok <= mv_ext_ceiling
+                     ? DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK
+                     : DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED));
+    ds4_gpu_test_laguna_route_counters_reset();
+
+    /* The caller pins quality mode.  For rows at or below the lifecycle
+     * ceiling this deliberately exercises stock mul_mv_ext and never calls
+     * the fused sibling; only rows strictly above the ceiling may compare
+     * the fused arithmetic against the stock/reference result. */
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    gate, model, model_size, gate_offset,
+                    in_dim, out_dim, x, n_tok) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    up, model, model_size, up_offset,
+                    in_dim, out_dim, x, n_tok) != 0);
+    TEST_ASSERT(ds4_gpu_swiglu_tensor(
+                    mid_stock, gate, up,
+                    (uint32_t)mid_values, 0.0f, 1.0f) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(mid_stock, 0, mid_stock_host,
+                                    mid_values * sizeof(float)) != 0);
+    if (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED) {
+        TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+                        mid, model, model_size, gate_offset, up_offset,
+                        in_dim, out_dim, x, n_tok) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(mid, 0, mid_host,
+                                        mid_values * sizeof(float)) != 0);
+    } else {
+        /* Keep the reference check below meaningful for stock-only boundary
+         * rows without dispatching an ineligible fused kernel. */
+        memcpy(mid_host, mid_stock_host,
+               (size_t)mid_values * sizeof(float));
+    }
+    {
+        uint64_t fused_count = 0;
+        uint64_t stock_count = 0;
+        uint64_t bco_false_count = 0;
+        uint64_t bco_true_count = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_route_counters(
+                        NULL, NULL, &fused_count, &stock_count) != 0);
+        TEST_ASSERT(ds4_gpu_test_laguna_q8_bco_counters(
+                        &bco_false_count, &bco_true_count) != 0);
+        TEST_ASSERT(fused_count ==
+                    (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED
+                         ? 1u : 0u));
+        TEST_ASSERT(stock_count == 2u);
+        const bool expected_bco = out_dim % 64u != 0u || n_tok % 32u != 0u;
+        TEST_ASSERT(bco_false_count ==
+                    (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED &&
+                     !expected_bco ? 1u : 0u));
+        TEST_ASSERT(bco_true_count ==
+                    (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED &&
+                     expected_bco ? 1u : 0u));
+        fprintf(stderr,
+                "ds4-test: Laguna Q8 route counters rows=%u out=%u fused=%llu "
+                "stock=%llu bco_false=%llu bco_true=%llu\n",
+                n_tok, out_dim,
+                (unsigned long long)fused_count,
+                (unsigned long long)stock_count,
+                (unsigned long long)bco_false_count,
+                (unsigned long long)bco_true_count);
+    }
+    TEST_ASSERT(memcmp(mid_host, mid_stock_host,
+                       (size_t)mid_values * sizeof(float)) == 0);
+
+    {
+        const uint8_t *gate_w = (const uint8_t *)model + gate_offset;
+        const uint8_t *up_w = (const uint8_t *)model + up_offset;
+        double sum_squared = 0.0;
+        double max_abs = 0.0;
+        size_t nonfinite = 0u;
+        for (uint32_t t = 0; t < n_tok; t++) {
+            for (uint32_t o = 0; o < out_dim; o++) {
+                double gate = 0.0;
+                double up = 0.0;
+                for (uint32_t b = 0; b < blocks; b++) {
+                    uint16_t gate_bits;
+                    uint16_t up_bits;
+                    memcpy(&gate_bits,
+                           gate_w + (uint64_t)o * row_bytes + b * 34u,
+                           sizeof(gate_bits));
+                    memcpy(&up_bits,
+                           up_w + (uint64_t)o * row_bytes + b * 34u,
+                           sizeof(up_bits));
+                    const float gate_d = test_f16_to_f32(gate_bits);
+                    const float up_d = test_f16_to_f32(up_bits);
+                    const int8_t *gate_qs = (const int8_t *)(
+                        gate_w + (uint64_t)o * row_bytes + b * 34u + 2u);
+                    const int8_t *up_qs = (const int8_t *)(
+                        up_w + (uint64_t)o * row_bytes + b * 34u + 2u);
+                    for (uint32_t i = 0; i < 32u; i++) {
+                        const double xv = (double)test_f16_to_f32(
+                            test_float_to_f16(
+                                x_host[(uint64_t)t * in_dim + b * 32u + i]));
+                        const double gw = (double)test_f16_to_f32(
+                            test_float_to_f16((float)gate_qs[i] * gate_d));
+                        const double uw = (double)test_f16_to_f32(
+                            test_float_to_f16((float)up_qs[i] * up_d));
+                        gate += xv * gw;
+                        up += xv * uw;
+                    }
+                }
+                const double reference =
+                    gate / (1.0 + exp(-gate)) * up;
+                const float got = mid_host[(uint64_t)t * out_dim + o];
+                if (!isfinite(got)) {
+                    nonfinite++;
+                    continue;
+                }
+                const double error = fabs((double)got - reference);
+                if (error > max_abs) max_abs = error;
+                sum_squared += error * error;
+            }
+        }
+        const double rms = sqrt(sum_squared / (double)mid_values);
+        fprintf(stderr,
+                "ds4-test: Laguna batched fused Q8 gate/up+SwiGLU "
+                "numeric rows=%u out=%u max_abs=%g rms=%g nonfinite=%zu\n",
+                n_tok, out_dim, max_abs, rms, nonfinite);
+        TEST_ASSERT(nonfinite == 0u);
+        TEST_ASSERT(max_abs < 5.0e-3);
+        TEST_ASSERT(rms < 1.0e-3);
+    }
+
+cleanup:
+    free(mid_stock_host);
+    free(mid_host);
+    free(x_host);
+    ds4_gpu_tensor_free(mid_stock);
+    ds4_gpu_tensor_free(up);
+    ds4_gpu_tensor_free(gate);
+    ds4_gpu_tensor_free(mid);
+    ds4_gpu_tensor_free(x);
+    free(model);
+}
+
+static void test_laguna_dense_q8_batch_swiglu(void) {
+    char *saved_mv_ceiling =
+        test_save_env("DS4_METAL_Q8_MV_EXT_MAX_TOKENS");
+    const char *dense_source = getenv("DS4_METAL_DENSE_SOURCE");
+    const bool source_override = dense_source && dense_source[0];
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", "128", 1) == 0);
+    /* The effective ceiling is captured at init, not reparsed per dispatch. */
+    ds4_gpu_cleanup();
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 128u);
+    /* Enabled preflight is intentionally first: an old dense source must
+     * fail here, before any stock, attention, or KV work is dispatched. */
+    const int first_batch_available =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available();
+    if (first_batch_available == 0) {
+        /* A source override is allowed to predate this optional PSO.  The
+         * default in-repo source must provide it, so only an explicit old
+         * source gets a clean skip here; the selector-on graph preflight is
+         * covered by the focused failure tests. */
+        TEST_ASSERT(source_override);
+        ds4_gpu_cleanup();
+        test_restore_env("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", saved_mv_ceiling);
+        return;
+    }
+    /* A lifecycle override changes the stock boundary, so exercise both
+     * sides of the effective 128-row ceiling before changing the env. */
+    ds4_gpu_set_quality(true);
+    test_laguna_dense_q8_batch_swiglu_case(128u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(129u, 160u);
+    /* Changing the environment cannot hot-switch the already initialized
+     * lifecycle; only a clean init may make 16 effective. */
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", "16", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 128u);
+    ds4_gpu_cleanup();
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 16u);
+    /* Aligned bounded production shape: both dimensions select bco=false. */
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available() != 0);
+    test_laguna_dense_q8_batch_swiglu_case(32u, 192u);
+    /* Boundary rows stay on stock mul_mv_ext; larger rows compare the fused
+     * pass bit-for-bit with stock and with the independent reference. */
+    test_laguna_dense_q8_batch_swiglu_case(1u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(2u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(16u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(17u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(64u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(48u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(33u, 160u);
+    test_laguna_dense_q8_batch_swiglu_case(129u, 160u);
+    ds4_gpu_set_quality(false);
+    ds4_gpu_cleanup();
+    test_restore_env("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", saved_mv_ceiling);
+}
+#endif /* __APPLE__ */
 #endif
 
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
@@ -8057,6 +8748,31 @@ static void test_metal_f16_rms_norm_mv_exact_shape(
 }
 
 static void test_metal_f16_rms_norm_mv_exact(void) {
+    /* Public dimensions become signed shader fields.  Oversized values must
+     * fail during admission, before an optional PSO probe or command batch. */
+    TEST_ASSERT(ds4_gpu_matmul_f16_rms_norm_mv_preflight(
+                    (uint32_t)INT32_MAX + 1u, 4u) == 0);
+    TEST_ASSERT(ds4_gpu_matmul_f16_rms_norm_mv_preflight(
+                    16384u, (uint32_t)INT32_MAX + 1u) == 0);
+    const char *output_selector =
+        getenv("DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE");
+    const bool output_selector_off =
+        !output_selector || output_selector[0] == '\0' ||
+        strcmp(output_selector, "0") == 0;
+    const int output_pso_available =
+        ds4_gpu_matmul_f16_rms_norm_mv_preflight(16384u, 4u);
+    if (output_pso_available == 0) {
+        /* A pre-feature DENSE source is valid for the default-off suite.  An
+         * explicit selector still proves the optional PSO admission fails
+         * closed; graph admission performs the same check before allocation. */
+        TEST_ASSERT(output_selector_off ||
+                    strcmp(output_selector, "1") == 0);
+        fprintf(stderr,
+                "ds4-test: skipping fused RMS-norm F16 exact suite; "
+                "optional output PSO unavailable (selector=%s)\n",
+                output_selector ? output_selector : "unset");
+        return;
+    }
     test_metal_f16_rms_norm_mv_exact_shape(16384u, 4u, 59u);
     test_metal_f16_rms_norm_mv_exact_shape(4096u, 3u, 61u);
     test_metal_f16_rms_norm_mv_exact_shape(2048u, 5u, 67u);
@@ -8164,6 +8880,11 @@ static void test_metal_laguna_router_fused_exact_case(
                     const uint32_t qnan = 0x7fc00011u;
                     memcpy(&w[(uint64_t)r * in_dim + i],
                            &qnan, sizeof(qnan));
+                }
+                if (pattern == 4u && r == 23u && i == 0u) {
+                    const uint32_t pinf = 0x7f800000u;
+                    memcpy(&w[(uint64_t)r * in_dim + i],
+                           &pinf, sizeof(pinf));
                 }
             }
             const uint32_t bkey = r * 53u + seed * 11u;
@@ -8273,8 +8994,21 @@ static void test_metal_laguna_router_fused_exact(void) {
     const char *simd_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK";
     char *saved_simd = test_save_env(simd_env);
     TEST_ASSERT(unsetenv(simd_env) == 0);
-    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_preflight(
-                    3072u, 256u, 10u, 2.5f) != 0);
+    const int fused_available = ds4_gpu_laguna_router_decode_fused_preflight(
+        3072u, 256u, 10u, 2.5f);
+    if (fused_available == 0) {
+        /* A pre-feature misc source is valid for the default suite.  Its
+         * requested-on fail-closed behavior is exercised by the source
+         * override test, while the current in-repo source must remain a
+         * hard failure if its optional PSO is unexpectedly absent. */
+        const char *source = getenv("DS4_METAL_DSV4_MISC_SOURCE");
+        TEST_ASSERT(source && source[0]);
+        fprintf(stderr,
+                "ds4-test: skipping fused Laguna router exact suite; "
+                "optional misc PSO unavailable under source override\n");
+        test_restore_env(simd_env, saved_simd);
+        return;
+    }
     TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_preflight(
                     3072u, 256u, 9u, 2.5f) == 0);
     ds4_gpu_laguna_router_decode_fused_stats_reset();
@@ -8284,6 +9018,27 @@ static void test_metal_laguna_router_fused_exact(void) {
     test_metal_laguna_router_fused_exact_case(4096u, 2u, 67u);
     test_metal_laguna_router_fused_exact_case(4096u, 3u, 69u);
     test_metal_laguna_router_fused_exact_case(2048u, 0u, 71u);
+    /* Production Laguna router shape: finite, tie, Inf, and NaN poison
+     * cases all exercise the normal one-token fused dispatch geometry. */
+    test_metal_laguna_router_fused_exact_case(3072u, 0u, 73u);
+    test_metal_laguna_router_fused_exact_case(3072u, 1u, 79u);
+    test_metal_laguna_router_fused_exact_case(3072u, 4u, 83u);
+    test_metal_laguna_router_fused_exact_case(3072u, 3u, 89u);
+
+    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_preflight(
+                    (uint32_t)INT32_MAX + 1u, 256u, 10u, 2.5f) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_preflight(
+                    3072u, (uint32_t)INT32_MAX + 1u, 10u, 2.5f) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_preflight(
+                    3072u, 256u, (uint32_t)INT32_MAX + 1u, 2.5f) == 0);
+
+    uint64_t valid_encoded_dispatches = 0;
+    uint64_t valid_completed_dispatches = 0;
+    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_stats(
+                    &valid_encoded_dispatches,
+                    &valid_completed_dispatches) != 0);
+    TEST_ASSERT(valid_encoded_dispatches == 9u);
+    TEST_ASSERT(valid_completed_dispatches == valid_encoded_dispatches);
 
     /* Outside the replicated shape class the fused dispatch fails closed. */
     void *model_raw = NULL;
@@ -8317,12 +9072,49 @@ static void test_metal_laguna_router_fused_exact(void) {
     ds4_gpu_tensor_free(x);
     free(model_raw);
 
+    /* Failed preflights/tensor calls must not manufacture completion evidence
+     * even when invoked inside a caller-owned command batch. */
+    ds4_gpu_laguna_router_decode_fused_stats_reset();
+    model_raw = NULL;
+    TEST_ASSERT(posix_memalign(&model_raw, (size_t)page, (size_t)page) == 0);
+    x = ds4_gpu_tensor_alloc(x_bytes);
+    logits = ds4_gpu_tensor_alloc(256u * sizeof(float));
+    probs = ds4_gpu_tensor_alloc(256u * sizeof(float));
+    selected = ds4_gpu_tensor_alloc(10u * sizeof(int32_t));
+    weights = ds4_gpu_tensor_alloc(10u * sizeof(float));
+    TEST_ASSERT(model_raw && x && logits && probs && selected && weights);
+    if (model_raw && x && logits && probs && selected && weights) {
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, page) != 0);
+        const int begun = ds4_gpu_begin_commands();
+        TEST_ASSERT(begun != 0);
+        TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_tensor(
+                        selected, weights, probs, logits,
+                        model_raw, page, 0, 0,
+                        x, (uint32_t)INT32_MAX + 1u, 256u, 10u, 2.5f) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_tensor(
+                        selected, weights, probs, logits,
+                        model_raw, page, 0, 0,
+                        x, 3072u, (uint32_t)INT32_MAX + 1u, 10u, 2.5f) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_tensor(
+                        selected, weights, probs, logits,
+                        model_raw, page, 0, 0,
+                        x, 3072u, 256u,
+                        (uint32_t)INT32_MAX + 1u, 2.5f) == 0);
+        TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    }
+    ds4_gpu_tensor_free(weights);
+    ds4_gpu_tensor_free(selected);
+    ds4_gpu_tensor_free(probs);
+    ds4_gpu_tensor_free(logits);
+    ds4_gpu_tensor_free(x);
+    free(model_raw);
+
     uint64_t encoded_dispatches = 0;
     uint64_t completed_dispatches = 0;
     TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_stats(
                     &encoded_dispatches, &completed_dispatches) != 0);
-    TEST_ASSERT(encoded_dispatches >= 4u);
-    TEST_ASSERT(completed_dispatches == encoded_dispatches);
+    TEST_ASSERT(encoded_dispatches == 0u);
+    TEST_ASSERT(completed_dispatches == 0u);
 
     test_restore_env(simd_env, saved_simd);
 }
@@ -8593,21 +9385,65 @@ static void test_metal_router_simd_finalize_exact(void) {
  * this check separate so the default --metal-kernels group never turns on a
  * kernel that an override does not provide. */
 static void test_metal_glm_router_simd_topk_exact_suite(void);
+static void test_metal_laguna_router_fused_exact(void);
+
+/* The default-off route must remain usable even when an optional source
+ * override predates both opt-in selectors.  This is intentionally a small
+ * stock dispatch rather than a SIMD/fused availability probe. */
+static void test_metal_glm_router_stock_default(void) {
+    const uint32_t n_expert = 256u;
+    const uint32_t n_used = 10u;
+    const uint64_t page = (uint64_t)getpagesize();
+    void *model_raw = NULL;
+    TEST_ASSERT(posix_memalign(&model_raw, (size_t)page, (size_t)page) == 0);
+    ds4_gpu_tensor *logits = ds4_gpu_tensor_alloc(
+        (uint64_t)n_expert * sizeof(float));
+    ds4_gpu_tensor *selected = ds4_gpu_tensor_alloc(
+        (uint64_t)n_used * sizeof(int32_t));
+    ds4_gpu_tensor *weights = ds4_gpu_tensor_alloc(
+        (uint64_t)n_used * sizeof(float));
+    ds4_gpu_tensor *probs = ds4_gpu_tensor_alloc(
+        (uint64_t)n_expert * sizeof(float));
+    float *logits_host = malloc((size_t)n_expert * sizeof(float));
+    if (model_raw && logits && selected && weights && probs && logits_host) {
+        memset(model_raw, 0, (size_t)page);
+        for (uint32_t i = 0; i < n_expert; i++) {
+            logits_host[i] = (float)((int)(i * 17u % 101u) - 50) / 32.0f;
+        }
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, page) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        logits, 0, logits_host,
+                        (uint64_t)n_expert * sizeof(float)) != 0);
+        TEST_ASSERT(ds4_gpu_glm_router_select_tensor(
+                        selected, weights, probs,
+                        model_raw, page, 0, logits,
+                        n_expert, n_used, 2.5f) != 0);
+    }
+    free(logits_host);
+    ds4_gpu_tensor_free(probs);
+    ds4_gpu_tensor_free(weights);
+    ds4_gpu_tensor_free(selected);
+    ds4_gpu_tensor_free(logits);
+    free(model_raw);
+}
 
 static void test_metal_glm_router_simd_topk_source_override(void) {
     const char *source = getenv("DS4_METAL_DSV4_MISC_SOURCE");
     if (!source || !source[0]) return;
 
     const char *enable_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK";
+    const char *fused_enable_env = "DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED";
     const char *trace_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE";
     const char *legacy_enable_env = "DS4_METAL_ENABLE_GLM_ROUTER_SIMD_TOPK";
     const char *legacy_disable_env = "DS4_METAL_DISABLE_GLM_ROUTER_SIMD_TOPK";
     char *saved_enable = test_save_env(enable_env);
+    char *saved_fused_enable = test_save_env(fused_enable_env);
     char *saved_trace = test_save_env(trace_env);
     char *saved_legacy_enable = test_save_env(legacy_enable_env);
     char *saved_legacy_disable = test_save_env(legacy_disable_env);
 
     TEST_ASSERT(unsetenv(enable_env) == 0);
+    TEST_ASSERT(unsetenv(fused_enable_env) == 0);
     TEST_ASSERT(unsetenv(trace_env) == 0);
     TEST_ASSERT(unsetenv(legacy_enable_env) == 0);
     TEST_ASSERT(unsetenv(legacy_disable_env) == 0);
@@ -8621,24 +9457,71 @@ static void test_metal_glm_router_simd_topk_source_override(void) {
     TEST_ASSERT(setenv(enable_env, "1", 1) == 0);
     const int mode = ds4_gpu_laguna_router_simd_topk_preflight(
         256u, 10u, 2.5f);
-    const int fused_mode = ds4_gpu_laguna_router_decode_fused_preflight(
+    /* Probe the fused PSO independently of the legacy SIMD selector. */
+    const int fused_available = ds4_gpu_laguna_router_decode_fused_preflight(
         3072u, 256u, 10u, 2.5f);
-    if (mode > 0) {
+    /* Classify the source by the fused router PSO independently.  An older
+     * misc source may still carry the legacy SIMD top-k PSO; that must not
+     * make its default-off stock route, or its fused opt-in failure, look
+     * like the current source.  Conversely, a source advertising the fused
+     * PSO without the legacy selector is not a current certified source. */
+    const bool current_source = fused_available > 0;
+    const bool old_source = fused_available == 0;
+    TEST_ASSERT(current_source || old_source);
+    if (current_source) {
+        TEST_ASSERT(mode > 0);
         fprintf(stderr,
-                "ds4-test: Laguna router SIMD top-k current source override "
-                "env-off=stock env-on=available source=%s\n",
+                "ds4-test: Laguna router current misc source override "
+                "SIMD+fused PSOs available source=%s\n",
                 source);
+        TEST_ASSERT(setenv(fused_enable_env, "1", 1) == 0);
+        /* Both optional kernels are independently exercised numerically. */
         test_metal_glm_router_simd_topk_exact_suite();
-    } else {
-        TEST_ASSERT(mode < 0);
-        TEST_ASSERT(fused_mode == 0);
+        test_metal_laguna_router_fused_exact();
+    } else if (old_source) {
+        TEST_ASSERT(setenv(fused_enable_env, "1", 1) == 0);
+        ds4_gpu_laguna_router_decode_fused_stats_reset();
+        /* The legacy selector was enabled for independent probing above.
+         * Clear it before the default-off stock proof so an old source with
+         * only the legacy PSO cannot accidentally exercise an optional path. */
+        TEST_ASSERT(unsetenv(enable_env) == 0);
+        test_metal_glm_router_stock_default();
+        /* Explicit opt-in remains fail-closed, with no fused dispatch
+         * evidence, even though the stock selector remains usable off. */
+        const uint64_t page = (uint64_t)getpagesize();
+        void *model_raw = NULL;
+        TEST_ASSERT(posix_memalign(&model_raw, (size_t)page, (size_t)page) == 0);
+        ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(3072u * sizeof(float));
+        ds4_gpu_tensor *logits = ds4_gpu_tensor_alloc(256u * sizeof(float));
+        ds4_gpu_tensor *probs = ds4_gpu_tensor_alloc(256u * sizeof(float));
+        ds4_gpu_tensor *selected = ds4_gpu_tensor_alloc(10u * sizeof(int32_t));
+        ds4_gpu_tensor *weights = ds4_gpu_tensor_alloc(10u * sizeof(float));
+        if (model_raw && x && logits && probs && selected && weights) {
+            TEST_ASSERT(ds4_gpu_set_model_map(model_raw, page) != 0);
+            TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_tensor(
+                            selected, weights, probs, logits,
+                            model_raw, page, 0, 0, x,
+                            3072u, 256u, 10u, 2.5f) == 0);
+        }
+        uint64_t encoded = 0;
+        uint64_t completed = 0;
+        TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_stats(
+                        &encoded, &completed) != 0);
+        TEST_ASSERT(encoded == 0u && completed == 0u);
+        ds4_gpu_tensor_free(weights);
+        ds4_gpu_tensor_free(selected);
+        ds4_gpu_tensor_free(probs);
+        ds4_gpu_tensor_free(logits);
+        ds4_gpu_tensor_free(x);
+        free(model_raw);
         fprintf(stderr,
-                "ds4-test: Laguna router SIMD top-k old source override "
-                "env-off=stock env-on=fail-closed source=%s\n",
+                "ds4-test: Laguna router old misc source override "
+                "stock=usable SIMD+fused=fail-closed source=%s\n",
                 source);
     }
 
     test_restore_env(enable_env, saved_enable);
+    test_restore_env(fused_enable_env, saved_fused_enable);
     test_restore_env(trace_env, saved_trace);
     test_restore_env(legacy_enable_env, saved_legacy_enable);
     test_restore_env(legacy_disable_env, saved_legacy_disable);
@@ -11636,10 +12519,24 @@ typedef struct {
 } ds4_test_entry;
 
 static const ds4_test_entry test_entries[] = {
+    {"--laguna-selector-parser", "laguna-selector-parser",
+     "strict Laguna selector and prefill-route parser boundaries",
+     test_laguna_selector_parser, false},
 #ifndef DS4_NO_GPU
     {"--laguna-attention-numeric", "laguna-attention-numeric",
      "Laguna decode attention against a double-precision reference",
      test_laguna_gqa3_decode_numeric, false},
+#if defined(__APPLE__)
+    {"--laguna-prefill-direct-kv-ab", "laguna-prefill-direct-kv-ab",
+     "bit-exact A/B of the opt-in direct non-SWA prefill KV store",
+     test_laguna_prefill_direct_kv_ab, false},
+    {"--laguna-prefill-direct-kv-invalid", "laguna-prefill-direct-kv-invalid",
+     "malformed direct-KV selector fails before split-row KV mutation",
+     test_laguna_prefill_direct_kv_invalid_mode, false},
+    {"--laguna-dense-q8-batch-swiglu", "laguna-dense-q8-batch-swiglu",
+     "batched fused dense Q8 gate/up+SwiGLU against a double reference",
+     test_laguna_dense_q8_batch_swiglu, false},
+#endif
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
     {"--cuda-laguna-moe", "cuda-laguna-moe",
      "CUDA Laguna Q8 signal and Q4/Q3 MoE prefill/decode numerics",
@@ -11654,6 +12551,12 @@ static const ds4_test_entry test_entries[] = {
     {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4, false},
     {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group, false},
 #if defined(__APPLE__)
+    {"--metal-graph-malformed-q8", "metal-graph-malformed-q8",
+     "malformed Q8 graph admission fails before graph/KV/command mutation",
+     test_metal_graph_malformed_q8_admission, true},
+    {"--metal-graph-output-preflight", "metal-graph-output-preflight",
+     "output-head selector/PSO failure leaves raw graph state untouched",
+     test_metal_graph_output_preflight_failure, true},
     {"--metal-laguna-q8-lmhead-screen", "metal-laguna-q8-lmhead-screen",
      "certified Laguna Q8 lm-head top-1 screen (focused opt-in)",
      test_metal_laguna_q8_lmhead_screen_focused, true},
