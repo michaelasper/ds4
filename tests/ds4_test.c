@@ -191,9 +191,6 @@ static ds4_backend test_model_backend(void) {
 
 static ds4_engine *test_open_engine(bool quality) {
     ds4_engine *engine = NULL;
-    /* DS4_TEST_MTP loads the MTP head on the fast engine so the speculative
-     * verify regression can reuse it; draft=4 hits the multi-row verify path. */
-    const char *mtp = getenv("DS4_TEST_MTP");
     ds4_engine_options opt = {
         .model_path = test_model_path(),
         .backend = test_model_backend(),
@@ -206,8 +203,6 @@ static ds4_engine *test_open_engine(bool quality) {
             test_env_gib("DS4_TEST_SSD_STREAMING_CACHE_GB"),
         .ssd_streaming_preload_experts =
             test_env_u32("DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS"),
-        .mtp_path = (mtp && mtp[0] && !quality) ? mtp : NULL,
-        .mtp_draft_tokens = (mtp && mtp[0] && !quality) ? 4 : 0,
     };
     TEST_ASSERT(ds4_engine_open(&engine, &opt) == 0);
     return engine;
@@ -14326,14 +14321,15 @@ static void test_tool_call_quality(void) {
 
 /* Greedy speculative decode: capture committed tokens and the largest accepted
  * chunk, so the caller can confirm the multi-row verify path actually ran. */
-static bool test_mtp_capture_speculative(ds4_engine *engine, const ds4_tokens *prompt,
-                                         int max_tokens, int *out, int *out_len,
-                                         int *max_chunk) {
+static bool test_dflash_capture_speculative(ds4_engine *engine, const ds4_tokens *prompt,
+                                            int max_tokens, int *out, int *out_len,
+                                            int *max_chunk) {
     *out_len = 0;
     *max_chunk = 0;
     ds4_session *session = NULL;
     TEST_ASSERT(ds4_session_create(&session, engine, 32768) == 0);
     if (!session) return false;
+    ds4_session_set_speculative_enabled(session, true);
 
     char err[160];
     bool ok = ds4_session_sync(session, prompt, err, sizeof(err)) == 0;
@@ -14368,9 +14364,9 @@ static bool test_mtp_capture_speculative(ds4_engine *engine, const ds4_tokens *p
 /* Replay toks[] through plain decode and return the largest gap between a
  * position's argmax logit and the committed token's logit.  Correct speculation
  * commits (near-)argmax tokens (gap ~0); a mis-committed token gives a big gap. */
-static bool test_mtp_worst_argmax_gap(ds4_engine *engine, const ds4_tokens *prompt,
-                                      const int *toks, int n,
-                                      float *worst_gap, int *worst_at) {
+static bool test_dflash_worst_argmax_gap(ds4_engine *engine, const ds4_tokens *prompt,
+                                         const int *toks, int n,
+                                         float *worst_gap, int *worst_at) {
     *worst_gap = 0.0f;
     *worst_at = -1;
     ds4_session *session = NULL;
@@ -14400,7 +14396,7 @@ static bool test_mtp_worst_argmax_gap(ds4_engine *engine, const ds4_tokens *prom
 /* Verbatim-copy task: keeps the model confident (a mis-committed token shows as
  * a large argmax gap) and draft acceptance high (so the multi-row verify path is
  * exercised across the generation). */
-static const char *test_mtp_copy_prompt(void) {
+static const char *test_dflash_copy_prompt(void) {
     return
         "Reproduce the following C code EXACTLY, character for character, "
         "inside a single code block and output nothing else:\n\n"
@@ -14427,10 +14423,9 @@ static const char *test_mtp_copy_prompt(void) {
         "```\n";
 }
 
-#define TEST_MTP_MAXGEN 256
-#define TEST_DSPARK_MAXGEN 128
+#define TEST_DFLASH_MAXGEN 256
 
-static ds4_engine *test_open_dspark_engine(const char *support_path) {
+static ds4_engine *test_open_dflash_engine(const char *support_path) {
     ds4_engine *engine = NULL;
     ds4_engine_options opt = {
         .model_path = test_model_path(),
@@ -14448,117 +14443,66 @@ static ds4_engine *test_open_dspark_engine(const char *support_path) {
             test_env_gib("DS4_TEST_SSD_STREAMING_CACHE_GB"),
         .ssd_streaming_preload_experts =
             test_env_u32("DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS"),
-        .mtp_path = support_path,
-        .mtp_draft_tokens = 0,
-        .dspark = true,
-        .dspark_confidence_threshold = 0.9f,
-        .dspark_confidence_threshold_set = true,
+        .dflash_path = support_path,
+        .dflash_draft_tokens = 4,
+        .dflash_p_min = 0.0f,
+        .dflash_p_min_set = true,
     };
     const int rc = ds4_engine_open(&engine, &opt);
     TEST_ASSERT(rc == 0);
     return rc == 0 ? engine : NULL;
 }
 
-/* Regression for the swapped top-k arguments in metal_graph_verify_suffix_tops
- * at draft depth > 2.  Replays the committed speculative tokens through plain
- * decode and requires each to be a (near-)argmax: that is the verify invariant,
- * and unlike comparing token streams it tolerates the near-greedy tie
- * divergences.  Needs an MTP head, so it self-skips without DS4_TEST_MTP. */
-static void test_mtp_verify_depth(void) {
-    ds4_engine *engine = test_get_engine(false);
-    if (!engine || !ds4_engine_has_dflash(engine)) {
-        fprintf(stderr, "ds4-test: mtp-verify-depth skipped (set DS4_TEST_MTP to an MTP GGUF)\n");
+/* Regression for the DFlash verifier at draft depth > 2.  Replays the
+ * committed speculative tokens through plain decode and requires each to be a
+ * (near-)argmax: that is the verify invariant, and unlike comparing token
+ * streams it tolerates the near-greedy tie divergences. */
+static void test_dflash_verify_depth(void) {
+    const char *support = getenv("DS4_TEST_DFLASH");
+    if (!support || !support[0]) {
+        fprintf(stderr,
+                "ds4-test: dflash-verify-depth skipped (set DS4_TEST_DFLASH to a DFlash support GGUF)\n");
         return;
     }
-    TEST_ASSERT(ds4_engine_dflash_draft_tokens(engine) > 2);
+
+    ds4_engine *engine = test_open_dflash_engine(support);
+    if (!engine || !ds4_engine_has_dflash(engine)) {
+        ds4_engine_close(engine);
+        return;
+    }
+    const int draft_depth = ds4_engine_dflash_draft_tokens(engine);
+    TEST_ASSERT(draft_depth > 2);
 
     ds4_tokens prompt = {0};
     ds4_chat_begin(engine, &prompt);
-    ds4_chat_append_message(engine, &prompt, "user", test_mtp_copy_prompt());
+    ds4_chat_append_message(engine, &prompt, "user", test_dflash_copy_prompt());
     ds4_chat_append_assistant_prefix(engine, &prompt, DS4_THINK_NONE);
     TEST_ASSERT(prompt.len > 0);
 
-    int *spec = malloc((size_t)TEST_MTP_MAXGEN * sizeof(*spec));
+    int *spec = malloc((size_t)TEST_DFLASH_MAXGEN * sizeof(*spec));
     TEST_ASSERT(spec != NULL);
     if (spec && prompt.len > 0) {
         int nspec = 0, max_chunk = 0;
-        const bool ok_spec = test_mtp_capture_speculative(engine, &prompt, TEST_MTP_MAXGEN,
-                                                          spec, &nspec, &max_chunk);
+        const bool ok_spec = test_dflash_capture_speculative(
+            engine, &prompt, TEST_DFLASH_MAXGEN, spec, &nspec, &max_chunk);
         TEST_ASSERT(ok_spec);
-        TEST_ASSERT(max_chunk > 1);  /* multi-token chunks committed: the multi-row path ran */
-        TEST_ASSERT(nspec > 128);    /* enough output to surface the bug, incl. a spurious-EOS truncation */
+        TEST_ASSERT(max_chunk > 1);
+        TEST_ASSERT(nspec > 64);
 
         float worst_gap = 0.0f;
         int worst_at = -1;
-        const bool ok_check = test_mtp_worst_argmax_gap(engine, &prompt, spec, nspec,
-                                                        &worst_gap, &worst_at);
+        const bool ok_check = test_dflash_worst_argmax_gap(
+            engine, &prompt, spec, nspec, &worst_gap, &worst_at);
         TEST_ASSERT(ok_check);
-        fprintf(stderr, "ds4-test: mtp-verify-depth nspec=%d max_chunk=%d worst_argmax_gap=%.3f at=%d\n",
-                nspec, max_chunk, worst_gap, worst_at);
-        TEST_ASSERT(worst_gap <= 2.0f);  /* correct: ~0; bug: ~21 on the reference model */
-    }
-
-    free(spec);
-    ds4_tokens_free(&prompt);
-}
-
-/* Same invariant as the MTP depth smoke, but for the DSpark support model.  This
- * is separate from the fixture because it teacher-forces every committed token
- * through normal decode and directly checks that DSpark never commits a token
- * that was not near the target argmax. */
-static void test_dspark_verify_depth(void) {
-    const char *support = getenv("DS4_TEST_DSPARK");
-    if (!support || !support[0]) {
-        fprintf(stderr, "ds4-test: dspark-verify-depth skipped (set DS4_TEST_DSPARK to a DSpark support GGUF)\n");
-        return;
-    }
-
-    char *saved_scheduler = test_save_env("DS4_DSPARK_SCHEDULER");
-    setenv("DS4_DSPARK_SCHEDULER", "0", 1);
-
-    ds4_engine *engine = test_open_dspark_engine(support);
-    ds4_tokens prompt = {0};
-    int *spec = NULL;
-
-    if (engine) {
-        const int draft_depth = ds4_engine_dflash_draft_tokens(engine);
-        TEST_ASSERT(draft_depth > 2);
-
-        ds4_chat_begin(engine, &prompt);
-        ds4_chat_append_message(engine, &prompt, "user", test_mtp_copy_prompt());
-        ds4_chat_append_assistant_prefix(engine, &prompt, DS4_THINK_NONE);
-        TEST_ASSERT(prompt.len > 0);
-
-        spec = malloc((size_t)TEST_DSPARK_MAXGEN * sizeof(*spec));
-        TEST_ASSERT(spec != NULL);
-        if (draft_depth > 2 && spec && prompt.len > 0) {
-            int nspec = 0, max_chunk = 0;
-            const bool ok_spec = test_mtp_capture_speculative(engine, &prompt,
-                                                              TEST_DSPARK_MAXGEN,
-                                                              spec, &nspec,
-                                                              &max_chunk);
-            TEST_ASSERT(ok_spec);
-            TEST_ASSERT(max_chunk > 1);
-            TEST_ASSERT(nspec > 64);
-
-            float worst_gap = 0.0f;
-            int worst_at = -1;
-            const bool ok_check = test_mtp_worst_argmax_gap(engine, &prompt,
-                                                            spec, nspec,
-                                                            &worst_gap,
-                                                            &worst_at);
-            TEST_ASSERT(ok_check);
-            fprintf(stderr,
-                    "ds4-test: dspark-verify-depth nspec=%d max_chunk=%d draft_depth=%d worst_argmax_gap=%.3f at=%d\n",
-                    nspec, max_chunk, draft_depth, worst_gap, worst_at);
-            TEST_ASSERT(worst_gap <= 2.0f);
-        }
+        fprintf(stderr,
+                "ds4-test: dflash-verify-depth nspec=%d max_chunk=%d draft_depth=%d worst_argmax_gap=%.3f at=%d\n",
+                nspec, max_chunk, draft_depth, worst_gap, worst_at);
+        TEST_ASSERT(worst_gap <= 2.0f);
     }
 
     free(spec);
     ds4_tokens_free(&prompt);
     ds4_engine_close(engine);
-    test_restore_env("DS4_DSPARK_SCHEDULER", saved_scheduler);
 }
 
 #if defined(__APPLE__)
@@ -14568,7 +14512,7 @@ static void test_dflash_payload_lifecycle(void) {
 
 /* Model-independent coverage for the supported product slice.  Keep this
  * list deliberately separate from test_metal_kernel_group: that historical
- * umbrella also runs GLM/DSpark and optional-source compatibility cases. */
+ * umbrella also runs other optional-source compatibility cases. */
 static void test_laguna_metal_core(void) {
     if (!ds4_gpu_init()) {
         TEST_ASSERT(false);
@@ -14676,8 +14620,7 @@ static const ds4_test_entry test_entries[] = {
      "submit/discard parallel-FFN lifecycle cleanup and follow-up batch",
      test_metal_parallel_ffn_terminal_lifecycle, true},
 #endif
-    {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth, false},
-    {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth, false},
+    {"--dflash-verify-depth", "dflash-verify-depth", "DFlash speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dflash_verify_depth, false},
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group, false},
 };
@@ -14714,8 +14657,7 @@ static void test_print_help(const char *prog) {
     puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU=1  Enable opt-in Laguna leading-dense Q8 fused gate/up+SwiGLU.");
     puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE=1  Report each fused/stock route once after a waited graph.");
     puts("  DS4_TEST_LONG_PROMPT=FILE  Rendered long-context story fact prompt.");
-    puts("  DS4_TEST_MTP=FILE         Legacy MTP support GGUF for --mtp-verify-depth.");
-    puts("  DS4_TEST_DSPARK=FILE      DSpark support GGUF for --dspark-verify-depth.");
+    puts("  DS4_TEST_DFLASH=FILE      Laguna DFlash support GGUF for --dflash-verify-depth.");
 }
 
 static const ds4_test_entry *test_find_entry(const char *arg) {

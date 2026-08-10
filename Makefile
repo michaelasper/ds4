@@ -43,9 +43,7 @@ METAL_SOURCE_SPECS := \
 	DS4_METAL_BIN_SOURCE=metal/bin.metal \
 	DS4_METAL_SET_ROWS_SOURCE=metal/set_rows.metal
 DS4_TEST_MODEL ?= ds4flash.gguf
-DS4_TEST_MTP ?= gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
-DS4_DSPARK_MODEL ?= $(DS4_TEST_MODEL)
-DS4_DSPARK_SUPPORT ?= gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf
+DS4_TEST_DFLASH ?=
 # Deliberately empty: the model-backed Laguna integration gate must never
 # pretend that the legacy DS4_TEST_MODEL default is a supported fixture.
 LAGUNA_TEST_MODEL ?=
@@ -63,7 +61,7 @@ METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 UNSUPPORTED_TARGETS := cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm \
 	test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch
 
-.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dspark-acceptance dspark-verify-depth mtp-verify-depth $(UNSUPPORTED_TARGETS)
+.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dflash-verify-depth $(UNSUPPORTED_TARGETS)
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -97,8 +95,7 @@ help:
 	@echo "  make metal-prefill-variant-bench  Build the balanced Metal prefill variant benchmark"
 	@echo "  make check-mxfp4-half-lut  Verify the checked-in MXFP4 half LUT matches the generator"
 	@echo "  make test-mxfp4-metal  Check the MXFP4 half LUT, then run Metal MXFP4 exactness tests"
-	@echo "  make dspark-verify-depth  Run DSpark speculative verification smoke if support GGUF is present"
-	@echo "  make mtp-verify-depth  Run legacy MTP speculative verification smoke if MTP GGUF is present"
+	@echo "  make dflash-verify-depth  Run DFlash speculative verification smoke if support GGUF is present"
 	@echo "  CPU/CUDA/ROCm targets are unsupported in this Darwin/Apple Metal-only fork"
 	@echo "  make clean        Remove build outputs"
 
@@ -271,7 +268,6 @@ test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-
 	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" ./ds4 --metal --model "$(LAGUNA_TEST_MODEL)" --inspect
 	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" \
 	DS4_TEST_BACKEND=metal \
-	DS4_TEST_MTP= \
 	DS4_TEST_SSD_STREAMING= \
 	DS4_TEST_SSD_STREAMING_COLD= \
 	DS4_TEST_SSD_STREAMING_CACHE_GB= \
@@ -279,29 +275,15 @@ test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-
 	DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS= \
 	./tests/test_metal_session_batch
 
-dspark-acceptance: ds4
-	DS4_DSPARK_MODEL="$(DS4_DSPARK_MODEL)" \
-	DS4_DSPARK_SUPPORT="$(DS4_DSPARK_SUPPORT)" \
-	sh tests/dspark_acceptance_fixture.sh
-
-dspark-verify-depth: ds4_test
+dflash-verify-depth: ds4_test
 	@if [ ! -f "$(DS4_TEST_MODEL)" ]; then \
-		echo "dspark-verify-depth: skipped, missing model $(DS4_TEST_MODEL)"; \
-	elif [ ! -f "$(DS4_DSPARK_SUPPORT)" ]; then \
-		echo "dspark-verify-depth: skipped, missing DSpark support $(DS4_DSPARK_SUPPORT)"; \
-		echo "dspark-verify-depth: run ./download_model.sh ds4f-dspark or set DS4_DSPARK_SUPPORT=FILE"; \
+		echo "dflash-verify-depth: skipped, missing model $(DS4_TEST_MODEL)"; \
+	elif [ -z "$(strip $(DS4_TEST_DFLASH))" ]; then \
+		echo "dflash-verify-depth: skipped, set DS4_TEST_DFLASH=FILE to a DFlash support GGUF"; \
+	elif [ ! -f "$(DS4_TEST_DFLASH)" ]; then \
+		echo "dflash-verify-depth: skipped, missing DFlash support $(DS4_TEST_DFLASH)"; \
 	else \
-		DS4_TEST_MODEL="$(DS4_TEST_MODEL)" DS4_TEST_DSPARK="$(DS4_DSPARK_SUPPORT)" ./ds4_test --dspark-verify-depth; \
-	fi
-
-mtp-verify-depth: ds4_test
-	@if [ ! -f "$(DS4_TEST_MODEL)" ]; then \
-		echo "mtp-verify-depth: skipped, missing model $(DS4_TEST_MODEL)"; \
-	elif [ ! -f "$(DS4_TEST_MTP)" ]; then \
-		echo "mtp-verify-depth: skipped, missing MTP support $(DS4_TEST_MTP)"; \
-		echo "mtp-verify-depth: set DS4_TEST_MTP=FILE to a legacy support GGUF"; \
-	else \
-		DS4_TEST_MODEL="$(DS4_TEST_MODEL)" DS4_TEST_MTP="$(DS4_TEST_MTP)" ./ds4_test --mtp-verify-depth; \
+		DS4_TEST_MODEL="$(DS4_TEST_MODEL)" DS4_TEST_DFLASH="$(DS4_TEST_DFLASH)" ./ds4_test --dflash-verify-depth; \
 	fi
 
 q4k-dot-test: tests/test_q4k_dot.c

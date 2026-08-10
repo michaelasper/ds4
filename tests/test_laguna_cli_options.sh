@@ -98,6 +98,18 @@ for symbol in _ds4_engine_has_dflash _ds4_engine_dflash_draft_tokens; do
         fail "missing public DFlash symbol $symbol"
     fi
 done
+legacy_symbols=(
+    "_ds4_engine_has_""mtp"
+    "_ds4_engine_""mtp_draft_tokens"
+)
+for symbol in "${legacy_symbols[@]}"; do
+    if nm -gU ./ds4 | grep -F -- "$symbol" >/dev/null ||
+       nm -gU ./ds4-server | grep -F -- "$symbol" >/dev/null; then
+        fail "legacy public symbol $symbol is still exported"
+    else
+        pass "legacy public symbol $symbol absent"
+    fi
+done
 legacy_spec_disable_env="DS4""_MTP""_SPEC_DISABLE"
 if grep -Fq -- 'DS4_DFLASH_SPEC_DISABLE' ds4_cli.c ds4_server.c &&
    ! grep -Fq -- "$legacy_spec_disable_env" ds4_cli.c ds4_server.c; then
