@@ -32,6 +32,13 @@ The refactor branch already:
 - removes the obsolete multi-GPU layer planner/packer, placement test, and
   their build wiring; this boundary does not claim graph scalarization is
   complete;
+- exposes DFlash as the only optional Laguna support-model API and removes
+  the public MTP, GLM-MTP, and DSpark aliases/options;
+- isolates immutable Laguna S2.1 shape, admission, tensor-layout, binding,
+  and output-head rules in the private `lgn_model.c` / `lgn_model.h` module;
+- fixes the product name as **LagoonNebula** and the eventual repository name
+  as **`lgn2`**, while deliberately postponing the mechanical identifier
+  rename until unsupported implementation paths are gone;
 - retains only Laguna quality fixtures and tooling under `quality/`;
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.
