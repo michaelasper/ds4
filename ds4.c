@@ -544,6 +544,7 @@ typedef struct {
     uint64_t rope_orig_ctx;
 } ds4_shape;
 
+#if defined(DS4_TEST_HOOKS) && !defined(DS4_NO_GPU)
 static const ds4_shape DS4_SHAPE_FLASH = {
     .name = "DeepSeek V4 Flash",
     .family = DS4_MODEL_FAMILY_DEEPSEEK4,
@@ -584,7 +585,9 @@ static const ds4_shape DS4_SHAPE_FLASH = {
     .compress_rope_freq_base = DS4_DEFAULT_COMPRESS_ROPE_FREQ_BASE,
     .rope_orig_ctx = DS4_DEFAULT_ROPE_ORIG_CTX,
 };
+#endif
 
+#if defined(DS4_TEST_HOOKS) && !defined(DS4_NO_GPU)
 static const ds4_shape DS4_SHAPE_PRO = {
     .name = "DeepSeek V4 Pro",
     .family = DS4_MODEL_FAMILY_DEEPSEEK4,
@@ -625,7 +628,9 @@ static const ds4_shape DS4_SHAPE_PRO = {
     .compress_rope_freq_base = DS4_DEFAULT_COMPRESS_ROPE_FREQ_BASE,
     .rope_orig_ctx = DS4_DEFAULT_ROPE_ORIG_CTX,
 };
+#endif
 
+#ifdef DS4_TEST_HOOKS
 static const ds4_shape DS4_SHAPE_GLM52 = {
     .name = "GLM 5.2",
     .family = DS4_MODEL_FAMILY_GLM_DSA,
@@ -672,6 +677,7 @@ static const ds4_shape DS4_SHAPE_GLM52 = {
     .context_length = 1048576,
     .rope_orig_ctx = 1048576,
 };
+#endif
 
 static const ds4_shape DS4_SHAPE_LAGUNA_S21 = {
     .name = "Laguna S 2.1",
@@ -1161,6 +1167,7 @@ static bool ds4_laguna_layer_is_swa(uint32_t il) {
     return lgn_layer_is_swa(il);
 }
 
+#ifdef DS4_TEST_HOOKS
 static uint32_t ds4_expected_layer_compress_ratio(uint32_t il) {
     if (il >= DS4_N_LAYER) ds4_die("DeepSeek4 layer index is outside the loaded model layout");
 
@@ -1176,6 +1183,7 @@ static uint32_t ds4_expected_layer_compress_ratio(uint32_t il) {
     }
     return 0;
 }
+#endif
 
 static void ds4_die_errno(const char *what, const char *path) {
     fprintf(stderr, "ds4: %s '%s': %s\n", what, path, strerror(errno));
@@ -4420,13 +4428,6 @@ static ds4_tensor *required_tensor(const ds4_model *m, const char *name) {
         exit(1);
     }
     return t;
-}
-
-static ds4_tensor *tensor_by_namef(const ds4_model *m, const char *fmt, uint32_t layer) {
-    char name[128];
-    int n = snprintf(name, sizeof(name), fmt, layer);
-    if (n < 0 || (size_t)n >= sizeof(name)) ds4_die("tensor name is too long");
-    return model_find_tensor(m, name);
 }
 
 static ds4_tensor *required_tensorf(const ds4_model *m, const char *fmt, uint32_t layer) {
