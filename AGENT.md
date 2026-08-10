@@ -1,4 +1,4 @@
-# Agent Notes
+# LagoonNebula Agent Notes
 
 These notes are authoritative for the Laguna Metal-only refactor. The product
 target is Laguna S2.1 GGUF inference on Apple Metal; the historical ds4
@@ -18,10 +18,12 @@ requirements.
   inference, tensor parallelism, multi-GPU placement, MTP, DSpark, steering,
   power controls, or custom prefill. Do not preserve these paths with new
   compatibility flags.
-- Defer the ds4-to-Laguna rename until the implementation and documentation
-  cleanup is complete. Existing names, cache paths, payload identifiers, and
-  public symbols are temporary compatibility surfaces until that decision is
-  recorded in `FORK.md`.
+- The product name is **LagoonNebula** and the eventual repository name is
+  **`lgn2`**. Defer the broad mechanical rename until implementation and
+  documentation cleanup is complete. Existing `ds4_*` names, cache paths,
+  payload identifiers, and public symbols are temporary migration surfaces;
+  the exact spelling and compatibility policy remain recorded decisions in
+  `FORK.md`.
 
 ## Implementation rules
 
@@ -43,8 +45,12 @@ requirements.
 
 ## Repository layout
 
-- `ds4.c`: model loading, tokenizer, Metal graph scheduling, sessions, and
-  disk-cache payload serialisation.
+- `lgn.c` / `lgn.h`: narrow private LagoonNebula boundary and shared types.
+- `lgn_model.c` / `lgn_model.h`: immutable Laguna S2.1 shape, admission,
+  tensor-layout, and binding rules.
+- `ds4.c`: transitional tokenizer, Metal graph scheduling, sessions, and
+  disk-cache payload serialisation; move supported Laguna code into `lgn_*`
+  modules as obsolete model/backend paths are deleted.
 - `ds4_cli.c`: command line and interactive transcript handling.
 - `ds4_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
   streaming, tool-call mapping, and server-side KV-cache policy.
