@@ -18359,17 +18359,32 @@ static bool metal_graph_install_model_spans(
 }
 
 static bool metal_graph_stream_readahead_enabled(void) {
+    if (glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_READAHEAD",
+                              "DS4_METAL_DISABLE_STREAMING_READAHEAD")) {
+        return false;
+    }
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    /* Apple SSD streaming has F_RDADVISE-backed overlap by default.  Native
+     * CUDA and ROCm retain the historical opt-in behavior below. */
+    return true;
+#else
     return glm_graph_env_present("DS4_ROCM_ENABLE_STREAMING_READAHEAD",
-                                 "DS4_METAL_ENABLE_STREAMING_READAHEAD") &&
-           !glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_READAHEAD",
-                                  "DS4_METAL_DISABLE_STREAMING_READAHEAD");
+                                 "DS4_METAL_ENABLE_STREAMING_READAHEAD");
+#endif
 }
 
 static bool metal_graph_stream_madvise_willneed_enabled(void) {
+    if (glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_MADVISE_WILLNEED",
+                              "DS4_METAL_DISABLE_STREAMING_MADVISE_WILLNEED")) {
+        return false;
+    }
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    /* Keep the Metal default warm-page hint; CUDA and ROCm remain opt-in. */
+    return true;
+#else
     return glm_graph_env_present("DS4_ROCM_ENABLE_STREAMING_MADVISE_WILLNEED",
-                                 "DS4_METAL_ENABLE_STREAMING_MADVISE_WILLNEED") &&
-           !glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_MADVISE_WILLNEED",
-                                  "DS4_METAL_DISABLE_STREAMING_MADVISE_WILLNEED");
+                                 "DS4_METAL_ENABLE_STREAMING_MADVISE_WILLNEED");
+#endif
 }
 
 static bool metal_graph_stream_decode_static_map_enabled(void) {
@@ -18514,15 +18529,66 @@ static void metal_graph_stream_readahead_range(
             NULL);
 }
 
+typedef void (*metal_graph_stream_readahead_sink_fn)(uint64_t,
+                                                      uint64_t,
+                                                      void *);
+
+static uint32_t metal_graph_stream_coalesce_spans(
+        const ds4_model              *model,
+        const ds4_model_map_span_vec *spans,
+        metal_graph_stream_readahead_sink_fn sink,
+        void                          *sink_ud) {
+    if (!spans || !sink || (spans->len != 0 && !spans->v)) return 0;
+
+    bool have_run = false;
+    uint64_t run_off = 0;
+    uint64_t run_end = 0;
+    uint32_t runs = 0;
+    for (uint32_t i = 0; i < spans->len; i++) {
+        const uint64_t off = spans->v[i].off;
+        const uint64_t end = spans->v[i].end;
+        if (end <= off) continue;
+        /* Range validation normally happens at the syscall boundary.  Drop
+         * invalid members before coalescing so one corrupt span cannot widen
+         * a valid neighboring run into an all-or-nothing rejected range. */
+        if (model && (off > model->size || end > model->size)) continue;
+        if (!have_run || off > run_end) {
+            if (have_run) {
+                sink(run_off, run_end - run_off, sink_ud);
+                runs++;
+            }
+            run_off = off;
+            run_end = end;
+            have_run = true;
+        } else if (end > run_end) {
+            run_end = end;
+        }
+    }
+    if (have_run) {
+        sink(run_off, run_end - run_off, sink_ud);
+        runs++;
+    }
+    return runs;
+}
+
+static void metal_graph_stream_readahead_range_sink(uint64_t offset,
+                                                     uint64_t size,
+                                                     void    *sink_ud) {
+    metal_graph_stream_readahead_range((const ds4_model *)sink_ud,
+                                       offset,
+                                       size);
+}
+
 static void metal_graph_stream_readahead_spans(
         const ds4_model              *model,
         const ds4_model_map_span_vec *spans) {
-    if (!spans) return;
-    for (uint32_t i = 0; i < spans->len; i++) {
-        metal_graph_stream_readahead_range(model,
-                                           spans->v[i].off,
-                                           spans->v[i].end - spans->v[i].off);
-    }
+    /* Readahead hints carry no aliasing semantics, so coalesce adjacent and
+     * overlapping runs before issuing one syscall pair per run. */
+    (void)metal_graph_stream_coalesce_spans(
+            model,
+            spans,
+            metal_graph_stream_readahead_range_sink,
+            (void *)model);
 }
 
 typedef struct {
@@ -18536,6 +18602,7 @@ typedef struct {
     metal_graph_stream_pagein_range *ranges;
     pthread_t *threads;
     struct metal_graph_stream_pagein_worker *workers;
+    uint8_t **pread_scratch;
     uint32_t n_ranges;
     uint32_t n_threads;
     uint32_t layer;
@@ -18556,6 +18623,7 @@ typedef struct {
 
 typedef struct metal_graph_stream_pagein_worker {
     metal_graph_stream_pagein_job *job;
+    uint8_t *pread_scratch;
     uint32_t first;
     uint32_t stride;
     uint64_t touched;
@@ -19294,14 +19362,57 @@ static bool metal_graph_stream_pagein_touch_range(
     return true;
 }
 
+/* Each page-in worker reads through its own reusable scratch (owned by the
+ * job, one per thread) instead of an xmalloc per tensor range.  Keep the
+ * larger chunk on Apple where this path is the default; native CUDA/ROCm keep
+ * the historical 1 MiB opt-in footprint. */
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+#define METAL_GRAPH_STREAM_PREAD_CHUNK (4u * 1024u * 1024u)
+#else
+#define METAL_GRAPH_STREAM_PREAD_CHUNK (1u * 1024u * 1024u)
+#endif
+
+#ifdef DS4_TEST_HOOKS
+typedef ssize_t (*metal_graph_stream_test_pread_fn)(int,
+                                                     void *,
+                                                     size_t,
+                                                     off_t);
+static metal_graph_stream_test_pread_fn g_metal_graph_stream_test_pread;
+static uint32_t g_metal_graph_stream_test_prepare_join_calls;
+#endif
+
+static ssize_t metal_graph_stream_pread_call(int fd,
+                                              void *buf,
+                                              size_t count,
+                                              off_t offset) {
+#ifdef DS4_TEST_HOOKS
+    if (g_metal_graph_stream_test_pread) {
+        return g_metal_graph_stream_test_pread(fd, buf, count, offset);
+    }
+#endif
+    return pread(fd, buf, count, offset);
+}
+
+static void metal_graph_stream_pagein_job_free_pread_scratch(
+        metal_graph_stream_pagein_job *job) {
+    if (!job || !job->pread_scratch) return;
+    for (uint32_t t = 0; t < job->n_threads; t++) {
+        free(job->pread_scratch[t]);
+    }
+    free(job->pread_scratch);
+    job->pread_scratch = NULL;
+}
+
 static bool metal_graph_stream_pread_range(
         const ds4_model *model,
         uint64_t         offset,
         uint64_t         size,
+        uint8_t         *scratch,
         uint64_t        *read_bytes,
         uint8_t         *sink) {
     if (!model ||
         model->fd < 0 ||
+        !scratch ||
         offset > model->size ||
         size == 0 ||
         size > model->size - offset) {
@@ -19309,24 +19420,26 @@ static bool metal_graph_stream_pread_range(
     }
     if (offset > (uint64_t)LLONG_MAX) return false;
 
-    const size_t chunk = 1024u * 1024u;
-    uint8_t *buf = xmalloc(chunk);
     uint64_t pos = offset;
     uint64_t rem = size;
     uint8_t s = sink ? *sink : 0;
     bool ok = true;
     while (rem != 0) {
-        const size_t want = rem > (uint64_t)chunk ? chunk : (size_t)rem;
+        const size_t want = rem > (uint64_t)METAL_GRAPH_STREAM_PREAD_CHUNK ?
+            (size_t)METAL_GRAPH_STREAM_PREAD_CHUNK : (size_t)rem;
         ssize_t nread;
         do {
-            nread = pread(model->fd, buf, want, (off_t)pos);
+            nread = metal_graph_stream_pread_call(model->fd,
+                                                  scratch,
+                                                  want,
+                                                  (off_t)pos);
         } while (nread < 0 && errno == EINTR);
         if (nread <= 0) {
             ok = false;
             break;
         }
-        s ^= buf[0];
-        s ^= buf[(size_t)nread - 1u];
+        s ^= scratch[0];
+        s ^= scratch[(size_t)nread - 1u];
         pos += (uint64_t)nread;
         rem -= (uint64_t)nread;
         if (read_bytes) {
@@ -19335,7 +19448,6 @@ static bool metal_graph_stream_pread_range(
         }
     }
     if (sink) *sink = s;
-    free(buf);
     return ok;
 }
 
@@ -19343,6 +19455,7 @@ static bool metal_graph_stream_prepare_range(
         const metal_graph_stream_pagein_job *job,
         uint64_t                             offset,
         uint64_t                             size,
+        uint8_t                             *pread_scratch,
         uint64_t                            *touched,
         uint8_t                             *sink) {
     if (!job) return false;
@@ -19350,6 +19463,7 @@ static bool metal_graph_stream_prepare_range(
         return metal_graph_stream_pread_range(job->model,
                                               offset,
                                               size,
+                                              pread_scratch,
                                               touched,
                                               sink);
     }
@@ -19383,11 +19497,13 @@ static void *metal_graph_stream_pagein_thread_main(void *arg) {
     const double t0 = job->profile ? now_sec() : 0.0;
     job->ok = true;
     for (uint32_t i = 0; i < job->n_ranges; i++) {
-        const bool ok = metal_graph_stream_prepare_range(job,
-                                                         job->ranges[i].off,
-                                                         job->ranges[i].size,
-                                                         &job->touched,
-                                                         &job->sink);
+        const bool ok = metal_graph_stream_prepare_range(
+                job,
+                job->ranges[i].off,
+                job->ranges[i].size,
+                job->pread_scratch ? job->pread_scratch[0] : NULL,
+                &job->touched,
+                &job->sink);
         if (!ok) {
             job->ok = false;
             break;
@@ -19412,6 +19528,7 @@ static void *metal_graph_stream_pagein_worker_main(void *arg) {
         const bool ok = metal_graph_stream_prepare_range(job,
                                                          job->ranges[i].off,
                                                          job->ranges[i].size,
+                                                         worker->pread_scratch,
                                                          &worker->touched,
                                                          &worker->sink);
         if (!ok) {
@@ -19854,6 +19971,13 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
     job->ranges = ranges;
     job->n_ranges = n_ranges;
     job->n_threads = n_threads;
+    if (pread_only) {
+        /* One reusable read scratch per worker thread, freed in the join. */
+        job->pread_scratch = xcalloc(n_threads, sizeof(job->pread_scratch[0]));
+        for (uint32_t t = 0; t < n_threads; t++) {
+            job->pread_scratch[t] = xmalloc(METAL_GRAPH_STREAM_PREAD_CHUNK);
+        }
+    }
     if (n_threads == 1) {
         const int rc = pthread_create(&job->thread,
                                       NULL,
@@ -19863,6 +19987,7 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
             fprintf(stderr,
                     "ds4: Metal streaming prefill layer page-in thread failed: %s\n",
                     strerror(rc));
+            metal_graph_stream_pagein_job_free_pread_scratch(job);
             free(ranges);
             memset(job, 0, sizeof(*job));
             return false;
@@ -19872,6 +19997,8 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
         job->workers = xcalloc(n_threads, sizeof(job->workers[0]));
         for (uint32_t t = 0; t < n_threads; t++) {
             job->workers[t].job = job;
+            job->workers[t].pread_scratch =
+                job->pread_scratch ? job->pread_scratch[t] : NULL;
             job->workers[t].first = t;
             job->workers[t].stride = n_threads;
             const int rc = pthread_create(&job->threads[t],
@@ -19885,6 +20012,7 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
                 for (uint32_t j = 0; j < t; j++) {
                     (void)pthread_join(job->threads[j], NULL);
                 }
+                metal_graph_stream_pagein_job_free_pread_scratch(job);
                 free(job->workers);
                 free(job->threads);
                 free(ranges);
@@ -19899,6 +20027,13 @@ static bool metal_graph_stream_prefill_layer_pagein_start(
 
 static bool metal_graph_stream_prefill_layer_pagein_join(
         metal_graph_stream_pagein_job *job) {
+#ifdef DS4_TEST_HOOKS
+    if (job && job->started) {
+        /* Test-only accounting makes cleanup probes assert every active job
+         * is joined; it has no production state or synchronization effect. */
+        g_metal_graph_stream_test_prepare_join_calls++;
+    }
+#endif
     if (!job || !job->started) return true;
     const double t0 = job->profile ? now_sec() : 0.0;
     int rc = 0;
@@ -19954,6 +20089,7 @@ static bool metal_graph_stream_prefill_layer_pagein_join(
                 "ds4: Metal streaming prefill layer page-in join failed: %s\n",
                 strerror(rc));
     }
+    metal_graph_stream_pagein_job_free_pread_scratch(job);
     free(job->workers);
     free(job->threads);
     free(job->ranges);
@@ -20075,6 +20211,40 @@ static bool metal_graph_stream_prepare_join_all(
             ok = false;
         }
         memset(&slots[i], 0, sizeof(slots[i]));
+    }
+    return ok;
+}
+
+/* All layer-major prefill exits after prepare workers are started funnel
+ * through this cleanup.  In particular, the initial ROCm full-layer loader
+ * can fail after layer 0's prepare job is live; returning directly there
+ * leaves a stack-owned job exposed to the worker and leaks its scratch. */
+#ifdef DS4_ROCM_BUILD
+static bool metal_graph_stream_prefill_layer_cleanup(
+        rocm_graph_stream_layer_expert_load *rocm_full_layer_load,
+        metal_graph_stream_prepare_slot      *layer_prepare_slots,
+        uint32_t                              n_prepare_slots,
+        bool                                  synchronize) {
+#else
+static bool metal_graph_stream_prefill_layer_cleanup(
+        metal_graph_stream_prepare_slot *layer_prepare_slots,
+        uint32_t                         n_prepare_slots,
+        bool                             synchronize) {
+#endif
+    bool ok = true;
+#ifdef DS4_ROCM_BUILD
+    if (!rocm_graph_stream_layer_expert_load_join(rocm_full_layer_load)) {
+        ok = false;
+    }
+#endif
+    if (!metal_graph_stream_prepare_join_all(layer_prepare_slots,
+                                             n_prepare_slots)) {
+        ok = false;
+    }
+    if (synchronize && ds4_gpu_synchronize() == 0) {
+        fprintf(stderr,
+                "ds4: Metal synchronize after layer-major prefill cleanup failed\n");
+        ok = false;
     }
     return ok;
 }
@@ -21520,6 +21690,40 @@ bad_line:
     return true;
 }
 
+static const uint16_t (*metal_graph_streaming_expert_builtin_hotlist(
+        uint32_t *count_out))[2] {
+    if (count_out) *count_out = 0;
+    if (g_ds4_shape.variant == DS4_VARIANT_PRO) {
+        if (count_out) *count_out = ds4_default_streaming_hotlist_pro_count;
+        return ds4_default_streaming_hotlist_pro;
+    }
+    if (g_ds4_shape.variant == DS4_VARIANT_FLASH) {
+        if (count_out) *count_out = ds4_default_streaming_hotlist_flash_count;
+        return ds4_default_streaming_hotlist_flash;
+    }
+    if (g_ds4_shape.variant == DS4_VARIANT_GLM52) {
+        if (count_out) *count_out = ds4_default_streaming_hotlist_glm52_count;
+        return ds4_default_streaming_hotlist_glm52;
+    }
+    return NULL;
+}
+
+static uint32_t metal_graph_streaming_expert_builtin_target(
+        uint32_t requested) {
+    uint32_t hotlist_count = 0;
+    (void)metal_graph_streaming_expert_builtin_hotlist(&hotlist_count);
+    return requested < hotlist_count ? requested : hotlist_count;
+}
+
+static bool metal_graph_streaming_expert_hotlist_should_skip(
+        bool     from_file,
+        bool     refresh_builtin_glm,
+        uint32_t current_count,
+        uint32_t target_count) {
+    return !from_file && !refresh_builtin_glm &&
+           current_count >= target_count;
+}
+
 static bool metal_graph_streaming_expert_hotlist_load_default(
         uint32_t    max_entries,
         int32_t     experts[DS4_MAX_LAYER][DS4_MAX_EXPERT],
@@ -21530,21 +21734,14 @@ static bool metal_graph_streaming_expert_hotlist_load_default(
     if (max_entries == 0 || !experts || !priorities || !counts || !seen || !loaded_out) {
         return false;
     }
-    const uint16_t (*hotlist)[2] = NULL;
     uint32_t hotlist_count = 0;
-    if (g_ds4_shape.variant == DS4_VARIANT_PRO) {
-        hotlist = ds4_default_streaming_hotlist_pro;
-        hotlist_count = ds4_default_streaming_hotlist_pro_count;
-    } else if (g_ds4_shape.variant == DS4_VARIANT_FLASH) {
-        hotlist = ds4_default_streaming_hotlist_flash;
-        hotlist_count = ds4_default_streaming_hotlist_flash_count;
-    } else if (g_ds4_shape.variant == DS4_VARIANT_GLM52) {
-        hotlist = ds4_default_streaming_hotlist_glm52;
-        hotlist_count = ds4_default_streaming_hotlist_glm52_count;
-    } else {
+    const uint16_t (*hotlist)[2] =
+        metal_graph_streaming_expert_builtin_hotlist(&hotlist_count);
+    if (!hotlist) {
         *loaded_out = 0;
         return true;
     }
+    if (max_entries > hotlist_count) max_entries = hotlist_count;
     uint32_t loaded = 0;
     for (uint32_t i = 0;
          i < hotlist_count && loaded < max_entries;
@@ -21563,6 +21760,23 @@ static bool metal_graph_streaming_expert_hotlist_load_default(
     }
     *loaded_out = loaded;
     return true;
+}
+
+static uint32_t metal_graph_streaming_expert_auto_preload_cap(
+        const char *env) {
+#if defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    uint32_t cap = 8192;
+#else
+    uint32_t cap = 4096;
+#endif
+    if (env && env[0]) {
+        char *end = NULL;
+        unsigned long v = strtoul(env, &end, 10);
+        if (end != env && *end == '\0') {
+            cap = v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
+        }
+    }
+    return cap;
 }
 
 static uint32_t metal_graph_streaming_expert_preload_count(
@@ -21587,14 +21801,8 @@ static uint32_t metal_graph_streaming_expert_preload_count(
          * watchdog before decode begins. ROCm GLM52 uses indexed batch prefill
          * by default, which already populates the cache; explicit CLI preload
          * counts and auto-preload env caps bypass that default. */
-        uint32_t cap = 4096;
-        if (env && env[0]) {
-            char *end = NULL;
-            unsigned long v = strtoul(env, &end, 10);
-            if (end != env && *end == '\0') {
-                cap = v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
-            }
-        }
+        const uint32_t cap =
+            metal_graph_streaming_expert_auto_preload_cap(env);
         if (cap != 0 && preload > cap) preload = cap;
     }
     if (preload > cache_budget) preload = cache_budget;
@@ -21648,17 +21856,12 @@ static bool metal_graph_seed_streaming_expert_cache_layer_from_mapped_hotlist(
         metal_graph_streaming_expert_preload_count(g, cache_budget);
     if (preload_count == 0) return true;
 
-    const uint16_t (*hotlist)[2] = NULL;
     uint32_t hotlist_count = 0;
-    if (g_ds4_shape.variant == DS4_VARIANT_FLASH) {
-        hotlist = ds4_default_streaming_hotlist_flash;
-        hotlist_count = ds4_default_streaming_hotlist_flash_count;
-    } else {
-        hotlist = ds4_default_streaming_hotlist_pro;
-        hotlist_count = ds4_default_streaming_hotlist_pro_count;
-    }
-    const uint32_t target_count = preload_count < hotlist_count ?
-        preload_count : hotlist_count;
+    const uint16_t (*hotlist)[2] =
+        metal_graph_streaming_expert_builtin_hotlist(&hotlist_count);
+    const uint32_t target_count = metal_graph_streaming_expert_builtin_target(
+            preload_count);
+    if (!hotlist || target_count == 0) return true;
     if (ds4_gpu_stream_expert_cache_current_count() >= target_count) {
         return true;
     }
@@ -21668,12 +21871,12 @@ static bool metal_graph_seed_streaming_expert_cache_layer_from_mapped_hotlist(
     uint32_t n = 0;
     uint32_t loaded = 0;
     for (uint32_t i = 0;
-         i < hotlist_count && loaded < preload_count;
+         i < hotlist_count && loaded < target_count;
          i++) {
         const uint32_t hot_layer = hotlist[i][0];
         const uint32_t hot_expert = hotlist[i][1];
         if (hot_layer >= DS4_N_LAYER || hot_expert >= DS4_N_EXPERT) continue;
-        const uint32_t priority = preload_count - loaded;
+        const uint32_t priority = target_count - loaded;
         loaded++;
         if (hot_layer != il) continue;
         if (n >= DS4_MAX_EXPERT) return false;
@@ -32031,14 +32234,20 @@ static bool metal_graph_seed_streaming_expert_cache_from_hotlist(
     const bool from_file = path && path[0];
     const bool refresh_builtin_glm =
         !from_file && g_ds4_shape.variant == DS4_VARIANT_GLM52;
+    const uint32_t source_preload_count = from_file ? preload_count :
+        metal_graph_streaming_expert_builtin_target(preload_count);
     const bool profile =
         glm_graph_env_present("DS4_ROCM_STREAMING_EXPERT_HOTLIST_PROFILE",
                               "DS4_METAL_STREAMING_EXPERT_HOTLIST_PROFILE");
-    if (!from_file && !refresh_builtin_glm && current_count >= preload_count) {
+    if (metal_graph_streaming_expert_hotlist_should_skip(
+                from_file,
+                refresh_builtin_glm,
+                current_count,
+                source_preload_count)) {
         if (profile) {
             fprintf(stderr,
                     "ds4: streaming expert hotlist seed skipped preload=%u current=%u\n",
-                    preload_count,
+                    source_preload_count,
                     current_count);
         }
         return true;
@@ -32064,12 +32273,13 @@ static bool metal_graph_seed_streaming_expert_cache_from_hotlist(
                                                            &loaded)) {
             return false;
         }
-    } else if (!metal_graph_streaming_expert_hotlist_load_default(preload_count,
-                                                                  experts,
-                                                                  priorities,
-                                                                  counts,
-                                                                  seen,
-                                                                  &loaded)) {
+    } else if (!metal_graph_streaming_expert_hotlist_load_default(
+                       source_preload_count,
+                       experts,
+                       priorities,
+                       counts,
+                       seen,
+                       &loaded)) {
         return false;
     }
     if (loaded == 0) return true;
@@ -35583,6 +35793,18 @@ static bool metal_graph_prefill_layer_major(
                                                             layer_selected_addr,
                                                             layer_prepare_slots,
                                                             layer_prepare_ahead)) {
+#ifdef DS4_ROCM_BUILD
+                (void)metal_graph_stream_prefill_layer_cleanup(
+                        &rocm_full_layer_load,
+                        layer_prepare_slots,
+                        layer_prepare_ahead,
+                        true);
+#else
+                (void)metal_graph_stream_prefill_layer_cleanup(
+                        layer_prepare_slots,
+                        layer_prepare_ahead,
+                        true);
+#endif
                 return false;
             }
         } else {
@@ -35601,6 +35823,11 @@ static bool metal_graph_prefill_layer_major(
                                                         weights,
                                                         0,
                                                         n_tokens)) {
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                &rocm_full_layer_load,
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
         return false;
     }
 #endif
@@ -35627,16 +35854,18 @@ static bool metal_graph_prefill_layer_major(
     }
     if (!ok) {
 #ifdef DS4_ROCM_BUILD
-        (void)rocm_graph_stream_layer_expert_load_join(&rocm_full_layer_load);
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                &rocm_full_layer_load,
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
         (void)ds4_gpu_stream_expert_cache_release_layer_cache();
+#else
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
 #endif
-        if (layer_prepare) {
-            (void)metal_graph_stream_prepare_join_all(layer_prepare_slots,
-                                                      layer_prepare_ahead);
-        }
-        if (ds4_gpu_synchronize() == 0) {
-            fprintf(stderr, "ds4: Metal synchronize after layer-major prefill embed failure also failed\n");
-        }
         return false;
     }
 
@@ -35928,16 +36157,18 @@ static bool metal_graph_prefill_layer_major(
         }
         if (!ok) {
 #ifdef DS4_ROCM_BUILD
-            (void)rocm_graph_stream_layer_expert_load_join(&rocm_full_layer_load);
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    &rocm_full_layer_load,
+                    layer_prepare_slots,
+                    layer_prepare_ahead,
+                    true);
             (void)ds4_gpu_stream_expert_cache_release_layer_cache();
+#else
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    layer_prepare_slots,
+                    layer_prepare_ahead,
+                    true);
 #endif
-            if (layer_prepare) {
-                (void)metal_graph_stream_prepare_join_all(layer_prepare_slots,
-                                                          layer_prepare_ahead);
-            }
-            if (ds4_gpu_synchronize() == 0) {
-                fprintf(stderr, "ds4: Metal synchronize after layer-major prefill failure also failed\n");
-            }
             return false;
         }
         graph_power_note_prefill_layer(g, il, layer_elapsed);
@@ -35954,16 +36185,18 @@ static bool metal_graph_prefill_layer_major(
     }
     if (!ok) {
 #ifdef DS4_ROCM_BUILD
-        (void)rocm_graph_stream_layer_expert_load_join(&rocm_full_layer_load);
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                &rocm_full_layer_load,
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
         (void)ds4_gpu_stream_expert_cache_release_layer_cache();
+#else
+        (void)metal_graph_stream_prefill_layer_cleanup(
+                layer_prepare_slots,
+                layer_prepare_ahead,
+                true);
 #endif
-        if (layer_prepare) {
-            (void)metal_graph_stream_prepare_join_all(layer_prepare_slots,
-                                                      layer_prepare_ahead);
-        }
-        if (ds4_gpu_synchronize() == 0) {
-            fprintf(stderr, "ds4: Metal synchronize after layer-major prefill failure also failed\n");
-        }
         return false;
     }
 #ifdef __APPLE__
@@ -39353,6 +39586,37 @@ char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
     return out;
 }
 
+void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b) {
+    ds4_vocab *vocab = &e->vocab;
+    if (!b || token < 0 || token >= vocab->n_vocab) return;
+
+    ds4_str s = vocab->token[token];
+    /* Decoding emits at most one byte per source byte, so one reserve covers
+     * both the raw copy and the GPT-2 byte-mapping loop below. */
+    if (b->len + (size_t)s.len + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < b->len + (size_t)s.len + 1) cap *= 2;
+        b->ptr = xrealloc(b->ptr, cap);
+        b->cap = cap;
+    }
+    char *out = b->ptr + b->len;
+    if (vocab_token_is_named_special(vocab, token) ||
+        vocab_token_is_literal_special(s)) {
+        memcpy(out, s.ptr, (size_t)s.len);
+        b->len += (size_t)s.len;
+    } else {
+        size_t n = 0;
+        uint64_t pos = 0;
+        while (pos < s.len) {
+            uint32_t cp = utf8_decode_one(s.ptr, s.len, &pos);
+            int byte = gpt2_codepoint_to_byte(cp);
+            if (byte >= 0) out[n++] = (char)byte;
+        }
+        b->len += n;
+    }
+    b->ptr[b->len] = '\0';
+}
+
 static bool vocab_token_is_generation_stop(const ds4_vocab *vocab, int token) {
     if (!vocab || token < 0) return false;
     if (token == vocab->eos_id) return true;
@@ -39552,6 +39816,37 @@ typedef struct {
     float prob;
 } sample_candidate;
 
+/* Session-owned candidate arena: the full-vocab candidate list is reused
+ * across tokens instead of a fresh multi-MB malloc/free per decode step. */
+typedef struct {
+    sample_candidate *v;
+    size_t cap;
+} sample_arena;
+
+static sample_candidate *sample_arena_reserve(sample_arena *a, size_t n) {
+    if (n > a->cap) {
+        size_t cap = a->cap ? a->cap : 1024;
+        while (cap < n) cap *= 2;
+        a->v = xrealloc(a->v, cap * sizeof(a->v[0]));
+        a->cap = cap;
+    }
+    return a->v;
+}
+
+#ifdef DS4_TEST_HOOKS
+int ds4_test_sample_arena_lifecycle(void) {
+    sample_arena arena = {0};
+    sample_candidate *first = sample_arena_reserve(&arena, 17);
+    const size_t first_cap = arena.cap;
+    sample_candidate *reuse = sample_arena_reserve(&arena, 9);
+    sample_candidate *grown = sample_arena_reserve(&arena, first_cap + 1);
+    const bool ok = first != NULL && reuse == first && grown != NULL &&
+                    arena.cap > first_cap;
+    free(arena.v);
+    return ok ? 0 : 1;
+}
+#endif
+
 static int sample_candidate_cmp_desc(const void *a, const void *b) {
     const sample_candidate *ca = a;
     const sample_candidate *cb = b;
@@ -39691,7 +39986,8 @@ static int sample_full_vocab(
         float        top_p,
         float        min_p,
         uint64_t    *rng,
-        float       *prob_scratch) {
+        float       *prob_scratch,
+        sample_arena *cands) {
     float max_logit = DS4_NEG_INF;
     int best = 0;
     uint32_t finite = 0;
@@ -39787,23 +40083,17 @@ static int sample_full_vocab(
         if (sum <= 0.0f || !isfinite(sum)) return best;
 
         const float min_prob = (1.0f / sum) * min_p;
+        cand = sample_arena_reserve(cands, finite);
         for (uint32_t i = 0; i < n_vocab; i++) {
             const float p = prob_scratch[i];
             if (p < 0.0f || p / sum < min_prob) continue;
-            n++;
-        }
-        if (n == 0) return best;
-        cand = xmalloc((size_t)n * sizeof(cand[0]));
-        uint32_t out = 0;
-        for (uint32_t i = 0; i < n_vocab; i++) {
-            const float p = prob_scratch[i];
-            if (p < 0.0f || p / sum < min_prob) continue;
-            cand[out++] = (sample_candidate){
+            cand[n++] = (sample_candidate){
                 .id = (int)i, .logit = logits[i], .prob = p
             };
         }
+        if (n == 0) return best;
     } else {
-        cand = xmalloc((size_t)finite * sizeof(cand[0]));
+        cand = sample_arena_reserve(cands, finite);
         for (uint32_t i = 0; i < n_vocab; i++) {
             const float v = logits[i];
             if (!isfinite(v)) continue;
@@ -39812,10 +40102,7 @@ static int sample_full_vocab(
             sum += p;
         }
     }
-    if (sum <= 0.0f || !isfinite(sum)) {
-        free(cand);
-        return best;
-    }
+    if (sum <= 0.0f || !isfinite(sum)) return best;
 
     qsort(cand, n, sizeof(cand[0]), sample_candidate_cmp_desc);
     const float min_prob = (cand[0].prob / sum) * (min_p > 0.0f ? min_p : 0.0f);
@@ -39828,23 +40115,14 @@ static int sample_full_vocab(
         filtered++;
         if (filtered_sum / sum >= top_p) break;
     }
-    if (filtered == 0) {
-        free(cand);
-        return best;
-    }
+    if (filtered == 0) return best;
 
     float r = sample_rng_f32(rng) * filtered_sum;
     for (uint32_t i = 0; i < filtered; i++) {
         r -= cand[i].prob;
-        if (r <= 0.0f) {
-            const int id = cand[i].id;
-            free(cand);
-            return id;
-        }
+        if (r <= 0.0f) return cand[i].id;
     }
-    const int id = cand[filtered - 1].id;
-    free(cand);
-    return id;
+    return cand[filtered - 1].id;
 }
 
 static int sample_top_p_min_p(
@@ -39855,7 +40133,8 @@ static int sample_top_p_min_p(
         float        top_p,
         float        min_p,
         uint64_t    *rng,
-        float       *prob_scratch) {
+        float       *prob_scratch,
+        sample_arena *cands) {
     if (temperature <= 0.0f) return sample_argmax(logits, n_vocab);
     if (top_p <= 0.0f || top_p > 1.0f) top_p = 1.0f;
     if (min_p < 0.0f) min_p = 0.0f;
@@ -39865,7 +40144,8 @@ static int sample_top_p_min_p(
             prob_scratch = xmalloc((size_t)n_vocab * sizeof(prob_scratch[0]));
         }
         const int token = sample_full_vocab(logits, n_vocab, temperature,
-                                            top_p, min_p, rng, prob_scratch);
+                                            top_p, min_p, rng, prob_scratch,
+                                            cands);
         if (owned_scratch) free(prob_scratch);
         return token;
     }
@@ -39925,8 +40205,12 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float top_p, float min_p, uint64_t *rng,
                            float *prob_scratch) {
     if (!logits || !rng || n_vocab == 0) return -1;
-    return sample_top_p_min_p(logits, n_vocab, temperature, top_k,
-                              top_p, min_p, rng, prob_scratch);
+    sample_arena cands = {0};
+    const int token = sample_top_p_min_p(logits, n_vocab, temperature, top_k,
+                                         top_p, min_p, rng, prob_scratch,
+                                         &cands);
+    free(cands.v);
+    return token;
 }
 
 int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
@@ -54241,6 +54525,16 @@ struct ds4_session {
     token_vec greedy_splitkv_segment;
     float *logits;
     float *sample_probs;
+    sample_arena sample_cands;
+    /* Logprob observers share one logsumexp per logits state.  logits_gen is
+     * bumped by every public entry point that can replace the s->logits
+     * content (eval/sync/speculative-commit/payload-load/set); the cache is
+     * recomputed by the first observer call after a bump. */
+    uint64_t logits_gen;
+    uint64_t logsumexp_gen;
+    double logsumexp;
+    bool logsumexp_valid;
+    bool logsumexp_ok;
     double last_sample_ms;
     float *mtp_logits;
     int greedy_splitkv_anchor_len;
@@ -54286,6 +54580,27 @@ struct ds4_session {
     bool mtp_draft_valid;
     bool greedy_splitkv_anchor_valid;
 };
+
+/* Marks the session's logits content as replaced.  Every public entry point
+ * that can write s->logits calls this on entry, which stales the shared
+ * logsumexp cache below.  Over-marking is harmless (it only forces a
+ * recompute), so entry points mark unconditionally. */
+static void ds4_session_note_logits_dirty(ds4_session *s) {
+    if (s) s->logits_gen++;
+}
+
+#ifdef DS4_TEST_HOOKS
+static ds4_test_logprob_stats g_ds4_test_logprob_stats;
+
+void ds4_test_logprob_stats_reset(void) {
+    memset(&g_ds4_test_logprob_stats, 0,
+           sizeof(g_ds4_test_logprob_stats));
+}
+
+void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out) {
+    if (out) *out = g_ds4_test_logprob_stats;
+}
+#endif
 
 #ifndef DS4_NO_GPU
 static bool ds4_dspark_stats_enabled(void);
@@ -56731,6 +57046,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (s->distributed) {
         return ds4_dist_session_load_payload(s->distributed, s, fp, payload_bytes, err, errlen);
     }
@@ -57463,6 +57779,7 @@ int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, 
         payload_set_err(err, errlen, "invalid session snapshot load");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (s->distributed) {
         payload_set_err(err, errlen, "distributed session snapshots are not supported yet");
         return 1;
@@ -57906,6 +58223,7 @@ static bool ds4_session_greedy_splitkv_replay_exact(
 
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
+    ds4_session_note_logits_dirty(s);
     if (ds4_session_is_cpu(s) || ds4_session_is_glm(s)) {
         if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
         return ds4_session_argmax(s);
@@ -62182,6 +62500,307 @@ typedef struct {
     uint64_t bytes;
 } ds4_test_fake_tensor;
 
+#ifndef DS4_NO_GPU
+typedef struct {
+    uint64_t *offsets;
+    uint64_t *sizes;
+    uint32_t cap;
+    uint32_t count;
+} ds4_test_stream_readahead_runs;
+
+static void ds4_test_stream_readahead_run_sink(uint64_t offset,
+                                                uint64_t size,
+                                                void    *ud) {
+    ds4_test_stream_readahead_runs *runs = ud;
+    if (!runs) return;
+    if (runs->count < runs->cap) {
+        runs->offsets[runs->count] = offset;
+        runs->sizes[runs->count] = size;
+    }
+    runs->count++;
+}
+
+uint32_t ds4_test_stream_readahead_coalesce(
+        const uint64_t *offsets,
+        const uint64_t *ends,
+        uint32_t        n_spans,
+        uint64_t       *out_offsets,
+        uint64_t       *out_sizes,
+        uint32_t        out_cap,
+        uint64_t        model_size) {
+    if ((n_spans != 0 && (!offsets || !ends)) ||
+        (out_cap != 0 && (!out_offsets || !out_sizes))) {
+        return UINT32_MAX;
+    }
+    ds4_model_map_span *span_data = NULL;
+    if (n_spans != 0) {
+        span_data = calloc(n_spans, sizeof(span_data[0]));
+        if (!span_data) return UINT32_MAX;
+        for (uint32_t i = 0; i < n_spans; i++) {
+            span_data[i].off = offsets[i];
+            span_data[i].end = ends[i];
+        }
+    }
+    ds4_model_map_span_vec spans = {
+        .v = span_data,
+        .len = n_spans,
+        .cap = n_spans,
+        .max_tensor_bytes = 1,
+    };
+    ds4_model bound_model;
+    memset(&bound_model, 0, sizeof(bound_model));
+    const ds4_model *model = NULL;
+    if (model_size != UINT64_MAX) {
+        bound_model.size = model_size;
+        model = &bound_model;
+    }
+    ds4_test_stream_readahead_runs runs = {
+        .offsets = out_offsets,
+        .sizes = out_sizes,
+        .cap = out_cap,
+        .count = 0,
+    };
+    const uint32_t count = metal_graph_stream_coalesce_spans(
+            model,
+            &spans,
+            ds4_test_stream_readahead_run_sink,
+            &runs);
+    free(span_data);
+    return count;
+}
+
+bool ds4_test_stream_readahead_enabled(void) {
+    return metal_graph_stream_readahead_enabled();
+}
+
+bool ds4_test_stream_madvise_willneed_enabled(void) {
+    return metal_graph_stream_madvise_willneed_enabled();
+}
+
+uint32_t ds4_test_stream_pread_chunk(void) {
+    return METAL_GRAPH_STREAM_PREAD_CHUNK;
+}
+
+uint32_t ds4_test_stream_auto_preload_cap(void) {
+    const char *env = glm_graph_env_value(
+            "DS4_ROCM_STREAMING_EXPERT_AUTO_PRELOAD_CAP",
+            "DS4_METAL_STREAMING_EXPERT_AUTO_PRELOAD_CAP");
+    return metal_graph_streaming_expert_auto_preload_cap(env);
+}
+
+void ds4_test_stream_set_pread_hook(metal_graph_stream_test_pread_fn fn) {
+    g_metal_graph_stream_test_pread = fn;
+}
+
+bool ds4_test_stream_pread_range_fd(int fd,
+                                    uint64_t model_size,
+                                    uint64_t offset,
+                                    uint64_t size,
+                                    uint8_t *scratch,
+                                    uint64_t *read_bytes,
+                                    uint8_t *sink) {
+    ds4_model model;
+    memset(&model, 0, sizeof(model));
+    model.fd = fd;
+    model.size = model_size;
+    return metal_graph_stream_pread_range(&model,
+                                          offset,
+                                          size,
+                                          scratch,
+                                          read_bytes,
+                                          sink);
+}
+
+static void ds4_test_stream_shape_variant(int variant,
+                                          ds4_shape *saved_shape) {
+    *saved_shape = g_ds4_shape;
+    switch (variant) {
+    case DS4_VARIANT_FLASH:
+        g_ds4_shape = DS4_SHAPE_FLASH;
+        break;
+    case DS4_VARIANT_PRO:
+        g_ds4_shape = DS4_SHAPE_PRO;
+        break;
+    case DS4_VARIANT_GLM52:
+        g_ds4_shape = DS4_SHAPE_GLM52;
+        break;
+    default:
+        break;
+    }
+}
+
+static void ds4_test_stream_restore_shape(const ds4_shape *saved_shape) {
+    g_ds4_shape = *saved_shape;
+}
+
+uint32_t ds4_test_stream_builtin_count(int variant) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    uint32_t count = 0;
+    (void)metal_graph_streaming_expert_builtin_hotlist(&count);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return count;
+}
+
+uint32_t ds4_test_stream_builtin_target(int variant, uint32_t requested) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    const uint32_t target = metal_graph_streaming_expert_builtin_target(requested);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return target;
+}
+
+uint32_t ds4_test_stream_builtin_load_count(int variant,
+                                             uint32_t requested) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    int32_t (*experts)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*experts));
+    uint32_t (*priorities)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*priorities));
+    uint32_t *counts = calloc(DS4_MAX_LAYER, sizeof(*counts));
+    bool (*seen)[DS4_MAX_EXPERT] = calloc(DS4_MAX_LAYER, sizeof(*seen));
+    if (!experts || !priorities || !counts || !seen) {
+        free(experts);
+        free(priorities);
+        free(counts);
+        free(seen);
+        ds4_test_stream_restore_shape(&saved_shape);
+        return UINT32_MAX;
+    }
+    uint32_t loaded = 0;
+    const bool ok = metal_graph_streaming_expert_hotlist_load_default(
+            requested,
+            experts,
+            priorities,
+            counts,
+            seen,
+            &loaded);
+    free(experts);
+    free(priorities);
+    free(counts);
+    free(seen);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return ok ? loaded : UINT32_MAX;
+}
+
+uint32_t ds4_test_stream_hotlist_file_load_count(
+        const char *path,
+        uint32_t    requested) {
+    if (!path) return UINT32_MAX;
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(DS4_VARIANT_FLASH, &saved_shape);
+    int32_t (*experts)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*experts));
+    uint32_t (*priorities)[DS4_MAX_EXPERT] =
+        calloc(DS4_MAX_LAYER, sizeof(*priorities));
+    uint32_t *counts = calloc(DS4_MAX_LAYER, sizeof(*counts));
+    bool (*seen)[DS4_MAX_EXPERT] = calloc(DS4_MAX_LAYER, sizeof(*seen));
+    if (!experts || !priorities || !counts || !seen) {
+        free(experts);
+        free(priorities);
+        free(counts);
+        free(seen);
+        ds4_test_stream_restore_shape(&saved_shape);
+        return UINT32_MAX;
+    }
+    uint32_t loaded = 0;
+    const bool ok = metal_graph_streaming_expert_hotlist_load_file(
+            path,
+            requested,
+            experts,
+            priorities,
+            counts,
+            seen,
+            &loaded);
+    free(experts);
+    free(priorities);
+    free(counts);
+    free(seen);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return ok ? loaded : UINT32_MAX;
+}
+
+bool ds4_test_stream_hotlist_should_skip(bool     from_file,
+                                         bool     refresh_builtin_glm,
+                                         uint32_t current_count,
+                                         uint32_t requested,
+                                         int      variant) {
+    ds4_shape saved_shape;
+    ds4_test_stream_shape_variant(variant, &saved_shape);
+    const uint32_t target = from_file ? requested :
+        metal_graph_streaming_expert_builtin_target(requested);
+    const bool skip = metal_graph_streaming_expert_hotlist_should_skip(
+            from_file,
+            refresh_builtin_glm,
+            current_count,
+            target);
+    ds4_test_stream_restore_shape(&saved_shape);
+    return skip;
+}
+
+static void *ds4_test_stream_prepare_worker(void *arg) {
+    metal_graph_stream_pagein_job *job = arg;
+    if (job) job->ok = true;
+    return NULL;
+}
+
+bool ds4_test_stream_prepare_failure_cleanup(uint32_t n_jobs,
+                                             uint32_t fail_at,
+                                             uint32_t *started_out,
+                                             uint32_t *joined_out) {
+    if (n_jobs > DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD || fail_at >= n_jobs) {
+        return false;
+    }
+    metal_graph_stream_prepare_slot slots[DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD];
+    memset(slots, 0, sizeof(slots));
+    uint32_t started = 0;
+    for (uint32_t i = 0; i < n_jobs; i++) {
+        if (i == fail_at) break; /* injected prepare-start failure */
+        slots[i].layer = i;
+        slots[i].job.n_threads = 1;
+        const int rc = pthread_create(&slots[i].job.thread,
+                                      NULL,
+                                      ds4_test_stream_prepare_worker,
+                                      &slots[i].job);
+        if (rc != 0) {
+#ifdef DS4_ROCM_BUILD
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    NULL,
+                    slots,
+                    DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+                    false);
+#else
+            (void)metal_graph_stream_prefill_layer_cleanup(
+                    slots,
+                    DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+                    false);
+#endif
+            return false;
+        }
+        slots[i].job.started = true;
+        slots[i].active = true;
+        started++;
+    }
+    g_metal_graph_stream_test_prepare_join_calls = 0;
+#ifdef DS4_ROCM_BUILD
+    const bool ok = metal_graph_stream_prefill_layer_cleanup(
+            NULL,
+            slots,
+            DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+            false);
+#else
+    const bool ok = metal_graph_stream_prefill_layer_cleanup(
+            slots,
+            DS4_STREAM_PREFILL_MAX_PREPARE_AHEAD,
+            false);
+#endif
+    if (started_out) *started_out = started;
+    if (joined_out) *joined_out = g_metal_graph_stream_test_prepare_join_calls;
+    return ok;
+}
+#endif /* !DS4_NO_GPU */
+
 int ds4_test_tensor_to_entry(const char *name, int name_len) {
     ds4_tensor fake;
     memset(&fake, 0, sizeof(fake));
@@ -64387,6 +65006,7 @@ void ds4_session_free(ds4_session *s) {
     token_vec_free(&s->greedy_splitkv_segment);
     free(s->logits);
     free(s->sample_probs);
+    free(s->sample_cands.v);
 #ifndef DS4_NO_GPU
     free(s->glm_mtp_hc);
     free(s->glm_mtp_logits0);
@@ -65429,6 +66049,7 @@ int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session sync", err, errlen)) return 1;
 #endif
+    ds4_session_note_logits_dirty(s);
     const bool mirror = ds4_session_tp_leader(s);
     if (mirror && prompt && prompt->len > 0) {
         if (!ds4_tp_send_sync(s->engine->tp.ctx, s->tp_session_id,
@@ -66497,6 +67118,7 @@ ds4_session_rewrite_result ds4_session_rewrite_from_common(
                  prompt->len, s->ctx_size);
         return DS4_SESSION_REWRITE_ERROR;
     }
+    ds4_session_note_logits_dirty(s);
     if (!s->checkpoint_valid) {
         snprintf(err, errlen, "session has no valid checkpoint");
         return DS4_SESSION_REWRITE_ERROR;
@@ -66562,9 +67184,11 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
                       int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!logits || n_vocab <= 0) return 0;
     float *scratch = xmalloc((size_t)n_vocab * sizeof(scratch[0]));
+    sample_arena cands = {0};
     const int token = sample_top_p_min_p(logits, (uint32_t)n_vocab,
                                          temperature, top_k, top_p, min_p,
-                                         rng, scratch);
+                                         rng, scratch, &cands);
+    free(cands.v);
     free(scratch);
     return token;
 }
@@ -66572,14 +67196,66 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!s->engine->dflash_ready || !s->speculative_enabled) {
         return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
-                                  top_p, min_p, rng, s->sample_probs);
+                                  top_p, min_p, rng, s->sample_probs,
+                                  &s->sample_cands);
     }
     const double t0 = now_sec();
     const int token =
         sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
-                           top_p, min_p, rng, s->sample_probs);
+                           top_p, min_p, rng, s->sample_probs,
+                           &s->sample_cands);
     s->last_sample_ms = (now_sec() - t0) * 1000.0;
     return token;
+}
+
+/* The full-vocab double-precision softmax normalizer, computed once per
+ * logits state and shared by the logprob observers: a request typically asks
+ * for the sampled token's logprob and the top-k alternatives together, and
+ * the scalar double-exp pass over the vocab dwarfs everything else in those
+ * calls.  The computation keeps the original precision and accumulation
+ * order, so a cached result is bit-identical to recomputation.  The top-k
+ * observer supplies the max from its ranking pass so this helper only scans
+ * the vocabulary for the sum on a cold top-k request. */
+static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out,
+                                  bool have_max, float known_max_logit) {
+    if (s->logsumexp_valid && s->logsumexp_gen == s->logits_gen) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.cache_hits++;
+#endif
+        *logsum_out = s->logsumexp;
+        return s->logsumexp_ok;
+    }
+    float max_logit = known_max_logit;
+    if (!have_max) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.max_scans++;
+#endif
+        max_logit = DS4_NEG_INF;
+        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+            const float v = s->logits[i];
+            if (isfinite(v) && v > max_logit) max_logit = v;
+        }
+    }
+    double logsum = 0.0;
+    bool ok = false;
+    if (isfinite(max_logit)) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.sum_scans++;
+#endif
+        double sum = 0.0;
+        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+            const float v = s->logits[i];
+            if (isfinite(v)) sum += exp((double)v - (double)max_logit);
+        }
+        logsum = (double)max_logit + log(sum);
+        ok = true;
+    }
+    s->logsumexp = logsum;
+    s->logsumexp_ok = ok;
+    s->logsumexp_gen = s->logits_gen;
+    s->logsumexp_valid = true;
+    *logsum_out = logsum;
+    return ok;
 }
 
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
@@ -66592,6 +67268,9 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     }
 
     float max_logit = DS4_NEG_INF;
+#ifdef DS4_TEST_HOOKS
+    g_ds4_test_logprob_stats.max_scans++;
+#endif
     for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
         const float v = s->logits[i];
         if (!isfinite(v)) continue;
@@ -66607,12 +67286,8 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     }
     if (!isfinite(max_logit)) return 0;
 
-    double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v)) sum += exp((double)v - (double)max_logit);
-    }
-    const double logsum = (double)max_logit + log(sum);
+    double logsum = 0.0;
+    if (!ds4_session_logsumexp(s, &logsum, true, max_logit)) return 0;
     for (int i = 0; i < k && out[i].id >= 0; i++) {
         out[i].logprob = isfinite(out[i].logit) ? (float)((double)out[i].logit - logsum) : DS4_NEG_INF;
     }
@@ -66622,19 +67297,8 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
     if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
 
-    float max_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v) && v > max_logit) max_logit = v;
-    }
-    if (!isfinite(max_logit)) return 0;
-
-    double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v)) sum += exp((double)v - (double)max_logit);
-    }
-    const double logsum = (double)max_logit + log(sum);
+    double logsum = 0.0;
+    if (!ds4_session_logsumexp(s, &logsum, false, DS4_NEG_INF)) return 0;
     out->id = token;
     out->logit = s->logits[token];
     out->logprob = isfinite(out->logit) ? (float)((double)out->logit - logsum) : DS4_NEG_INF;
@@ -66649,9 +67313,89 @@ int ds4_session_copy_logits(ds4_session *s, float *out, int cap) {
 
 int ds4_session_set_logits(ds4_session *s, const float *logits, int n) {
     if (!s || !logits || n != (int)DS4_N_VOCAB) return 1;
+    ds4_session_note_logits_dirty(s);
     memcpy(s->logits, logits, (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
     return 0;
 }
+
+#ifdef DS4_TEST_HOOKS
+/* Exercise the cache without loading a model.  The probe deliberately uses
+ * the public logits setter so a mutation must advance the same generation
+ * counter as production callers. */
+int ds4_test_logprob_cache_probe(void) {
+    ds4_session s = {0};
+    float *initial = xmalloc((size_t)DS4_N_VOCAB * sizeof(initial[0]));
+    float *mutated = xmalloc((size_t)DS4_N_VOCAB * sizeof(mutated[0]));
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        initial[i] = -3.0f - (float)(i % 257u) * 0.001f;
+    }
+    initial[17] = 2.5f;
+    const uint32_t neg_inf_bits = 0xff800000u;
+    const uint32_t nan_bits = 0x7fc00000u;
+    memcpy(&initial[23], &neg_inf_bits, sizeof(neg_inf_bits));
+    memcpy(&initial[29], &nan_bits, sizeof(nan_bits));
+    memcpy(mutated, initial,
+           (size_t)DS4_N_VOCAB * sizeof(mutated[0]));
+    s.logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+    memcpy(s.logits, initial,
+           (size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+    /* A synthetic session has no eval entry point to mark its first logits. */
+    ds4_session_note_logits_dirty(&s);
+
+    ds4_test_logprob_stats_reset();
+    ds4_token_score top[4], top_again[4], token_before, token_after;
+    bool ok = ds4_session_top_logprobs(&s, top, 4) == 4;
+    ds4_test_logprob_stats stats = {0};
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 1 && stats.sum_scans == 1 &&
+         stats.cache_hits == 0 && top[0].id == 17;
+
+    /* Repeating the observer still scans to select the top entries, but must
+     * reuse the already accumulated normalizer. */
+    ok = ok && ds4_session_top_logprobs(&s, top_again, 4) == 4;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
+         stats.cache_hits == 1;
+    ok = ok && ds4_session_token_logprob(&s, 17, &token_before) == 1;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
+         stats.cache_hits == 2;
+
+    /* Check the cached arithmetic against an independent copy that uses the
+     * same max-then-sum order as the original implementation. */
+    float max_logit = DS4_NEG_INF;
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        if (isfinite(initial[i]) && initial[i] > max_logit) {
+            max_logit = initial[i];
+        }
+    }
+    double sum = 0.0;
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        if (isfinite(initial[i])) {
+            sum += exp((double)initial[i] - (double)max_logit);
+        }
+    }
+    const double reference_logsum = (double)max_logit + log(sum);
+    const float reference_logprob =
+        (float)((double)initial[17] - reference_logsum);
+    ok = ok && top[0].logprob == reference_logprob &&
+         top_again[0].logprob == reference_logprob &&
+         token_before.logprob == reference_logprob;
+
+    mutated[17] = 3.75f;
+    ok = ok && ds4_session_set_logits(&s, mutated, (int)DS4_N_VOCAB) == 0;
+    ok = ok && ds4_session_token_logprob(&s, 17, &token_after) == 1;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 3 && stats.sum_scans == 2 &&
+         stats.cache_hits == 2 && token_after.logprob != token_before.logprob &&
+         token_after.logit == 3.75f;
+
+    free(s.logits);
+    free(initial);
+    free(mutated);
+    return ok ? 0 : 1;
+}
+#endif
 
 /* Pay the one-time first-submission GPU cost (pipeline ramp plus model-heap
  * residency for the batched prefill kernels) outside any measured window.
@@ -67599,6 +68343,7 @@ int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session eval", err, errlen)) return 1;
 #endif
+    ds4_session_note_logits_dirty(s);
     bool probe_mtp = true;
 #ifndef DS4_NO_GPU
     if (s && s->engine && s->engine->support_kind == DS4_SUPPORT_DSPARK) {
@@ -68384,6 +69129,9 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
         if (err && errlen) snprintf(err, errlen, "decode batch has no session");
         return 1;
     }
+    for (int i = 0; i < count; i++) {
+        ds4_session_note_logits_dirty(items[i].session);
+    }
     ds4_engine *e = first->engine;
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_router_simd_topk_preflight(
@@ -68468,6 +69216,10 @@ int ds4_sessions_eval_batch_with_prefill(
                      "mixed prefill must extend a valid session checkpoint");
         }
         return 1;
+    }
+    ds4_session_note_logits_dirty(prefill_session);
+    for (int i = 0; i < count; i++) {
+        ds4_session_note_logits_dirty(items[i].session);
     }
     for (int i = 0; i < count; i++) {
         ds4_session *s = items[i].session;
@@ -68972,6 +69724,7 @@ int ds4_session_tp_spec_cycle(ds4_session *s, const int *drafts, int draft_n,
         snprintf(err, errlen, "tp: spec cycle outside worker mode");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (draft_n <= 0 || draft_n > DS4_DSPARK_MAX_BLOCK_SIZE) {
         snprintf(err, errlen, "tp: bad verify block size %d", draft_n);
         return 1;
@@ -72336,6 +73089,7 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                                         int *accepted, int accepted_cap,
                                         char *err, size_t errlen) {
     if (!s || max_tokens <= 0 || accepted_cap <= 0) return 0;
+    ds4_session_note_logits_dirty(s);
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_router_simd_topk_preflight(
             s->engine, "speculative eval", err, errlen)) return -1;
