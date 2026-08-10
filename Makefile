@@ -48,6 +48,9 @@ DS4_TEST_MODEL ?= ds4flash.gguf
 DS4_TEST_MTP ?= gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
 DS4_DSPARK_MODEL ?= $(DS4_TEST_MODEL)
 DS4_DSPARK_SUPPORT ?= gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf
+# Deliberately empty: the model-backed Laguna integration gate must never
+# pretend that the legacy DS4_TEST_MODEL default is a supported fixture.
+LAGUNA_TEST_MODEL ?=
 
 ifeq ($(UNAME_S),Darwin)
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
@@ -106,7 +109,7 @@ else
 METAL_SOURCE_ORDER_ONLY :=
 endif
 
-.PHONY: all help clean test test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
+.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -134,7 +137,10 @@ help:
 	@echo "DS4 build targets:"
 	@echo "  make              Build Metal ./ds4, ./ds4-server, ./ds4-bench, and ./ds4-eval"
 	@echo "  make cpu          Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, and ./ds4-eval"
-	@echo "  make test         Build and run tests"
+	@echo "  make test         Build/run the model-independent Apple Metal/Laguna suite"
+	@echo "  make test-metal-laguna  Run the strict model-independent Apple Metal/Laguna suite"
+	@echo "  make test-legacy  Run the temporary umbrella regression suite (may need a model)"
+	@echo "  make test-metal-laguna-integration LAGUNA_TEST_MODEL=FILE  Run model-backed Laguna smoke"
 	@echo "  make metal-decode-schedule-bench  Build the balanced Metal decode schedule benchmark"
 	@echo "  make metal-prefill-variant-bench  Build the balanced Metal prefill variant benchmark"
 	@echo "  make check-mxfp4-half-lut  Verify the checked-in MXFP4 half LUT matches the generator"
@@ -158,7 +164,7 @@ ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS) | check-metal-sources
 gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.c ds4.h $(CORE_OBJS) rax.o ds4_gpu_args.o | check-metal-sources
 	$(CC) $(QUALITY_CFLAGS) -I. -o $@ gguf-tools/quality-testing/score_official.c $(CORE_OBJS) rax.o ds4_gpu_args.o $(METAL_LDLIBS)
 
-tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h
+tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h ds4_tp.h
 	$(CC) $(CFLAGS) -I. -c -o $@ tests/test_metal_session_batch.c
 
 tests/test_metal_session_batch: tests/test_metal_session_batch.o $(CORE_OBJS) | check-metal-sources
@@ -229,7 +235,10 @@ help:
 	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151"
 	@echo "  make rocm                Alias for make strix-halo"
 	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, and ./ds4-eval"
-	@echo "  make test                Build and run tests"
+	@echo "  make test                Requires Darwin/Apple Metal (strict Laguna suite)"
+	@echo "  make test-metal-laguna   Requires Darwin/Apple Metal (strict Laguna suite)"
+	@echo "  make test-legacy         Run the temporary umbrella regression suite"
+	@echo "  make test-metal-laguna-integration LAGUNA_TEST_MODEL=FILE  Requires Darwin/Apple Metal"
 	@echo "  make dspark-verify-depth Run DSpark speculative verification smoke if support GGUF is present"
 	@echo "  make mtp-verify-depth    Run legacy MTP speculative verification smoke if MTP GGUF is present"
 	@echo "  make clean               Remove build outputs"
@@ -521,7 +530,7 @@ else
 	$(NVCC) $(NVCCFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(CUDA_LDLIBS)
 endif
 
-test: test-lgn ds4_test ds4-eval q4k-dot-test mxfp4-dot-test \
+test-legacy: test-lgn ds4_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
 	$(SAMPLING_TEST) $(METAL_EXACT_TEST) $(SSD_STREAMING_HOOK_TEST) ds4 ds4-server ds4-bench
 	./ds4-eval --self-test-extractors
@@ -532,6 +541,52 @@ test: test-lgn ds4_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	./tests/test_gpu_args
 	./tests/test_gpu_args_cli.sh
 	./tests/test_sampling
+
+ifeq ($(UNAME_S),Darwin)
+test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal ds4_test ds4 ds4-server ds4-bench ds4-eval
+	@set -eu; \
+	./ds4_test --laguna-architecture --laguna-selector-parser --server; \
+	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
+	./ds4_test --laguna-metal-core
+
+test: test-metal-laguna
+
+test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-eval tests/test_metal_session_batch
+	@test -n "$(strip $(LAGUNA_TEST_MODEL))" || { \
+		echo "error: set LAGUNA_TEST_MODEL=/path/to/laguna-s2.1.gguf for model-backed integration" >&2; \
+		exit 2; \
+	}
+	@test -f "$(LAGUNA_TEST_MODEL)" || { \
+		echo "error: Laguna integration model not found: $(LAGUNA_TEST_MODEL)" >&2; \
+		exit 2; \
+	}
+	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" ./ds4 --metal --model "$(LAGUNA_TEST_MODEL)" --inspect
+	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" \
+	DS4_TEST_BACKEND=metal \
+	DS4_TEST_MTP= \
+	DS4_TEST_SSD_STREAMING= \
+	DS4_TEST_SSD_STREAMING_COLD= \
+	DS4_TEST_SSD_STREAMING_CACHE_GB= \
+	DS4_TEST_SSD_STREAMING_CACHE_EXPERTS= \
+	DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS= \
+	DS4_TEST_TP_MODE= \
+	DS4_TEST_TP_TRANSPORT= \
+	DS4_TEST_TP_PORT= \
+	DS4_TEST_TP_LEADER_HOST= \
+	DS4_TEST_TP_LISTEN_HOST= \
+	DS4_TEST_TP_DISCONNECT= \
+	./tests/test_metal_session_batch
+else
+test-metal-laguna:
+	@echo "error: test-metal-laguna requires Darwin/Apple Metal" >&2
+	@exit 2
+
+test: test-metal-laguna
+
+test-metal-laguna-integration:
+	@echo "error: test-metal-laguna-integration requires Darwin/Apple Metal and LAGUNA_TEST_MODEL=FILE" >&2
+	@exit 2
+endif
 
 dspark-acceptance: ds4
 	DS4_DSPARK_MODEL="$(DS4_DSPARK_MODEL)" \
@@ -567,4 +622,4 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 	./tests/test_mxfp4_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_cpu ds4_native ds4_server_test ds4_test tests/test_lgn ds4_test_hooks.o ds4_metal_test_hooks.o ds4_streaming_test_hooks.o tests/test_ssd_streaming_hooks tests/test_ssd_streaming_hooks.o gguf-tools/quality-testing/score_official gguf-tools/quality-testing/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_mxfp4_cuda tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_cpu ds4_native ds4_server_test ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o ds4_streaming_test_hooks.o tests/test_ssd_streaming_hooks tests/test_ssd_streaming_hooks.o gguf-tools/quality-testing/score_official gguf-tools/quality-testing/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_mxfp4_cuda tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o

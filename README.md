@@ -1629,42 +1629,28 @@ and so forth, much faster than fine-tuning.
 This is also useful for cybersecurity researchers who want to reduce a model's
 willingness to provide dual-use or offensive security guidance.
 
-## Test Vectors
+## Tests
 
-`tests/test-vectors` contains short and long-context continuation vectors
-captured from the official DeepSeek V4 Flash API. The requests use
-`deepseek-v4-flash`, greedy decoding, thinking disabled, and the maximum
-`top_logprobs` slice exposed by the API. Local vectors are generated with
-`./ds4 --dump-logprobs` and compared by token bytes, so tokenizer/template or
-attention regressions show up before they become long generation failures. The
-C runner pins a 2048-token prefill chunk for this strict API-vector comparison.
-
-The core local tests are driven by the C runner, with a small `ds4-eval`
-extractor self-test run first:
+The default gate is model-independent and covers the supported Apple
+Metal/Laguna runtime, the fixed S2.1 topology, server helpers, and retained
+DFlash kernels:
 
 ```sh
-make test                  # ./ds4-eval --self-test-extractors && ./ds4_test --all
-./ds4_test --logprob-vectors
-./ds4_test --server
+make test
 ```
 
-The batching tests are model-backed and must run on the matching GPU backend:
+Model-backed integration is deliberately separate. It requires an explicit
+Laguna S2.1 GGUF and fails instead of substituting a historical default model
+or reporting a missing fixture as skipped:
 
 ```sh
-# Metal, with DS4_TEST_SESSION_COUNT set to 2, 4, 8, and 16.
-DS4_TEST_MODEL=/path/to/model.gguf DS4_TEST_SESSION_COUNT=4 \
-  make test-metal-session-batch
-
-# CUDA multi-GPU Flash.
-DS4_TEST_MODEL=/path/to/model.gguf make test-cuda-session-batch
-DS4_TEST_MODEL=/path/to/model.gguf make test-cuda-mixed-batch
+make test-metal-laguna-integration \
+  LAGUNA_TEST_MODEL=/absolute/path/to/laguna-s2.1.gguf
 ```
 
-For GLM, run the same Metal session test with a GLM GGUF and run
-`tests/glm_long_context_smoke.sh /path/to/model.gguf`. The official 100-case
-quality scorers, two-Mac TCP/RDMA tests, and the CUDA matrix are
-release gates rather than quick local tests; follow
-[QA_BEFORE_RELEASES.md](QA_BEFORE_RELEASES.md).
+`make test-legacy` remains temporarily available while the old multi-model and
+multi-backend test surface is being removed. It is not the supported product
+gate and may require historical fixtures.
 
 ## Debugging Notes
 

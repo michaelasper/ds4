@@ -15665,6 +15665,38 @@ static void test_dspark_verify_depth(void) {
     ds4_engine_close(engine);
     test_restore_env("DS4_DSPARK_SCHEDULER", saved_scheduler);
 }
+
+#if defined(__APPLE__)
+/* Model-independent coverage for the supported product slice.  Keep this
+ * list deliberately separate from test_metal_kernel_group: that historical
+ * umbrella also runs GLM/DSpark and optional-source compatibility cases. */
+static void test_laguna_metal_core(void) {
+    if (!ds4_gpu_init()) {
+        TEST_ASSERT(false);
+        return;
+    }
+
+    test_dflash_capture_nonfinite_sanitize();
+    test_metal_f16_matvec_fast_nr0_4();
+    test_metal_f16_prefill_matmul();
+    test_metal_q8_0_prefill_matmul();
+    test_metal_pack_slot_rows_f32();
+    test_metal_store_raw_kv_batch_wrap();
+    test_metal_q8_0_decode_pair_exact();
+    test_metal_q8_0_output_nr4_exact();
+    test_metal_q8_decode_lifecycle_snapshot();
+    test_metal_add_rms_norm_weight_rows_exact();
+    test_metal_laguna_decode_ladder_ordering_exact();
+    test_metal_laguna_swa_gqa3_numeric_ab();
+    test_metal_laguna_staged_swa_exact();
+    test_metal_laguna_swa_gqa3_scope();
+    test_laguna_gqa3_decode_numeric();
+    test_metal_laguna_qk_norm_rope_pair_exact();
+    test_metal_glm_qmv_r1_exact();
+    test_metal_router_simd_finalize_exact();
+    test_metal_router_weights_batch_exact();
+}
+#endif
 #endif
 
 static void test_server_unit_group(void) {
@@ -15689,6 +15721,11 @@ static const ds4_test_entry test_entries[] = {
      "strict Laguna selector and prefill-route parser boundaries",
      test_laguna_selector_parser, false},
 #ifndef DS4_NO_GPU
+#if defined(__APPLE__)
+    {"--laguna-metal-core", "laguna-metal-core",
+     "model-independent Laguna Metal/DFlash kernel and topology regressions",
+     test_laguna_metal_core, true},
+#endif
     {"--laguna-attention-numeric", "laguna-attention-numeric",
      "Laguna decode attention against a double-precision reference",
      test_laguna_gqa3_decode_numeric, false},

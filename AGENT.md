@@ -56,8 +56,10 @@ requirements.
 
 ## Testing
 
-Use `make` for build validation and `make test` for the Laguna Metal test
-suite when an Apple Metal device and a Laguna S2.1 GGUF are available. At each
+Use `make` for build validation and `make test` for the model-independent
+Laguna Metal suite on Apple hardware. Run the model-backed gate explicitly as
+`make test-metal-laguna-integration LAGUNA_TEST_MODEL=/absolute/model.gguf`;
+it must never fall back to a default fixture or skip a missing model. At each
 major refactor boundary, verify:
 
 1. A valid Laguna S2.1 model loads through the whole-model mmap Metal path.
