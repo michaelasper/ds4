@@ -5903,11 +5903,7 @@ static void weights_bind(
         bool             optional_output) {
     memset(w, 0, sizeof(*w));
 
-    uint32_t executable_layers = DS4_N_LAYER;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA &&
-        DS4_N_LAYER > DS4_N_NEXTN_PREDICT) {
-        executable_layers = DS4_N_LAYER - DS4_N_NEXTN_PREDICT;
-    }
+    const uint32_t executable_layers = DS4_N_LAYER;
     uint32_t start = 0;
     uint32_t end = executable_layers - 1u;
     bool require_token_embd = true;
@@ -5932,16 +5928,6 @@ static void weights_bind(
     for (uint32_t il = start; il <= end; il++) {
         weights_bind_layer(&w->layer[il], m, il);
     }
-    /* GLM nextn/MTP block(s): excluded from the executable pass but bound
-     * so the drafter can run them. Only when the full model is loaded. */
-    if (!load_slice &&
-        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA &&
-        start == 0 && end == executable_layers - 1u) {
-        for (uint32_t il = executable_layers; il < DS4_N_LAYER; il++) {
-            weights_bind_layer(&w->layer[il], m, il);
-        }
-    }
-
     weights_validate_layout(w, start, end, require_token_embd, require_output);
 }
 
