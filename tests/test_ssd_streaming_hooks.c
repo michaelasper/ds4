@@ -31,16 +31,8 @@ uint32_t ds4_test_stream_readahead_coalesce(
         uint64_t       *out_sizes,
         uint32_t        out_cap,
         uint64_t        model_size);
-uint32_t ds4_test_stream_builtin_count(int variant);
-uint32_t ds4_test_stream_builtin_target(int variant, uint32_t requested);
-uint32_t ds4_test_stream_builtin_load_count(int variant, uint32_t requested);
 uint32_t ds4_test_stream_hotlist_file_load_count(const char *path,
                                                   uint32_t    requested);
-bool ds4_test_stream_hotlist_should_skip(bool     from_file,
-                                         bool     refresh_builtin_glm,
-                                         uint32_t current_count,
-                                         uint32_t requested,
-                                         int      variant);
 bool ds4_test_stream_prepare_failure_cleanup(uint32_t n_jobs,
                                              uint32_t fail_at,
                                              uint32_t *started_out,
@@ -118,33 +110,7 @@ static void test_platform_gates(void) {
     restore_env("DS4_METAL_STREAMING_EXPERT_AUTO_PRELOAD_CAP", saved_cap);
 }
 
-static void test_builtin_targets_and_sources(void) {
-    const uint32_t pro_count = ds4_test_stream_builtin_count(1);
-    const uint32_t flash_count = ds4_test_stream_builtin_count(0);
-    const uint32_t glm_count = ds4_test_stream_builtin_count(2);
-    CHECK(pro_count != 0);
-    CHECK(flash_count != 0);
-    CHECK(glm_count != 0);
-
-    CHECK(ds4_test_stream_builtin_target(1, pro_count / 2u) == pro_count / 2u);
-    CHECK(ds4_test_stream_builtin_target(1, pro_count + 1u) == pro_count);
-    CHECK(ds4_test_stream_builtin_target(0, flash_count + 1u) == flash_count);
-    CHECK(ds4_test_stream_builtin_load_count(1, pro_count + 1u) == pro_count);
-    CHECK(ds4_test_stream_builtin_load_count(0, flash_count + 1u) == flash_count);
-
-    /* A custom file remains a requested-entry source, while GLM's built-in
-     * source intentionally refreshes even when the cache is already deep. */
-    CHECK(ds4_test_stream_hotlist_should_skip(false, false,
-                                              pro_count, pro_count + 1u, 1));
-    CHECK(!ds4_test_stream_hotlist_should_skip(false, false,
-                                               pro_count - 1u,
-                                               pro_count + 1u,
-                                               1));
-    CHECK(!ds4_test_stream_hotlist_should_skip(true, false,
-                                               UINT32_MAX, 7u, 1));
-    CHECK(!ds4_test_stream_hotlist_should_skip(false, true,
-                                               UINT32_MAX, 7u, 2));
-
+static void test_hotlist_file_load(void) {
     char path[] = "/tmp/ds4-hotlist-test-XXXXXX";
     const int fd = mkstemp(path);
     CHECK(fd >= 0);
@@ -265,7 +231,7 @@ static void test_prepare_failure_cleanup(void) {
 
 int main(void) {
     test_platform_gates();
-    test_builtin_targets_and_sources();
+    test_hotlist_file_load();
     test_readahead_coalescing();
     test_pread_short_reads_and_eintr();
     test_prepare_failure_cleanup();

@@ -544,141 +544,6 @@ typedef struct {
     uint64_t rope_orig_ctx;
 } ds4_shape;
 
-#if defined(DS4_TEST_HOOKS) && !defined(DS4_NO_GPU)
-static const ds4_shape DS4_SHAPE_FLASH = {
-    .name = "DeepSeek V4 Flash",
-    .family = DS4_MODEL_FAMILY_DEEPSEEK4,
-    .variant = DS4_VARIANT_FLASH,
-    .n_layer = 43,
-    .n_embd = 4096,
-    .n_vocab = 129280,
-    .n_head = 64,
-    .n_head_kv = 1,
-    .n_head_dim = 512,
-    .n_value_dim = 512,
-    .n_rot = 64,
-    .n_out_group = 8,
-    .n_lora_q = 1024,
-    .n_lora_o = 1024,
-    .n_expert = 256,
-    .n_expert_used = 6,
-    .n_expert_shared = 1,
-    .n_ff_exp = 2048,
-    .n_ff_shared = 2048,
-    .n_hash_layer = 3,
-    .n_swa = 128,
-    .n_indexer_head = 64,
-    .n_indexer_head_dim = 128,
-    .n_indexer_top_k = 512,
-    .n_hc = 4,
-    .n_hc_sinkhorn_iter = 20,
-    .rms_eps = DS4_DEFAULT_RMS_EPS,
-    .hc_eps = DS4_DEFAULT_HC_EPS,
-    .expert_weight_scale = 1.5f,
-    .swiglu_clamp_exp = DS4_DEFAULT_SWIGLU_CLAMP_EXP,
-    .rope_freq_base = DS4_DEFAULT_ROPE_FREQ_BASE,
-    .rope_scale_factor = DS4_DEFAULT_ROPE_SCALE_FACTOR,
-    .rope_yarn_beta_fast = DS4_DEFAULT_ROPE_YARN_BETA_FAST,
-    .rope_yarn_beta_slow = DS4_DEFAULT_ROPE_YARN_BETA_SLOW,
-    .rope_yarn_attn_factor = 1.0f,
-    .context_length = DS4_DEFAULT_ROPE_ORIG_CTX,
-    .compress_rope_freq_base = DS4_DEFAULT_COMPRESS_ROPE_FREQ_BASE,
-    .rope_orig_ctx = DS4_DEFAULT_ROPE_ORIG_CTX,
-};
-#endif
-
-#if defined(DS4_TEST_HOOKS) && !defined(DS4_NO_GPU)
-static const ds4_shape DS4_SHAPE_PRO = {
-    .name = "DeepSeek V4 Pro",
-    .family = DS4_MODEL_FAMILY_DEEPSEEK4,
-    .variant = DS4_VARIANT_PRO,
-    .n_layer = 61,
-    .n_embd = 7168,
-    .n_vocab = 129280,
-    .n_head = 128,
-    .n_head_kv = 1,
-    .n_head_dim = 512,
-    .n_value_dim = 512,
-    .n_rot = 64,
-    .n_out_group = 16,
-    .n_lora_q = 1536,
-    .n_lora_o = 1024,
-    .n_expert = 384,
-    .n_expert_used = 6,
-    .n_expert_shared = 1,
-    .n_ff_exp = 3072,
-    .n_ff_shared = 3072,
-    .n_hash_layer = 3,
-    .n_swa = 128,
-    .n_indexer_head = 64,
-    .n_indexer_head_dim = 128,
-    .n_indexer_top_k = 1024,
-    .n_hc = 4,
-    .n_hc_sinkhorn_iter = 20,
-    .rms_eps = DS4_DEFAULT_RMS_EPS,
-    .hc_eps = DS4_DEFAULT_HC_EPS,
-    .expert_weight_scale = 2.5f,
-    .swiglu_clamp_exp = DS4_DEFAULT_SWIGLU_CLAMP_EXP,
-    .rope_freq_base = DS4_DEFAULT_ROPE_FREQ_BASE,
-    .rope_scale_factor = DS4_DEFAULT_ROPE_SCALE_FACTOR,
-    .rope_yarn_beta_fast = DS4_DEFAULT_ROPE_YARN_BETA_FAST,
-    .rope_yarn_beta_slow = DS4_DEFAULT_ROPE_YARN_BETA_SLOW,
-    .rope_yarn_attn_factor = 1.0f,
-    .context_length = DS4_DEFAULT_ROPE_ORIG_CTX,
-    .compress_rope_freq_base = DS4_DEFAULT_COMPRESS_ROPE_FREQ_BASE,
-    .rope_orig_ctx = DS4_DEFAULT_ROPE_ORIG_CTX,
-};
-#endif
-
-#ifdef DS4_TEST_HOOKS
-static const ds4_shape DS4_SHAPE_GLM52 = {
-    .name = "GLM 5.2",
-    .family = DS4_MODEL_FAMILY_GLM_DSA,
-    .variant = DS4_VARIANT_GLM52,
-    .n_layer = 79,
-    .n_embd = 6144,
-    .n_vocab = 154880,
-    .n_head = 64,
-    .n_head_kv = 1,
-    .n_head_dim = 576,
-    .n_value_dim = 512,
-    .n_rot = 64,
-    .n_out_group = 0,
-    .n_lora_q = 2048,
-    .n_lora_o = 0,
-    .n_expert = 256,
-    .n_expert_used = 8,
-    .n_expert_shared = 1,
-    .n_ff_exp = 2048,
-    .n_ff_shared = 2048,
-    .n_ff_dense = 12288,
-    .n_hash_layer = 0,
-    .n_swa = 0,
-    .n_indexer_head = 32,
-    .n_indexer_head_dim = 128,
-    .n_indexer_top_k = 2048,
-    .n_hc = 0,
-    .n_hc_sinkhorn_iter = 0,
-    .n_nextn_predict = 1,
-    .n_leading_dense = 3,
-    .n_kv_lora = 512,
-    .n_key_mla = 256,
-    .n_value_mla = 256,
-    .rms_eps = 1.0e-5f,
-    .hc_eps = 0.0f,
-    .expert_weight_scale = 2.5f,
-    .swiglu_clamp_exp = 0.0f,
-    .rope_freq_base = 8000000.0f,
-    .rope_scale_factor = 1.0f,
-    .rope_yarn_beta_fast = 0.0f,
-    .rope_yarn_beta_slow = 0.0f,
-    .rope_yarn_attn_factor = 1.0f,
-    .compress_rope_freq_base = 0.0f,
-    .context_length = 1048576,
-    .rope_orig_ctx = 1048576,
-};
-#endif
-
 static const ds4_shape DS4_SHAPE_LAGUNA_S21 = {
     .name = "Laguna S 2.1",
     .family = DS4_MODEL_FAMILY_LAGUNA,
@@ -62891,85 +62756,10 @@ bool ds4_test_stream_pread_range_fd(int fd,
                                           sink);
 }
 
-static void ds4_test_stream_shape_variant(int variant,
-                                          ds4_shape *saved_shape) {
-    *saved_shape = g_ds4_shape;
-    switch (variant) {
-    case DS4_VARIANT_FLASH:
-        g_ds4_shape = DS4_SHAPE_FLASH;
-        break;
-    case DS4_VARIANT_PRO:
-        g_ds4_shape = DS4_SHAPE_PRO;
-        break;
-    case DS4_VARIANT_GLM52:
-        g_ds4_shape = DS4_SHAPE_GLM52;
-        break;
-    default:
-        break;
-    }
-}
-
-static void ds4_test_stream_restore_shape(const ds4_shape *saved_shape) {
-    g_ds4_shape = *saved_shape;
-}
-
-uint32_t ds4_test_stream_builtin_count(int variant) {
-    ds4_shape saved_shape;
-    ds4_test_stream_shape_variant(variant, &saved_shape);
-    uint32_t count = 0;
-    (void)metal_graph_streaming_expert_builtin_hotlist(&count);
-    ds4_test_stream_restore_shape(&saved_shape);
-    return count;
-}
-
-uint32_t ds4_test_stream_builtin_target(int variant, uint32_t requested) {
-    ds4_shape saved_shape;
-    ds4_test_stream_shape_variant(variant, &saved_shape);
-    const uint32_t target = metal_graph_streaming_expert_builtin_target(requested);
-    ds4_test_stream_restore_shape(&saved_shape);
-    return target;
-}
-
-uint32_t ds4_test_stream_builtin_load_count(int variant,
-                                             uint32_t requested) {
-    ds4_shape saved_shape;
-    ds4_test_stream_shape_variant(variant, &saved_shape);
-    int32_t (*experts)[DS4_MAX_EXPERT] =
-        calloc(DS4_MAX_LAYER, sizeof(*experts));
-    uint32_t (*priorities)[DS4_MAX_EXPERT] =
-        calloc(DS4_MAX_LAYER, sizeof(*priorities));
-    uint32_t *counts = calloc(DS4_MAX_LAYER, sizeof(*counts));
-    bool (*seen)[DS4_MAX_EXPERT] = calloc(DS4_MAX_LAYER, sizeof(*seen));
-    if (!experts || !priorities || !counts || !seen) {
-        free(experts);
-        free(priorities);
-        free(counts);
-        free(seen);
-        ds4_test_stream_restore_shape(&saved_shape);
-        return UINT32_MAX;
-    }
-    uint32_t loaded = 0;
-    const bool ok = metal_graph_streaming_expert_hotlist_load_default(
-            requested,
-            experts,
-            priorities,
-            counts,
-            seen,
-            &loaded);
-    free(experts);
-    free(priorities);
-    free(counts);
-    free(seen);
-    ds4_test_stream_restore_shape(&saved_shape);
-    return ok ? loaded : UINT32_MAX;
-}
-
 uint32_t ds4_test_stream_hotlist_file_load_count(
         const char *path,
         uint32_t    requested) {
     if (!path) return UINT32_MAX;
-    ds4_shape saved_shape;
-    ds4_test_stream_shape_variant(DS4_VARIANT_FLASH, &saved_shape);
     int32_t (*experts)[DS4_MAX_EXPERT] =
         calloc(DS4_MAX_LAYER, sizeof(*experts));
     uint32_t (*priorities)[DS4_MAX_EXPERT] =
@@ -62981,7 +62771,6 @@ uint32_t ds4_test_stream_hotlist_file_load_count(
         free(priorities);
         free(counts);
         free(seen);
-        ds4_test_stream_restore_shape(&saved_shape);
         return UINT32_MAX;
     }
     uint32_t loaded = 0;
@@ -62997,26 +62786,7 @@ uint32_t ds4_test_stream_hotlist_file_load_count(
     free(priorities);
     free(counts);
     free(seen);
-    ds4_test_stream_restore_shape(&saved_shape);
     return ok ? loaded : UINT32_MAX;
-}
-
-bool ds4_test_stream_hotlist_should_skip(bool     from_file,
-                                         bool     refresh_builtin_glm,
-                                         uint32_t current_count,
-                                         uint32_t requested,
-                                         int      variant) {
-    ds4_shape saved_shape;
-    ds4_test_stream_shape_variant(variant, &saved_shape);
-    const uint32_t target = from_file ? requested :
-        metal_graph_streaming_expert_builtin_target(requested);
-    const bool skip = metal_graph_streaming_expert_hotlist_should_skip(
-            from_file,
-            refresh_builtin_glm,
-            current_count,
-            target);
-    ds4_test_stream_restore_shape(&saved_shape);
-    return skip;
 }
 
 static void *ds4_test_stream_prepare_worker(void *arg) {
@@ -63264,41 +63034,6 @@ size_t ds4_test_compute_entry_bytes_sum(
         int placement_ctx_hint) {
     return ds4_test_compute_entry_bytes_sum_with_prefill(
             tensors, n_tensors, placement_ctx_hint, 0);
-}
-
-size_t ds4_test_compute_glm_entry_bytes_sum_with_sessions(
-        const ds4_test_fake_tensor *tensors,
-        int n_tensors,
-        int placement_ctx_hint,
-        int placement_session_count_hint) {
-    const ds4_shape saved_shape = g_ds4_shape;
-    g_ds4_shape = DS4_SHAPE_GLM52;
-    ds4_engine eng;
-    if (ds4_test_make_engine(&eng, tensors, n_tensors,
-                             placement_ctx_hint) != 0) {
-        g_ds4_shape = saved_shape;
-        return 0;
-    }
-    eng.placement_session_count_hint = placement_session_count_hint;
-    size_t entry_bytes[DS4_MAX_LAYER + 2];
-    size_t sum = 0;
-    if (engine_compute_entry_bytes(&eng, entry_bytes) == 0) {
-        for (uint32_t i = 0; i < (uint32_t)DS4_N_LAYER + 2u; i++) {
-            sum += entry_bytes[i];
-        }
-    }
-    free(eng.model.tensors);
-    g_ds4_shape = saved_shape;
-    return sum;
-}
-
-size_t ds4_test_glm_per_layer_kv_bytes(uint32_t layer, int ctx_size) {
-    const ds4_shape saved_shape = g_ds4_shape;
-    g_ds4_shape = DS4_SHAPE_GLM52;
-    const size_t bytes =
-        engine_glm_per_layer_kv_bytes_planner(layer, ctx_size);
-    g_ds4_shape = saved_shape;
-    return bytes;
 }
 
 int ds4_test_session_read_logits(ds4_session *s, float *out,

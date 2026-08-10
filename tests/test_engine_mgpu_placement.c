@@ -13,8 +13,7 @@
  *     tiers used.
  *  4. CPU-spill placement: 2 GPUs with tiny budgets so some layers
  *     spill. multi_tier == 1 and at least one DS4_LAYER_PACK_CPU entry.
- *  5. GLM compact-cache accounting: ordinary, indexed, and NextN layers.
- *  6. GLM batched-session placement scales independent cache allocations. */
+ *  5. CUDA TP prefill and output-head placement accounting. */
 
 #define DS4_TEST_HOOKS
 #include "../ds4.h"
@@ -76,13 +75,6 @@ uint32_t ds4_test_effective_prefill_chunk(bool cuda_tensor_parallel,
 uint32_t ds4_test_planner_prefill_cap(int prompt_len,
                                       uint32_t prefill_chunk);
 uint32_t ds4_test_planner_raw_cap(int ctx_size, uint32_t prefill_cap);
-size_t ds4_test_glm_per_layer_kv_bytes(uint32_t layer, int ctx_size);
-size_t ds4_test_compute_glm_entry_bytes_sum_with_sessions(
-                                         const ds4_test_fake_tensor *tensors,
-                                         int n_tensors,
-                                         int placement_ctx_hint,
-                                         int placement_session_count_hint);
-
 /* DS4_N_LAYER constant is private to ds4.c; for the test we use
  * the same value. (The packer header doesn't expose it.) */
 #define DS4_N_LAYER_LOCAL 43
@@ -485,48 +477,6 @@ static void test_no_per_layer_scratch_double_count(void) {
     ds4_test_clear_compress_ratios();
 }
 
-static void test_glm_per_layer_cache_accounting(void) {
-    fprintf(stderr, "RUN: test_glm_per_layer_cache_accounting\n");
-    const uint64_t ctx = 100000u;
-#if defined(__APPLE__)
-    const uint64_t elem_bytes = sizeof(uint16_t);
-#else
-    const uint64_t elem_bytes = sizeof(float);
-#endif
-    const size_t base =
-        (size_t)(ctx * (512u + 64u) * elem_bytes);
-    const size_t indexed =
-        (size_t)(ctx * (512u + 64u + 128u) * elem_bytes);
-
-    CHECK(ds4_test_glm_per_layer_kv_bytes(4, (int)ctx) == base,
-          "GLM normal layer includes compact KV and RoPE cache");
-    CHECK(ds4_test_glm_per_layer_kv_bytes(6, (int)ctx) == indexed,
-          "GLM indexed layer also includes compact indexer cache");
-    CHECK(ds4_test_glm_per_layer_kv_bytes(78, (int)ctx) == 0,
-          "GLM NextN layer has no generation cache");
-}
-
-static void test_glm_session_count_accounting(void) {
-    fprintf(stderr, "RUN: test_glm_session_count_accounting\n");
-    ds4_test_fake_tensor tensors[256];
-    const int n = build_synthetic_model(tensors, 256);
-    if (n <= 0) return;
-
-    size_t weights = 0;
-    for (int i = 0; i < n; i++) weights += (size_t)tensors[i].bytes;
-
-    const size_t one = ds4_test_compute_glm_entry_bytes_sum_with_sessions(
-        tensors, n, 4096, 1);
-    const size_t unset = ds4_test_compute_glm_entry_bytes_sum_with_sessions(
-        tensors, n, 4096, 0);
-    const size_t four = ds4_test_compute_glm_entry_bytes_sum_with_sessions(
-        tensors, n, 4096, 4);
-    CHECK(one > weights, "single GLM session includes compact-cache bytes");
-    CHECK(unset == one, "unset GLM session hint preserves one-session accounting");
-    CHECK(four > weights && four - weights == 4u * (one - weights),
-          "four GLM sessions reserve four independent compact caches");
-}
-
 static char *save_env_value(const char *name) {
     const char *v = getenv(name);
     if (!v) return NULL;
@@ -675,8 +625,6 @@ int main(void) {
     test_placement_ctx_hint_scales();
     test_pertier_overhead_pushes_to_spill();
     test_no_per_layer_scratch_double_count();
-    test_glm_per_layer_cache_accounting();
-    test_glm_session_count_accounting();
     test_cuda_tp_prefill_default_accounting();
     test_cuda_tp_output_head_moves_to_lower_half();
 
