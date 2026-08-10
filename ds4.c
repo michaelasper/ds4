@@ -21627,8 +21627,19 @@ static uint32_t metal_graph_streaming_expert_preload_count(
          * thousands of preads into shared Metal buffers and trip the system
          * watchdog before decode begins. ROCm GLM52 uses indexed batch prefill
          * by default, which already populates the cache; explicit CLI preload
-         * counts and auto-preload env caps bypass that default. */
+         * counts and auto-preload env caps bypass that default.
+         *
+         * The Metal default depth is 8192: the bundled hotlists are
+         * hit-sorted, so a deeper seed covers more of the first-token expert
+         * working set and drops cold miss-preads. The result is still clamped
+         * to the cache byte budget below, and
+         * DS4_METAL_STREAMING_EXPERT_AUTO_PRELOAD_CAP overrides the depth as
+         * a diagnostic. */
+#ifdef DS4_ROCM_BUILD
         uint32_t cap = 4096;
+#else
+        uint32_t cap = 8192;
+#endif
         if (env && env[0]) {
             char *end = NULL;
             unsigned long v = strtoul(env, &end, 10);
