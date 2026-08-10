@@ -1,144 +1,113 @@
 # Contributing
 
-DwarfStar4 changes should be tested against the failure mode they can realistically
-affect. The project has two regression tracks: correctness and speed. Please
-include the commands you ran, the machine/backend, the model quant, and any
-notable failures in the PR or commit notes.
+This fork is intentionally specialized for Laguna S2.1 inference on Apple
+Metal. Changes should make that product smaller, clearer, more correct, or
+faster. CPU inference, CUDA, ROCm, DeepSeek, GLM, distributed execution,
+tensor parallelism, multi-GPU placement, SSD expert streaming, MTP, and DSpark
+are outside the supported boundary.
 
-Do not send PRs affecting one or more inference backends without checking if the
-resulting code is still correct and fast. The only acceptable regression speed
-is when an important correctness bug is fixed and it requires some speed penalty.
+Include the commands you ran, the exact commit, macOS and hardware, model
+filename and SHA-256, and any non-default selectors in a pull request or commit
+handoff. Do not hide failed or skipped gates.
 
-## Correctness Regression Tests
+## Build and model-independent tests
 
-Build the default backend first:
+Start with a clean Apple-silicon checkout:
 
-```sh
+```zsh
+git diff --check
 make clean
-make
+make -j8 test
 ```
 
-The C test runner is `ds4_test`. Running it without arguments is equivalent to
-`--all`:
+`make test` is the default model-independent Laguna/Metal suite. Useful focused
+checks include:
 
-```sh
-make test
-```
-
-Useful narrower checks:
-
-```sh
+```zsh
+make check-metal-sources
+make test-laguna-cli-options
+./ds4_test --laguna-architecture
+./ds4_test --laguna-selector-parser
+./ds4_test --laguna-metal-core
 ./ds4_test --server
-./ds4_test --logprob-vectors
-./ds4_test --long-context
-./ds4_test --tool-call-quality
-./ds4_test --metal-kernels
+./ds4-eval --self-test-extractors
 ```
 
-What they cover:
+Add or tighten a focused test whenever a bug could otherwise return silently to
+an old route. An optimization test must prove both numerical behavior and that
+the intended production path actually executed. Explicit selectors should fail
+before graph, command-buffer, session, or KV mutation when unavailable or
+malformed.
 
-- `--server`: request parsing, chat rendering, streaming, tool-call parsing,
-  thinking controls, KV disk-cache bookkeeping, and other server-side logic.
-  This is the best quick check for API and prompt-rendering changes.
-- `--logprob-vectors`: compares local token bytes and top-logprob slices against
-  official DeepSeek V4 Flash continuation vectors. This catches tokenizer,
-  template, attention, and logits regressions.
-- `--long-context`: runs a long-context story fact-recall regression from
-  `tests/long_context_story_prompt.txt`. The model must retrieve spelled-out
-  person-number assignments from a long prose prompt and return `Name=number`
-  lines that the test parses.
-- `--tool-call-quality`: exercises actual model behavior for DSML tool-call
-  emission in both fast and exact paths.
-- `--metal-kernels`: isolated Metal kernel numeric checks.
+## Model-backed checks
 
-The runner defaults to `ds4flash.gguf`. Override paths when needed:
+Use the Laguna S2.1 GGUF affected by the change:
 
-```sh
-DS4_TEST_MODEL=/path/to/model.gguf ./ds4_test --logprob-vectors
-DS4_TEST_VECTOR_FILE=/path/to/official.vec ./ds4_test --logprob-vectors
-DS4_TEST_LONG_PROMPT=/path/to/prompt.txt ./ds4_test --long-context
+```zsh
+export LAGUNA_TEST_MODEL=/absolute/path/to/laguna-s2.1.gguf
+shasum -a 256 "$LAGUNA_TEST_MODEL"
+make test-metal-laguna-integration LAGUNA_TEST_MODEL="$LAGUNA_TEST_MODEL"
 ```
 
-For CUDA-specific changes, test on a CUDA machine:
+For graph, kernel, tokenizer, template, or sampling changes, also run a fixed
+greedy prompt through the raw CLI and session/server paths. Exercise both a
+single-token decode and production prefill. Record route diagnostics and the
+declared parity result.
 
-```sh
-make
-make cuda-regression
-```
+For DFlash changes, compare enabled and disabled runs with a compatible support
+GGUF. Record accepted tokens, fallbacks, verifier failures, output parity, and
+throughput.
 
-For CPU portability, at least verify that the CPU target still builds:
+## Quality checks
 
-```sh
-make cpu
-```
+Build the Metal quality scorer and use the Laguna fixture:
 
-The CPU backend is a reference/debug path, not the production performance
-target. Remember that executing the CPU path on Metal can crash the system
-because of a kernel bug in macOS.
+```zsh
+make gguf-tools/quality-testing/score_official
 
-## Quality Checks For Quantization Changes
-
-For GGUF or quantization work, use the official-continuation scorer in
-`gguf-tools/quality-testing`. The test compares how much probability a local
-GGUF assigns to official DeepSeek V4 Flash continuations, token by token.
-
-Build the scorer:
-
-```sh
-make -C gguf-tools quality-score
-```
-
-Then score old and new GGUFs against the same manifest and compare:
-
-```sh
 gguf-tools/quality-testing/score_official OLD.gguf \
-  gguf-tools/quality-testing/data/manifest.tsv /tmp/old.tsv 4096
+  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+  /tmp/old.tsv 4096 --quality
 
 gguf-tools/quality-testing/score_official NEW.gguf \
-  gguf-tools/quality-testing/data/manifest.tsv /tmp/new.tsv 4096
+  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+  /tmp/new.tsv 4096 --quality
 
 python3 gguf-tools/quality-testing/compare_scores.py /tmp/old.tsv /tmp/new.tsv
 ```
 
-Lower `avg_nll` is better. See
-`gguf-tools/quality-testing/README.md` for collecting or refreshing official
-continuations.
+Lower average NLL is better, but inspect first-token, top-logprob, and ordering
+metrics too. Compare the same model checkpoint, manifest, machine, and options.
 
-## Speed Regression Tests
+## Performance checks
 
-Use `ds4-bench` for throughput regressions. It reports instantaneous prefill and
-generation speed at context frontiers, not one whole-run average. Prefill is
-incremental: each row measures only the newly processed suffix since the
-previous frontier.
+Use `ds4-bench` for exploratory throughput work:
 
-Default linear sweep:
-
-```sh
+```zsh
 ./ds4-bench \
-  -m ds4flash.gguf \
+  --metal \
+  -m "$LAGUNA_TEST_MODEL" \
   --prompt-file speed-bench/promessi_sposi.txt \
   --ctx-start 2048 \
   --ctx-max 65536 \
   --step-incr 2048 \
   --gen-tokens 128 \
-  --csv /tmp/ds4-speed.csv
+  --csv /tmp/laguna-speed.csv
 ```
 
-Use the same machine, backend, model file, context sweep, power/thermal state,
-and background load when comparing two commits. For backend work, run at least
-one before/after CSV and compare both `prefill_tps` and `gen_tps`. Generation is
-greedy and skips EOS so each frontier gets the same number of generated tokens.
+Compare prefill and steady decode separately on the same machine, model,
+context frontiers, power/thermal state, and background load. Preserve raw CSVs
+and commands. Performance claims or selector promotion require a committed,
+reviewed protocol; use `BENCHMARK.md` when it covers the experiment rather than
+inventing an ad-hoc gate.
 
-To generate a graph for a CSV:
+## Review expectations
 
-```sh
-python3 speed-bench/plot_speed.py /tmp/ds4-speed.csv --title "Machine t/s"
-```
-
-## Reporting sessions bugs
-
-For debugging a failing generation, keep the trace:
-
-```sh
-./ds4-server --trace /tmp/ds4-trace.txt ...
-```
+- Keep default-off experiments isolated and fail closed when requested.
+- Do not add compatibility abstractions for unsupported models or backends.
+- Prefer small commits that delete one obsolete surface or establish one clear
+  Laguna boundary.
+- Preserve attribution and licenses when deleting inherited implementation
+  files.
+- Run the full default suite after integration, not only a focused test.
+- Follow `QA_BEFORE_RELEASES.md` before tagging or publishing artifacts.
