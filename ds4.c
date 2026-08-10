@@ -49863,7 +49863,13 @@ typedef struct {
     ds4_gpu_tensor *argmax;
     bool gpu_argmax_enabled;
     int32_t gpu_argmax_result;
+    bool dense_q8_fusion_decision_valid;
+    bool dense_q8_fusion_enabled;
 #ifdef __APPLE__
+    /* Ordinary-prefill batch selector is frozen on the first graph forward;
+     * later env changes cannot switch arithmetic halfway through a graph. */
+    bool dense_q8_batch_decision_valid;
+    bool dense_q8_batch_enabled;
     ds4_gpu_laguna_q8_lmhead_screen *lmhead_screen;
     bool q8_lmhead_screen_dispatched;
 #endif
@@ -50497,6 +50503,7 @@ static bool laguna_dense_q8_gate_up_swiglu_preflight(
     return true;
 }
 
+#ifdef __APPLE__
 /*
  * Opt-in batched sibling of the fused decode route for ordinary prefill.
  * The batched kernel computes both dense Q8 projections for the whole row
@@ -50552,6 +50559,7 @@ static bool laguna_dense_q8_gate_up_swiglu_batch_preflight(
     return false;
 #endif
 }
+#endif /* __APPLE__ */
 
 static laguna_dense_q8_gate_up_swiglu_counters
     laguna_dense_q8_gate_up_swiglu_completed;
@@ -51505,16 +51513,32 @@ static bool laguna_graph_forward_token(
         token >= (int)DS4_N_VOCAB || pos >= g->ctx_size) {
         return false;
     }
-    /* A new graph call owns a new evidence unit.  This also scrubs any
-     * uncommitted trace state left by a failed caller while remaining a
-     * no-op on the timed trace-off path when the slot is already empty. */
-    laguna_dense_q8_gate_up_swiglu_pending_clear(g);
 
     bool dense_q8_gate_up_fusion = false;
-    if (!laguna_dense_q8_gate_up_swiglu_preflight(
-                model, weights, &dense_q8_gate_up_fusion)) {
-        return false;
+    if (!g->dense_q8_fusion_decision_valid) {
+        if (!laguna_dense_q8_gate_up_swiglu_preflight(
+                    model, weights, &dense_q8_gate_up_fusion)) {
+            return false;
+        }
+        g->dense_q8_fusion_enabled = dense_q8_gate_up_fusion;
+        g->dense_q8_fusion_decision_valid = true;
+    } else {
+        dense_q8_gate_up_fusion = g->dense_q8_fusion_enabled;
     }
+#ifdef __APPLE__
+    /* Freeze the ordinary-prefill selector at the same graph lifecycle even
+     * when this first call is one-token decode.  A later env change must not
+     * create a cross-feature epoch where decode and prefill disagree. */
+    if (!g->dense_q8_batch_decision_valid) {
+        bool dense_q8_gate_up_batch = false;
+        if (!laguna_dense_q8_gate_up_swiglu_batch_preflight(
+                    model, weights, &dense_q8_gate_up_batch)) {
+            return false;
+        }
+        g->dense_q8_batch_enabled = dense_q8_gate_up_batch;
+        g->dense_q8_batch_decision_valid = true;
+    }
+#endif
     const int dense_q8_route =
         ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
             dense_q8_gate_up_fusion ? 1 : 0, 1, 0);
@@ -51522,7 +51546,6 @@ static bool laguna_graph_forward_token(
 #ifdef __APPLE__
     const bool router_simd_topk_trace =
         laguna_metal_router_simd_topk_trace_enabled();
-    laguna_metal_router_simd_topk_trace_reset();
     bool decode_residual_norm_completion_waited = false;
     const int decode_residual_norm_mode =
         laguna_metal_decode_residual_norm_mode();
@@ -51555,6 +51578,14 @@ static bool laguna_graph_forward_token(
         return false;
     }
 #endif /* __APPLE__ decode ladder parsing */
+
+    /* A new graph call owns a new evidence unit.  Keep this graph-local
+     * cleanup after every enabled selector preflight so a rejected request
+     * cannot mutate pending state before failing closed. */
+    laguna_dense_q8_gate_up_swiglu_pending_clear(g);
+#ifdef __APPLE__
+    laguna_metal_router_simd_topk_trace_reset();
+#endif
 
 #ifdef __APPLE__
     const bool q8_lmhead_screen =
@@ -52327,22 +52358,40 @@ static bool laguna_graph_forward_batch(
         n_tokens > g->prefill_cap || pos0 > g->ctx_size - n_tokens) {
         return false;
     }
-    laguna_dense_q8_gate_up_swiglu_pending_clear(g);
 #ifdef __APPLE__
     const bool router_simd_topk_trace =
         laguna_metal_router_simd_topk_trace_enabled();
-    laguna_metal_router_simd_topk_trace_reset();
 #endif
     bool dense_q8_gate_up_fusion = false;
-    if (!laguna_dense_q8_gate_up_swiglu_preflight(
-                model, weights, &dense_q8_gate_up_fusion)) {
-        return false;
+    if (!g->dense_q8_fusion_decision_valid) {
+        if (!laguna_dense_q8_gate_up_swiglu_preflight(
+                    model, weights, &dense_q8_gate_up_fusion)) {
+            return false;
+        }
+        g->dense_q8_fusion_enabled = dense_q8_gate_up_fusion;
+        g->dense_q8_fusion_decision_valid = true;
+    } else {
+        dense_q8_gate_up_fusion = g->dense_q8_fusion_enabled;
     }
+#ifdef __APPLE__
     bool dense_q8_gate_up_batch = false;
-    if (!laguna_dense_q8_gate_up_swiglu_batch_preflight(
-                model, weights, &dense_q8_gate_up_batch)) {
-        return false;
+    if (!g->dense_q8_batch_decision_valid) {
+        if (!laguna_dense_q8_gate_up_swiglu_batch_preflight(
+                    model, weights, &dense_q8_gate_up_batch)) {
+            return false;
+        }
+        g->dense_q8_batch_enabled = dense_q8_gate_up_batch;
+        g->dense_q8_batch_decision_valid = true;
+    } else {
+        dense_q8_gate_up_batch = g->dense_q8_batch_enabled;
     }
+#endif
+    /* Freeze and validate all enabled route selectors before touching graph
+     * scratch/pending state or beginning any GPU work. */
+    laguna_dense_q8_gate_up_swiglu_pending_clear(g);
+#ifdef __APPLE__
+    laguna_metal_router_simd_topk_trace_reset();
+#endif
     if (row_argmax_out &&
         (n_tokens > DS4_DFLASH_BLOCK_SIZE ||
          !laguna_graph_ensure_spec_scratch(g))) {
@@ -52424,6 +52473,17 @@ static bool laguna_graph_forward_batch(
             dense_q8_gate_up_fusion ? 1 : 0,
             0,
             exact_q8_rows ? 1 : 0);
+#ifdef __APPLE__
+    const int dense_q8_prefill_route =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+            dense_q8_gate_up_batch ? 1 : 0,
+            exact_q8_rows ? 1 : 0,
+            n_tokens,
+            ds4_gpu_laguna_q8_mv_ext_max_tokens());
+#else
+    const int dense_q8_prefill_route =
+        DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK;
+#endif
     /* DFlash feature capture and GPU draft-token verification have their own
      * cache/injection sequencing. Keep them on the established split path;
      * only an ordinary, host-token prefill may opt into the paired dispatch. */
@@ -52637,7 +52697,8 @@ static bool laguna_graph_forward_batch(
              * fused decode route stays one-token; ordinary prefill may opt
              * into the batched fused gate/up+SwiGLU pass, which reads the
              * normed rows once and never materializes gate/up. */
-            if (dense_q8_gate_up_batch && !exact_q8_rows) {
+            if (dense_q8_prefill_route ==
+                    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED) {
 #ifdef __APPLE__
                 failed_stage = "dense FFN batched gate/up+SwiGLU";
                 ok = ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(

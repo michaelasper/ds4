@@ -2,8 +2,63 @@
 #define DS4_SERVER_TEST_NO_MAIN
 #include "../ds4_server.c"
 #include "../ds4_laguna_ladder.h"
-#ifndef DS4_NO_GPU
 #include "../ds4_gpu.h"
+
+/* These selectors are backend-independent, so keep their strict parser and
+ * route-boundary checks runnable in the default CPU/no-GPU test binary too. */
+static void test_laguna_selector_parser(void) {
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse(NULL) == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("  2 \t") == 2u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("16") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("128") == 128u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("129") == 128u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("1") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("-1") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("12x") == 16u);
+    TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse(
+                    "18446744073709551616") == 16u);
+
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse(NULL) == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse(" 32 ") == 32u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("16") == 32u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("96") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("4096") == 4096u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("4097") == 4096u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("-1") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse("12x") == 96u);
+    TEST_ASSERT(ds4_gpu_laguna_moe_min_tokens_parse(
+                    "18446744073709551616") == 96u);
+
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode(NULL) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("0") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("1") == 1);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("01") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("true") < 0);
+
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 1, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 2, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 16, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 17, 16) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 128, 128) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+                    1, 0, 129, 128) ==
+                DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED);
+}
+
+#ifndef DS4_NO_GPU
 #include <math.h>
 
 bool ds4_test_dspark_cache_window_crop(void);
@@ -5739,6 +5794,7 @@ static void test_laguna_gqa3_decode_numeric(void) {
 #endif
 }
 
+#if defined(__APPLE__)
 /*
  * DS4_METAL_LAGUNA_DIRECT_KV_PREFILL A/B.  The direct non-SWA path converts
  * the chunk straight into the cache slot and folds the commit away, so heads
@@ -5788,6 +5844,12 @@ static void test_laguna_prefill_direct_kv_ab_case(
         } else {
             unsetenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL");
         }
+        /* The production selector is lifecycle-snapshotted at Metal init;
+         * restart that lifecycle for the off/on A/B instead of hot-mutating
+         * the environment between dispatches. */
+        ds4_gpu_cleanup();
+        TEST_ASSERT(ds4_gpu_init() != 0);
+        ds4_gpu_test_laguna_route_counters_reset();
         ds4_gpu_tensor *heads =
             ds4_gpu_tensor_alloc(q_values * sizeof(float));
         ds4_gpu_tensor *key_cache =
@@ -5890,6 +5952,18 @@ static void test_laguna_prefill_direct_kv_ab_case(
                        (size_t)cache_values * sizeof(uint16_t)) == 0);
     TEST_ASSERT(memcmp(value_runs[0], value_runs[1],
                        (size_t)cache_values * sizeof(uint16_t)) == 0);
+    {
+        uint64_t direct_count = 0;
+        uint64_t wrap_count = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_route_counters(
+                        &direct_count, &wrap_count, NULL, NULL) != 0);
+        TEST_ASSERT(direct_count == 3u);
+        TEST_ASSERT(wrap_count == 1u);
+        fprintf(stderr,
+                "ds4-test: Laguna KV route counters direct=%llu wrap=%llu\n",
+                (unsigned long long)direct_count,
+                (unsigned long long)wrap_count);
+    }
     fprintf(stderr,
             "ds4-test: Laguna direct KV prefill A/B bit-exact "
             "(heads=%u kv=%u)\n",
@@ -5908,15 +5982,13 @@ static void test_laguna_prefill_direct_kv_ab_case(
 }
 
 static void test_laguna_prefill_direct_kv_ab(void) {
-#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
     TEST_ASSERT(ds4_gpu_init() != 0);
-#endif
     /* Plain GQA (ratio 4) and grouped GQA3 (ratio 3) staged-slot views. */
     test_laguna_prefill_direct_kv_ab_case(8u, 2u);
     test_laguna_prefill_direct_kv_ab_case(9u, 3u);
-#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    /* Production global layers use six query heads per KV head. */
+    test_laguna_prefill_direct_kv_ab_case(12u, 2u);
     ds4_gpu_cleanup();
-#endif
 }
 
 /*
@@ -5972,16 +6044,20 @@ static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok) {
     TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host,
                                      x_values * sizeof(float)) != 0);
     TEST_ASSERT(ds4_gpu_set_model_map(model, model_size) != 0);
-    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
-                    mid, model, model_size, gate_offset, up_offset,
-                    in_dim, out_dim, x, n_tok) != 0);
-    TEST_ASSERT(ds4_gpu_tensor_read(mid, 0, mid_host,
-                                    mid_values * sizeof(float)) != 0);
+    const uint32_t mv_ext_ceiling = ds4_gpu_laguna_q8_mv_ext_max_tokens();
+    const int expected_route =
+        ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+            1, 0, n_tok, mv_ext_ceiling);
+    TEST_ASSERT(expected_route ==
+                (n_tok <= mv_ext_ceiling
+                     ? DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK
+                     : DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED));
+    ds4_gpu_test_laguna_route_counters_reset();
 
-    /* The caller pins quality mode, which keeps the stock prefill matmul on
-     * kernel_mul_mm_q8_0_f32 for these row counts, and the fused kernel
-     * mirrors that kernel tile-for-tile: the two routes must agree bit for
-     * bit. */
+    /* The caller pins quality mode.  For rows at or below the lifecycle
+     * ceiling this deliberately exercises stock mul_mv_ext and never calls
+     * the fused sibling; only rows strictly above the ceiling may compare
+     * the fused arithmetic against the stock/reference result. */
     TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
                     gate, model, model_size, gate_offset,
                     in_dim, out_dim, x, n_tok) != 0);
@@ -5993,6 +6069,33 @@ static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok) {
                     (uint32_t)mid_values, 0.0f, 1.0f) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(mid_stock, 0, mid_stock_host,
                                     mid_values * sizeof(float)) != 0);
+    if (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED) {
+        TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+                        mid, model, model_size, gate_offset, up_offset,
+                        in_dim, out_dim, x, n_tok) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(mid, 0, mid_host,
+                                        mid_values * sizeof(float)) != 0);
+    } else {
+        /* Keep the reference check below meaningful for stock-only boundary
+         * rows without dispatching an ineligible fused kernel. */
+        memcpy(mid_host, mid_stock_host,
+               (size_t)mid_values * sizeof(float));
+    }
+    {
+        uint64_t fused_count = 0;
+        uint64_t stock_count = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_route_counters(
+                        NULL, NULL, &fused_count, &stock_count) != 0);
+        TEST_ASSERT(fused_count ==
+                    (expected_route == DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED
+                         ? 1u : 0u));
+        TEST_ASSERT(stock_count == 2u);
+        fprintf(stderr,
+                "ds4-test: Laguna Q8 route counters rows=%u fused=%llu stock=%llu\n",
+                n_tok,
+                (unsigned long long)fused_count,
+                (unsigned long long)stock_count);
+    }
     TEST_ASSERT(memcmp(mid_host, mid_stock_host,
                        (size_t)mid_values * sizeof(float)) == 0);
 
@@ -6068,24 +6171,40 @@ cleanup:
 }
 
 static void test_laguna_dense_q8_batch_swiglu(void) {
-#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    char *saved_mv_ceiling =
+        test_save_env("DS4_METAL_Q8_MV_EXT_MAX_TOKENS");
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", "128", 1) == 0);
+    /* The effective ceiling is captured at init, not reparsed per dispatch. */
+    ds4_gpu_cleanup();
     TEST_ASSERT(ds4_gpu_init() != 0);
-#endif
-    /* Quality mode disables the TensorOps prefill matmuls so the stock
-     * route is the generic tiled kernel on every part. */
+    TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 128u);
+    /* A lifecycle override changes the stock boundary, so exercise both
+     * sides of the effective 128-row ceiling before changing the env. */
     ds4_gpu_set_quality(true);
-    /* Full 32-wide tiles, ragged tails, and a sub-tile row block.  Row
-     * counts stay above the mv_ext small-batch ceiling so the stock route
-     * is the tiled kernel the fused pass mirrors. */
+    test_laguna_dense_q8_batch_swiglu_case(128u);
+    test_laguna_dense_q8_batch_swiglu_case(129u);
+    /* Changing the environment cannot hot-switch the already initialized
+     * lifecycle; only a clean init may make 16 effective. */
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", "16", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 128u);
+    ds4_gpu_cleanup();
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_q8_mv_ext_max_tokens() == 16u);
+    /* Boundary rows stay on stock mul_mv_ext; larger rows compare the fused
+     * pass bit-for-bit with stock and with the independent reference. */
+    test_laguna_dense_q8_batch_swiglu_case(1u);
+    test_laguna_dense_q8_batch_swiglu_case(2u);
+    test_laguna_dense_q8_batch_swiglu_case(16u);
+    test_laguna_dense_q8_batch_swiglu_case(17u);
     test_laguna_dense_q8_batch_swiglu_case(64u);
     test_laguna_dense_q8_batch_swiglu_case(48u);
     test_laguna_dense_q8_batch_swiglu_case(33u);
-    test_laguna_dense_q8_batch_swiglu_case(17u);
+    test_laguna_dense_q8_batch_swiglu_case(129u);
     ds4_gpu_set_quality(false);
-#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
     ds4_gpu_cleanup();
-#endif
+    test_restore_env("DS4_METAL_Q8_MV_EXT_MAX_TOKENS", saved_mv_ceiling);
 }
+#endif /* __APPLE__ */
 #endif
 
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
@@ -11522,16 +11641,21 @@ typedef struct {
 } ds4_test_entry;
 
 static const ds4_test_entry test_entries[] = {
+    {"--laguna-selector-parser", "laguna-selector-parser",
+     "strict Laguna selector and prefill-route parser boundaries",
+     test_laguna_selector_parser, false},
 #ifndef DS4_NO_GPU
     {"--laguna-attention-numeric", "laguna-attention-numeric",
      "Laguna decode attention against a double-precision reference",
      test_laguna_gqa3_decode_numeric, false},
+#if defined(__APPLE__)
     {"--laguna-prefill-direct-kv-ab", "laguna-prefill-direct-kv-ab",
      "bit-exact A/B of the opt-in direct non-SWA prefill KV store",
      test_laguna_prefill_direct_kv_ab, false},
     {"--laguna-dense-q8-batch-swiglu", "laguna-dense-q8-batch-swiglu",
      "batched fused dense Q8 gate/up+SwiGLU against a double reference",
      test_laguna_dense_q8_batch_swiglu, false},
+#endif
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
     {"--cuda-laguna-moe", "cuda-laguna-moe",
      "CUDA Laguna Q8 signal and Q4/Q3 MoE prefill/decode numerics",
