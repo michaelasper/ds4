@@ -75,7 +75,7 @@ and leaves an existing model file or `ds4flash.gguf` link untouched.
 The project is built from source; there is no package-manager install step.
 
 ```sh
-git clone https://github.com/antirez/ds4.git
+git clone https://github.com/michaelasper/ds4.git
 cd ds4
 make -j8
 ```
@@ -238,19 +238,19 @@ For deterministic continuation quality, build the scorer and compare the
 tracked Laguna fixture:
 
 ```sh
-make gguf-tools/quality-testing/score_official
-gguf-tools/quality-testing/score_official \
+make quality/score_official
+quality/score_official \
   OLD.gguf \
-  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+  quality/data/laguna-openrouter-100/manifest.tsv \
   /tmp/old.tsv 4096 --quality
-gguf-tools/quality-testing/score_official \
+quality/score_official \
   NEW.gguf \
-  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+  quality/data/laguna-openrouter-100/manifest.tsv \
   /tmp/new.tsv 4096 --quality
-python3 gguf-tools/quality-testing/compare_scores.py /tmp/old.tsv /tmp/new.tsv
+python3 quality/compare_scores.py /tmp/old.tsv /tmp/new.tsv
 ```
 
-The [quality-testing guide](gguf-tools/quality-testing/README.md) explains the
+The [quality guide](quality/README.md) explains the
 fixture and score columns without turning a single run into a general claim.
 
 ## Build and test
