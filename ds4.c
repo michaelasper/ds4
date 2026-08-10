@@ -4948,56 +4948,6 @@ static bool weights_have_partial_output_head(const ds4_weights *w) {
             w->output);
 }
 
-static bool weights_glm_dsa_layer_has_required(const ds4_layer_weights *l, uint32_t il) {
-    if (!l) return false;
-    if (!l->attn_norm ||
-        !l->attn_q_a ||
-        !l->attn_q_a_norm ||
-        !l->attn_q_b ||
-        !l->attn_kv_a_mqa ||
-        !l->attn_kv_a_norm ||
-        !l->attn_k_b ||
-        !l->attn_v_b ||
-        !l->attn_output ||
-        !l->indexer_attn_q_b ||
-        !l->indexer_attn_k ||
-        !l->indexer_k_norm ||
-        !l->indexer_k_norm_b ||
-        !l->indexer_proj ||
-        !l->ffn_norm)
-    {
-        return false;
-    }
-
-    if (il < DS4_N_LEADING_DENSE) {
-        if (!l->ffn_gate || !l->ffn_up || !l->ffn_down) return false;
-    } else {
-        if (!l->ffn_gate_inp ||
-            !l->ffn_exp_probs_b ||
-            !l->ffn_gate_exps ||
-            !l->ffn_up_exps ||
-            !l->ffn_down_exps ||
-            !l->ffn_gate_shexp ||
-            !l->ffn_up_shexp ||
-            !l->ffn_down_shexp)
-        {
-            return false;
-        }
-    }
-
-    if (DS4_N_NEXTN_PREDICT != 0 &&
-        il + DS4_N_NEXTN_PREDICT >= DS4_N_LAYER &&
-        (!l->nextn_eh_proj ||
-         !l->nextn_enorm ||
-         !l->nextn_hnorm ||
-         !l->nextn_shared_head_norm))
-    {
-        return false;
-    }
-
-    return true;
-}
-
 static bool weights_laguna_layer_has_required(const ds4_layer_weights *l, uint32_t il) {
     if (!l ||
         !l->attn_norm ||
@@ -5027,9 +4977,6 @@ static bool weights_laguna_layer_has_required(const ds4_layer_weights *l, uint32
 
 static bool weights_layer_has_required(const ds4_layer_weights *l, uint32_t il) {
     if (!l) return false;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
-        return weights_glm_dsa_layer_has_required(l, il);
-    }
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
         return weights_laguna_layer_has_required(l, il);
     }
