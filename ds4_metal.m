@@ -295,6 +295,9 @@ static id<MTLComputePipelineState> g_laguna_prefill_attention_pipeline;
 static id<MTLComputePipelineState> g_laguna_commit_kv_pipeline;
 static id<MTLComputePipelineState> g_laguna_q6_k_matmul_pipeline;
 static id<MTLComputePipelineState> g_laguna_argmax_f32_pipeline;
+static id<MTLComputePipelineState> g_laguna_logits_reduce_f32_pipeline;
+static id<MTLComputePipelineState> g_laguna_logits_topk_pass_f32_pipeline;
+static id<MTLComputePipelineState> g_laguna_logits_topk_merge_f32_pipeline;
 static id<MTLComputePipelineState> g_dsv4_router_weights_batch_pipeline;
 static id<MTLComputePipelineState> g_dsv4_hc_expand4_pipeline;
 static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *g_pipeline_cache;
@@ -8947,6 +8950,12 @@ int ds4_gpu_init(void) {
             ds4_gpu_get_pipeline("kernel_laguna_q6_K_matmul_f32");
         g_laguna_argmax_f32_pipeline =
             ds4_gpu_get_pipeline("kernel_laguna_argmax_f32");
+        g_laguna_logits_reduce_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_laguna_logits_reduce_f32");
+        g_laguna_logits_topk_pass_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_laguna_logits_topk_pass_f32");
+        g_laguna_logits_topk_merge_f32_pipeline =
+            ds4_gpu_get_pipeline("kernel_laguna_logits_topk_merge_f32");
         g_dsv4_router_weights_batch_pipeline =
             ds4_gpu_get_pipeline("kernel_dsv4_router_weights_batch");
         g_dsv4_hc_expand4_pipeline =
@@ -10911,6 +10920,9 @@ void ds4_gpu_cleanup(void) {
         g_laguna_commit_kv_pipeline = nil;
         g_laguna_q6_k_matmul_pipeline = nil;
         g_laguna_argmax_f32_pipeline = nil;
+        g_laguna_logits_reduce_f32_pipeline = nil;
+        g_laguna_logits_topk_pass_f32_pipeline = nil;
+        g_laguna_logits_topk_merge_f32_pipeline = nil;
         g_dsv4_router_weights_batch_pipeline = nil;
         g_dsv4_hc_expand4_pipeline = nil;
         g_flash_attn_mask_buffer = nil;
@@ -18606,6 +18618,111 @@ int ds4_gpu_laguna_argmax_tensor(
         }
         ds4_gpu_end_compute_encoder(cb, enc);
         return ds4_gpu_finish_command_buffer(cb, owned, "Laguna F32 argmax");
+    }
+}
+
+/* Opt-in GPU top-K candidate sampling (DS4_METAL_LAGUNA_GPU_SAMPLE).  Three
+ * deterministic dispatches in one command buffer: reduce max/best/n_finite,
+ * per-workgroup top-K + partial sum_T, then merge to the global top-K + sum_T.
+ * See metal/laguna.metal for the layout and the accepted sum_T drift. */
+int ds4_gpu_laguna_logits_candidates_available(void) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    return g_laguna_logits_reduce_f32_pipeline != nil &&
+           g_laguna_logits_topk_pass_f32_pipeline != nil &&
+           g_laguna_logits_topk_merge_f32_pipeline != nil;
+}
+
+int ds4_gpu_laguna_logits_candidates_tensor(
+        ds4_gpu_tensor       *cands,
+        ds4_gpu_tensor       *partial_sum,
+        ds4_gpu_tensor       *stats,
+        const ds4_gpu_tensor *logits,
+        uint32_t              n_vocab,
+        float                 temperature) {
+    enum { THREADS = 256u };
+    const uint32_t K = DS4_LAGUNA_TOPK_K;
+    const uint32_t nwg = ds4_gpu_laguna_logits_candidates_nwg(n_vocab);
+    if (!ds4_gpu_laguna_logits_candidates_available() ||
+        !cands || !partial_sum || !stats || !logits ||
+        n_vocab == 0 || nwg == 0 || temperature <= 0.0f ||
+        !isfinite(temperature) ||
+        ds4_gpu_tensor_bytes(cands) <
+            (uint64_t)nwg * K * sizeof(ds4_gpu_logit_candidate) ||
+        ds4_gpu_tensor_bytes(partial_sum) < (uint64_t)nwg * sizeof(float) ||
+        ds4_gpu_tensor_bytes(stats) <
+            sizeof(ds4_gpu_logits_candidates_stats) ||
+        ds4_gpu_tensor_bytes(logits) < (uint64_t)n_vocab * sizeof(float)) {
+        fprintf(stderr,
+                "ds4: Laguna GPU logits candidates received invalid buffers\n");
+        return 0;
+    }
+
+    @autoreleasepool {
+        int owned = 0;
+        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+        if (!cb) return 0;
+        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        if (!enc) {
+            if (owned) (void)ds4_gpu_finish_command_buffer(
+                cb, owned, "Laguna logits candidates setup");
+            return 0;
+        }
+
+        id<MTLBuffer> logitsbuf = ds4_gpu_tensor_buffer(logits);
+        id<MTLBuffer> candsbuf = ds4_gpu_tensor_buffer(cands);
+        id<MTLBuffer> psumbuf = ds4_gpu_tensor_buffer(partial_sum);
+        id<MTLBuffer> statsbuf = ds4_gpu_tensor_buffer(stats);
+        if (!logitsbuf || !candsbuf || !psumbuf || !statsbuf) {
+            ds4_gpu_end_compute_encoder(cb, enc);
+            if (owned) (void)ds4_gpu_finish_command_buffer(
+                cb, owned, "Laguna logits candidates");
+            return 0;
+        }
+
+        const NSUInteger tg_cands_bytes =
+            (NSUInteger)1024u * sizeof(ds4_gpu_logit_candidate);
+        const NSUInteger tg_partials_bytes = (NSUInteger)THREADS * sizeof(float);
+        const NSUInteger tg_reduce_bytes = (NSUInteger)THREADS * sizeof(float);
+
+        /* Dispatch 1: reduce max_logit / best_id / n_finite into stats. */
+        [enc setComputePipelineState:g_laguna_logits_reduce_f32_pipeline];
+        [enc setBuffer:logitsbuf offset:ds4_gpu_tensor_offset(logits) atIndex:0];
+        [enc setBuffer:statsbuf offset:ds4_gpu_tensor_offset(stats) atIndex:1];
+        [enc setBytes:&n_vocab length:sizeof(n_vocab) atIndex:2];
+        [enc setThreadgroupMemoryLength:tg_reduce_bytes atIndex:0];
+        [enc setThreadgroupMemoryLength:tg_reduce_bytes atIndex:1];
+        [enc setThreadgroupMemoryLength:tg_reduce_bytes atIndex:2];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(THREADS, 1, 1)];
+
+        /* Dispatch 2: per-workgroup top-K + partial sum_T. */
+        [enc setComputePipelineState:g_laguna_logits_topk_pass_f32_pipeline];
+        [enc setBuffer:logitsbuf offset:ds4_gpu_tensor_offset(logits) atIndex:0];
+        [enc setBuffer:candsbuf offset:ds4_gpu_tensor_offset(cands) atIndex:1];
+        [enc setBuffer:psumbuf offset:ds4_gpu_tensor_offset(partial_sum) atIndex:2];
+        [enc setBuffer:statsbuf offset:ds4_gpu_tensor_offset(stats) atIndex:3];
+        [enc setBytes:&n_vocab length:sizeof(n_vocab) atIndex:4];
+        [enc setBytes:&temperature length:sizeof(temperature) atIndex:5];
+        [enc setBytes:&nwg length:sizeof(nwg) atIndex:6];
+        [enc setThreadgroupMemoryLength:tg_cands_bytes atIndex:0];
+        [enc setThreadgroupMemoryLength:tg_partials_bytes atIndex:1];
+        [enc dispatchThreadgroups:MTLSizeMake(nwg, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(THREADS, 1, 1)];
+
+        /* Dispatch 3: merge to global top-K (in cands[0..K)) + sum_T into stats. */
+        [enc setComputePipelineState:g_laguna_logits_topk_merge_f32_pipeline];
+        [enc setBuffer:candsbuf offset:ds4_gpu_tensor_offset(cands) atIndex:0];
+        [enc setBuffer:psumbuf offset:ds4_gpu_tensor_offset(partial_sum) atIndex:1];
+        [enc setBuffer:statsbuf offset:ds4_gpu_tensor_offset(stats) atIndex:2];
+        [enc setBytes:&nwg length:sizeof(nwg) atIndex:3];
+        [enc setThreadgroupMemoryLength:tg_cands_bytes atIndex:0];
+        [enc setThreadgroupMemoryLength:tg_partials_bytes atIndex:1];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(THREADS, 1, 1)];
+
+        ds4_gpu_end_compute_encoder(cb, enc);
+        return ds4_gpu_finish_command_buffer(
+            cb, owned, "Laguna logits candidates");
     }
 }
 

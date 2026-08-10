@@ -39788,7 +39788,22 @@ static int sample_top_p_min_p(
     return ids[filtered - 1];
 }
 
-#ifdef DS4_TEST_HOOKS
+#ifndef DS4_NO_GPU
+/* Forward declaration: the A/B test hook below is always compiled (so the
+ * Metal ds4_test binary can link it), but sample_candidates itself is defined
+ * later near the session sampling path. */
+static bool sample_candidates(
+        const ds4_gpu_logit_candidate *cands,
+        const ds4_gpu_logits_candidates_stats *stats,
+        float temperature, int top_k, float top_p, float min_p,
+        uint64_t *rng, int *token_out);
+#endif
+
+/* Exposes sample_top_p_min_p and sample_candidates for A/B testing.  Both are
+ * always compiled (not under DS4_TEST_HOOKS) so the Metal ds4_test binary,
+ * which links the standard ds4.o, can reference them; the wrappers are tiny
+ * pure-host functions and the underlying samplers stay static.  This does not
+ * change any stock sampling semantics. */
 int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float temperature, int top_k,
                            float top_p, float min_p, uint64_t *rng,
@@ -39798,6 +39813,20 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                               top_p, min_p, rng, prob_scratch);
 }
 
+/* Returns 1 on success and writes *token_out; returns 0 to request the stock
+ * fallback (caller then compares against ds4_test_sample_logits). */
+#ifndef DS4_NO_GPU
+int ds4_test_sample_candidates(const ds4_gpu_logit_candidate *cands,
+                               const ds4_gpu_logits_candidates_stats *stats,
+                               float temperature, int top_k,
+                               float top_p, float min_p, uint64_t *rng,
+                               int *token_out) {
+    return sample_candidates(cands, stats, temperature, top_k,
+                            top_p, min_p, rng, token_out) ? 1 : 0;
+}
+#endif
+
+#ifdef DS4_TEST_HOOKS
 int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
                                      int excluded_id) {
     if (!logits) return -1;
@@ -49579,6 +49608,14 @@ typedef struct {
     ds4_gpu_tensor *argmax;
     bool gpu_argmax_enabled;
     int32_t gpu_argmax_result;
+    /* GPU top-K candidate sampling scratch (DS4_METAL_LAGUNA_GPU_SAMPLE).
+ * Mirrors the argmax fields: the three tensors are allocated once when
+ * the feature is enabled and reused every decode.  The host reads the
+ * final top-K back from logits_candidates[0..K) and the stats struct. */
+    ds4_gpu_tensor *logits_candidates;
+    ds4_gpu_tensor *logits_partial_sum;
+    ds4_gpu_tensor *logits_candidate_stats;
+    bool gpu_sample_enabled;
 #ifdef __APPLE__
     ds4_gpu_laguna_q8_lmhead_screen *lmhead_screen;
     bool q8_lmhead_screen_dispatched;
@@ -49636,6 +49673,9 @@ static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     DS4_LAGUNA_FREE(output_norm);
     DS4_LAGUNA_FREE(logits);
     DS4_LAGUNA_FREE(argmax);
+    DS4_LAGUNA_FREE(logits_candidates);
+    DS4_LAGUNA_FREE(logits_partial_sum);
+    DS4_LAGUNA_FREE(logits_candidate_stats);
 #ifdef __APPLE__
     ds4_gpu_laguna_q8_lmhead_screen_destroy(g->lmhead_screen);
     g->lmhead_screen = NULL;
@@ -51487,7 +51527,8 @@ static bool laguna_graph_forward_token(
                 const bool fuse_residual_norm =
                     decode_residual_fusion &&
                     (il + 1u < (uint32_t)DS4_N_LAYER ||
-                     logits_out != NULL || g->gpu_argmax_enabled);
+                     logits_out != NULL || g->gpu_argmax_enabled ||
+                     g->gpu_sample_enabled);
                 if (fuse_residual_norm) {
                     ds4_gpu_tensor *norm_out = il + 1u < (uint32_t)DS4_N_LAYER ?
                         g->attn_norm : g->output_norm;
@@ -51670,7 +51711,8 @@ static bool laguna_graph_forward_token(
                 const bool fuse_residual_norm =
                     decode_residual_fusion &&
                     (il + 1u < (uint32_t)DS4_N_LAYER ||
-                     logits_out != NULL || g->gpu_argmax_enabled);
+                     logits_out != NULL || g->gpu_argmax_enabled ||
+                     g->gpu_sample_enabled);
                 if (fuse_residual_norm) {
                     ds4_gpu_tensor *norm_out = il + 1u < (uint32_t)DS4_N_LAYER ?
                         g->attn_norm : g->output_norm;
@@ -51729,7 +51771,7 @@ static bool laguna_graph_forward_token(
     if (ok) {
         ok = laguna_graph_capture_feature(capture, g->cur, DS4_N_LAYER);
     }
-    if (ok && (logits_out || g->gpu_argmax_enabled)) {
+    if (ok && (logits_out || g->gpu_argmax_enabled || g->gpu_sample_enabled)) {
 #ifdef __APPLE__
         if (decode_output_norm_ready) {
             /* The final residual fused directly into g->output_norm. */
@@ -51789,7 +51831,8 @@ static bool laguna_graph_forward_token(
     if (ok && decode_residual_fusion &&
         decode_residual_norm_completion_waited &&
         !decode_residual_norm_reported &&
-        (logits_out != NULL || g->gpu_argmax_enabled) &&
+        (logits_out != NULL || g->gpu_argmax_enabled ||
+         g->gpu_sample_enabled) &&
         (fused_add2_count != 0 || fused_add3_count != 0)) {
         fprintf(stderr,
                 "ds4: Laguna decode residual+RMS fusion enabled "
@@ -52678,6 +52721,14 @@ static bool laguna_metal_gpu_argmax_requested(void) {
     return env && strcmp(env, "1") == 0;
 }
 
+/* Opt-in GPU top-K candidate sampling for the session decode path.  Strict
+ * literal "1" (matches the argmax knob); any other value leaves the default
+ * full-logits readback bit-identical. */
+static bool laguna_metal_gpu_sample_requested(void) {
+    const char *env = getenv("DS4_METAL_LAGUNA_GPU_SAMPLE");
+    return env && strcmp(env, "1") == 0;
+}
+
 static bool laguna_metal_gpu_argmax_debug_forces_full_logits(void) {
     /* These diagnostics inspect or dump the complete row, so retaining the
      * host logits buffer is part of their contract. Presence matches the
@@ -52879,6 +52930,38 @@ static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
     if (!g->argmax) return false;
     g->scratch_bytes += sizeof(int32_t);
     g->gpu_argmax_enabled = true;
+    return true;
+}
+
+/* Allocate the GPU top-K candidate sampling scratch for the current vocab
+ * size.  nwg = ceil(n_vocab / SLICE); the candidates buffer holds nwg*K pairs
+ * (the per-workgroup results and the merged top-K in [0..K)), the partial-sum
+ * buffer holds nwg floats, and the stats buffer holds one stats struct. */
+static bool laguna_graph_enable_gpu_sample(ds4_laguna_gpu_graph *g,
+                                          uint32_t n_vocab) {
+    if (!g || g->gpu_sample_enabled) return g != NULL;
+    if (n_vocab == 0) return false;
+    const uint32_t nwg = ds4_gpu_laguna_logits_candidates_nwg(n_vocab);
+    if (nwg == 0) return false;
+    const uint64_t cands_bytes =
+        (uint64_t)nwg * DS4_LAGUNA_TOPK_K * sizeof(ds4_gpu_logit_candidate);
+    const uint64_t psum_bytes = (uint64_t)nwg * sizeof(float);
+    const uint64_t stats_bytes = sizeof(ds4_gpu_logits_candidates_stats);
+    g->logits_candidates = ds4_gpu_tensor_alloc(cands_bytes);
+    g->logits_partial_sum = ds4_gpu_tensor_alloc(psum_bytes);
+    g->logits_candidate_stats = ds4_gpu_tensor_alloc(stats_bytes);
+    if (!g->logits_candidates || !g->logits_partial_sum ||
+        !g->logits_candidate_stats) {
+        ds4_gpu_tensor_free(g->logits_candidates);
+        ds4_gpu_tensor_free(g->logits_partial_sum);
+        ds4_gpu_tensor_free(g->logits_candidate_stats);
+        g->logits_candidates = NULL;
+        g->logits_partial_sum = NULL;
+        g->logits_candidate_stats = NULL;
+        return false;
+    }
+    g->scratch_bytes += cands_bytes + psum_bytes + stats_bytes;
+    g->gpu_sample_enabled = true;
     return true;
 }
 
@@ -54068,6 +54151,15 @@ struct ds4_session {
     float *mtp_logits;
     int greedy_splitkv_anchor_len;
 #ifndef DS4_NO_GPU
+    /* GPU top-K candidate sampling (DS4_METAL_LAGUNA_GPU_SAMPLE).  When the
+     * feature is enabled and a decode deferred the full-logits readback,
+     * gpu_sample_deferred is set and the lm-head row stays resident in the
+     * laguna graph; the first sampling/logprobs/argmax consumer then either
+     * samples from the staged candidates or lazily reads the full row back. */
+    bool gpu_sample_enabled;
+    bool gpu_sample_deferred;
+    ds4_gpu_logit_candidate *gpu_sample_candidates;
+    ds4_gpu_logits_candidates_stats gpu_sample_stats;
     float *spec_row_logits;
     float *dspark_markov_bias;
     float *dspark_conf_features;
@@ -63880,6 +63972,33 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
          * faster when CUDA/ROCm may dequantize once and use the backend GEMM. */
         ds4_gpu_enable_q8_dequant_gemm();
         s->laguna_graph_ready = true;
+#ifdef __APPLE__
+        /* GPU top-K candidate sampling is opt-in and Laguna-decode only.  An
+         * explicit request with a missing pipeline is a hard failure (mirrors
+         * the argmax preflight); debug envs that need the full row suppress it. */
+        if (laguna_metal_gpu_sample_requested() &&
+            !laguna_metal_gpu_argmax_debug_forces_full_logits() &&
+            ds4_gpu_laguna_logits_candidates_available()) {
+            if (!laguna_graph_enable_gpu_sample(&s->laguna_graph,
+                                                 (uint32_t)DS4_N_VOCAB)) {
+                fprintf(stderr,
+                        "ds4: failed to allocate Laguna GPU sample "
+                        "candidate scratch\n");
+                laguna_graph_free(&s->laguna_graph);
+                free(s);
+                return 1;
+            }
+            s->gpu_sample_candidates =
+                xmalloc((size_t)DS4_LAGUNA_TOPK_K *
+                        sizeof(s->gpu_sample_candidates[0]));
+            if (!s->gpu_sample_candidates) {
+                laguna_graph_free(&s->laguna_graph);
+                free(s);
+                return 1;
+            }
+            s->gpu_sample_enabled = true;
+        }
+#endif
         if (e->dflash_ready) {
             if (!dflash_graph_alloc(&s->dflash_graph)) {
                 laguna_graph_free(&s->laguna_graph);
@@ -64211,6 +64330,7 @@ void ds4_session_free(ds4_session *s) {
     free(s->logits);
     free(s->sample_probs);
 #ifndef DS4_NO_GPU
+    free(s->gpu_sample_candidates);
     free(s->glm_mtp_hc);
     free(s->glm_mtp_logits0);
 #endif
@@ -66358,11 +66478,151 @@ int ds4_session_common_prefix(ds4_session *s, const ds4_tokens *prompt) {
     return i;
 }
 
+#ifndef DS4_NO_GPU
+/* If a Laguna decode deferred the full-logits readback (gpu_sample path), the
+ * lm-head row is still resident in s->laguna_graph.logits.  Any consumer that
+ * needs the full row (argmax / top-logprobs / token-logprob / copy / sampling
+ * fallback) calls this first to materialize s->logits bit-identically to the
+ * default path, then clears the deferred flag.  No-op when the path is off or
+ * already consumed. */
+static inline void ds4_session_ensure_logits(ds4_session *s) {
+    if (!s || !s->gpu_sample_deferred) return;
+    if (s->laguna_graph_ready && s->laguna_graph.logits) {
+        (void)ds4_gpu_tensor_read(s->laguna_graph.logits, 0, s->logits,
+                (uint64_t)DS4_N_VOCAB * sizeof(float));
+    }
+    s->gpu_sample_deferred = false;
+}
+#else
+static inline void ds4_session_ensure_logits(ds4_session *s) { (void)s; }
+#endif
+
+/* GPU top-K candidate sampler.  Mirrors sample_fast_top_p arithmetic
+ * operation-for-operation (same expf, same min_p/top_p walk, same tie-break,
+ * same single RNG draw) using the GPU top-K candidates + stats instead of a
+ * host heap over the full vocab.  Returns true and sets *token_out on success;
+ * returns false to request the exact stock fallback (full readback +
+ * sample_top_p_min_p), which is bit-identical to the default path.
+ *
+ * top_k > 0: use the first top_k candidates and normalize over exactly that set
+ *   (mirrors the stock sample_top_p_min_p top_k branch, which uses its own
+ *   top-k sum, not the full-vocab sum).
+ * top_k <= 0: mirror sample_fast_top_p, using the GPU sum_T as the full-vocab
+ *   sum.  The only accepted drift is in sum_T (GPU tree-reduced fast-math exp()
+ *   vs host sequential expf()), which can move a min_p/top_p boundary by ulps;
+ *   the coverage and min_p-edge gates fall back to the stock path on failure. */
+#ifndef DS4_NO_GPU
+static bool sample_candidates(
+        const ds4_gpu_logit_candidate *cands,
+        const ds4_gpu_logits_candidates_stats *stats,
+        float temperature,
+        int top_k,
+        float top_p,
+        float min_p,
+        uint64_t *rng,
+        int *token_out) {
+    enum { CAP = (int)DS4_LAGUNA_TOPK_K };
+    if (!cands || !stats || !rng || !token_out || temperature <= 0.0f) {
+        return false;
+    }
+    if (top_p <= 0.0f || top_p > 1.0f) top_p = 1.0f;
+    if (min_p < 0.0f) min_p = 0.0f;
+
+    const int finite = stats->n_finite;
+    const int best = stats->best_id;
+    const float max_logit = stats->max_logit;
+    const float sum_T = stats->sum_T;
+    if (finite <= 0) return false;            /* sample_fast_top_p: finite==0 -> full path */
+    int n = stats->n_candidates;             /* min(K, finite) */
+    if (n <= 0 || n > CAP) return false;
+
+    if (top_k > 0) {
+        if (top_k > 1024) top_k = 1024;
+        if (top_k > n) top_k = n;
+        n = top_k;
+    } else if (finite > CAP && top_p >= 0.999f) {
+        /* Mirror sample_fast_top_p: a near-full nucleus with more finite
+         * logits than the heap cap must use the full vocab-id walk. */
+        return false;
+    }
+
+    sample_candidate heap[DS4_LAGUNA_TOPK_K];
+    float heap_sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        const float p = expf((cands[i].logit - max_logit) / temperature);
+        heap[i].id = (int)cands[i].id;
+        heap[i].logit = cands[i].logit;
+        heap[i].prob = p;
+        heap_sum += p;
+    }
+
+    if (top_k > 0) {
+        /* Stock top_k branch: normalize over the top-k set only. */
+        const float sum = heap_sum;
+        if (sum <= 0.0f || !isfinite(sum)) {
+            *token_out = (int)cands[0].id;
+            return true;
+        }
+        const float min_prob = (heap[0].prob / sum) * min_p;
+        float filtered_sum = 0.0f;
+        int filtered = 0;
+        for (int i = 0; i < n; i++) {
+            const float p = heap[i].prob / sum;
+            if (i > 0 && p < min_prob) break;
+            filtered_sum += heap[i].prob;
+            filtered++;
+            if (filtered_sum / sum >= top_p) break;
+        }
+        if (filtered <= 0) { *token_out = (int)cands[0].id; return true; }
+        float r = sample_rng_f32(rng) * filtered_sum;
+        for (int i = 0; i < filtered; i++) {
+            r -= heap[i].prob;
+            if (r <= 0.0f) { *token_out = heap[i].id; return true; }
+        }
+        *token_out = heap[filtered - 1].id;
+        return true;
+    }
+
+    /* top_k <= 0: mirror sample_fast_top_p.  sum_T is the GPU full-vocab sum. */
+    const float sum = sum_T;
+    if (sum <= 0.0f || !isfinite(sum)) { *token_out = best; return true; }
+    if (n < finite && heap_sum < top_p * sum) return false;  /* coverage */
+
+    qsort(heap, (size_t)n, sizeof(heap[0]), sample_candidate_cmp_desc);
+    const float min_prob = (heap[0].prob / sum) * (min_p > 0.0f ? min_p : 0.0f);
+    const float min_prob_raw = heap[0].prob * (min_p > 0.0f ? min_p : 0.0f);
+    float filtered_sum = 0.0f;
+    int filtered = 0;
+    bool stopped_by_min_p = false;
+    for (int i = 0; i < n; i++) {
+        const float p = heap[i].prob / sum;
+        if (i > 0 && p < min_prob) { stopped_by_min_p = true; break; }
+        filtered_sum += heap[i].prob;
+        filtered++;
+        if (filtered_sum / sum >= top_p) break;
+    }
+    if (n < finite && stopped_by_min_p && min_p > 0.0f &&
+        heap[n - 1].prob >= min_prob_raw) {
+        return false;
+    }
+    if (filtered == 0) { *token_out = best; return true; }
+    float r = sample_rng_f32(rng) * filtered_sum;
+    for (int i = 0; i < filtered; i++) {
+        r -= heap[i].prob;
+        if (r <= 0.0f) { *token_out = heap[i].id; return true; }
+    }
+    *token_out = heap[filtered - 1].id;
+    return true;
+}
+#endif
+
 int ds4_session_argmax(ds4_session *s) {
+    ds4_session_ensure_logits(s);
     return sample_argmax(s->logits, DS4_N_VOCAB);
 }
 
 int ds4_session_argmax_excluding(ds4_session *s, int excluded_id) {
+    ds4_session_ensure_logits(s);
     if (!s || !s->logits) return -1;
     if (getenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
         return argmax_f32_excluding_unrolled8(
@@ -66393,6 +66653,40 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
 }
 
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
+#ifndef DS4_NO_GPU
+    /* GPU top-K candidate sampling: when the previous decode deferred the full
+     * readback, try the candidate path first.  Eligibility mirrors the stock
+     * branches that sample_candidates emulates (temperature>0, top_p<1,
+     * top_k<=0 or <=K).  On any gate failure or kernel failure, fall back to a
+     * full readback + stock sample_top_p_min_p, which is bit-identical to the
+     * default path. */
+    if (s && s->gpu_sample_deferred) {
+        const bool eligible =
+            temperature > 0.0f && top_p < 1.0f &&
+            (top_k <= 0 || top_k <= (int)DS4_LAGUNA_TOPK_K);
+        int token = -1;
+        if (eligible &&
+            ds4_gpu_laguna_logits_candidates_tensor(
+                s->laguna_graph.logits_candidates,
+                s->laguna_graph.logits_partial_sum,
+                s->laguna_graph.logits_candidate_stats,
+                s->laguna_graph.logits,
+                (uint32_t)DS4_N_VOCAB, temperature) &&
+            ds4_gpu_tensor_read(s->laguna_graph.logits_candidates, 0,
+                s->gpu_sample_candidates,
+                (uint64_t)DS4_LAGUNA_TOPK_K *
+                    sizeof(s->gpu_sample_candidates[0])) &&
+            ds4_gpu_tensor_read(s->laguna_graph.logits_candidate_stats, 0,
+                &s->gpu_sample_stats, sizeof(s->gpu_sample_stats)) &&
+            sample_candidates(s->gpu_sample_candidates, &s->gpu_sample_stats,
+                temperature, top_k, top_p, min_p, rng, &token)) {
+            s->gpu_sample_deferred = false;
+            return token;
+        }
+        /* Fallback: materialize the full row and run the stock sampler. */
+        ds4_session_ensure_logits(s);
+    }
+#endif
     if (!s->engine->dflash_ready || !s->speculative_enabled) {
         return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
                                   top_p, min_p, rng, s->sample_probs);
@@ -66407,6 +66701,7 @@ int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p
 
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     if (!s || !out || k <= 0) return 0;
+    ds4_session_ensure_logits(s);
     if (k > (int)DS4_N_VOCAB) k = (int)DS4_N_VOCAB;
     for (int i = 0; i < k; i++) {
         out[i].id = -1;
@@ -66444,6 +66739,7 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
 
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
     if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
+    ds4_session_ensure_logits(s);
 
     float max_logit = DS4_NEG_INF;
     for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
@@ -66466,6 +66762,7 @@ int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
 
 int ds4_session_copy_logits(ds4_session *s, float *out, int cap) {
     if (!s || !out || cap < (int)DS4_N_VOCAB) return 0;
+    ds4_session_ensure_logits(s);
     memcpy(out, s->logits, (size_t)DS4_N_VOCAB * sizeof(out[0]));
     return (int)DS4_N_VOCAB;
 }
@@ -67190,6 +67487,10 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
                                  s->laguna_graph.ctx_size);
             return 1;
         }
+        /* If the previous decode deferred its full-logits readback (gpu_sample
+         * path) and no consumer materialized s->logits, do so now before this
+         * decode overwrites the resident lm-head row. */
+        ds4_session_ensure_logits(s);
         const bool dflash_enabled = ds4_session_dflash_enabled(s);
         const bool dflash_was_synced = s->dflash_synced;
         if (dflash_enabled && !s->dflash_defer_inject &&
@@ -67218,13 +67519,26 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
             }
             capture.dst_row0 = s->dflash_deferred_rows;
         }
+        /* GPU top-K candidate sampling: defer the full-logits readback when the
+         * feature is on and no excluded feature is active.  The lm-head row
+         * stays GPU-resident; the next ds4_session_sample consumes it via the
+         * candidates kernel, and any other consumer lazily reads it back. */
+        const bool gpu_sample_defer =
+            s->gpu_sample_enabled && !dflash_enabled &&
+            !s->speculative_enabled && !s->distributed && !e->tp.active
+#ifdef __APPLE__
+            && !laguna_metal_gpu_argmax_debug_forces_full_logits()
+#endif
+            ;
+        float * const logits_out = gpu_sample_defer ? NULL : s->logits;
+        if (gpu_sample_defer) s->gpu_sample_deferred = true;
         if (!laguna_graph_forward_token(&s->laguna_graph,
                                         &e->model,
                                         &e->weights,
                                         token,
                                         (uint32_t)s->checkpoint.len,
                                         dflash_enabled ? &capture : NULL,
-                                        s->logits)) {
+                                        logits_out)) {
             if (errlen) snprintf(err, errlen, "%s Laguna decode failed",
                                  ds4_backend_name(e->backend));
             s->checkpoint_valid = false;

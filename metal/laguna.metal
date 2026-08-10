@@ -54,6 +54,278 @@ kernel void kernel_laguna_argmax_f32(
 }
 
 /*
+ * Optional GPU top-K candidate sampling path (DS4_METAL_LAGUNA_GPU_SAMPLE).
+ *
+ * The default decode reads back the full logits row and samples host-side.
+ * This opt-in path keeps the row GPU-resident and reads back only the top-K
+ * (id, logit) candidates plus {max_logit, best_id, sum_T, n_finite} so the host
+ * can mirror sample_fast_top_p without the O(V) readback/expf passes.
+ *
+ * The host sampling semantics use isfinite() (NaN and +/-Inf are skipped), so
+ * these kernels classify finiteness the same way; this differs from the raw
+ * argmax kernel above, which only rejects NaN.  Three deterministic dispatches
+ * (no atomics) produce the exact top-K by (logit desc, id asc):
+ *   1. reduce:  global max_logit / best_id / n_finite over one workgroup.
+ *   2. pass:    per-workgroup top-512 (streaming bitonic merge) + partial sum_T.
+ *   3. merge:   streaming bitonic merge of the nwg workgroup results -> top-512
+ *               and tree-sum of the partial sums -> sum_T.
+ *
+ * The accepted drift vs the stock path is solely in sum_T: the GPU uses a
+ * tree reduction and the Metal fast-math exp(), while the host accumulates
+ * expf() sequentially in vocab-id order.  This can move a min_p/top_p boundary
+ * decision by ulps; the host candidate sampler falls back to the exact stock
+ * path whenever its coverage gate fails, so the fallback is bit-identical.
+ */
+
+#define DS4_LAGUNA_TOPK_K 512u
+#define DS4_LAGUNA_TOPK_N 1024u        /* bitonic work buffer: K candidates + K incoming */
+#define DS4_LAGUNA_TOPK_THREADS 256u
+#define DS4_LAGUNA_TOPK_BLOCK 512u     /* candidates loaded per streaming round */
+#define DS4_LAGUNA_TOPK_SLICE 8192u    /* vocab elements per pass-2 workgroup */
+
+struct ds4_laguna_topk_cand {
+    uint  id;
+    float logit;
+};
+
+struct ds4_laguna_logits_candidates_stats {
+    float max_logit;
+    float sum_T;
+    int   best_id;
+    int   n_finite;
+    int   n_candidates;
+    int   pad;
+};
+
+static inline bool ds4_laguna_topk_before(
+        ds4_laguna_topk_cand a, ds4_laguna_topk_cand b) {
+    /* Order used by the host heap/qsort: larger logit first, ties to lower
+     * id. Sorting ascending by this comparator yields that order. */
+    if (a.logit != b.logit) return a.logit > b.logit;
+    return a.id < b.id;
+}
+
+static inline ds4_laguna_topk_cand ds4_laguna_topk_sentinel(void) {
+    /* -INFINITY sorts strictly below every finite logit; the sentinel id is
+     * larger than any real vocab id so sentinels never displace a real
+     * candidate on a logit tie (there is none, but it keeps the order total). */
+    ds4_laguna_topk_cand s;
+    s.id = 0xFFFFFFFFu;
+    s.logit = -INFINITY;
+    return s;
+}
+
+/* Bitonic sort of DS4_LAGUNA_TOPK_N (1024) candidates in threadgroup memory,
+ * ascending by ds4_laguna_topk_before (i.e. descending logit, id asc).  256
+ * threads each own four contiguous slots; the (i ^ j) partner and the
+ * (i & kk) block-direction are the standard bitonic network. */
+static inline void ds4_laguna_topk_bitonic_sort(
+        threadgroup ds4_laguna_topk_cand *cands, uint tid) {
+    for (uint kk = 2u; kk <= DS4_LAGUNA_TOPK_N; kk <<= 1u) {
+        for (uint j = kk >> 1u; j > 0u; j >>= 1u) {
+            for (uint e = 0u; e < 4u; e++) {
+                uint i = tid * 4u + e;
+                uint ixj = i ^ j;
+                if (ixj > i) {
+                    bool asc = ((i & kk) == 0u);
+                    ds4_laguna_topk_cand a = cands[i];
+                    ds4_laguna_topk_cand b = cands[ixj];
+                    bool sw = asc ? ds4_laguna_topk_before(b, a)
+                                  : ds4_laguna_topk_before(a, b);
+                    if (sw) { cands[i] = b; cands[ixj] = a; }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}
+
+/* Dispatch 1: one workgroup reduces max_logit / best_id / n_finite.  Mirrors
+ * the argmax kernel shape but counts only isfinite() values (matches the host
+ * sampling max scan, which excludes +/-Inf as well as NaN). */
+kernel void kernel_laguna_logits_reduce_f32(
+        device const float *logits [[buffer(0)]],
+        device ds4_laguna_logits_candidates_stats *stats_out [[buffer(1)]],
+        constant uint &n_vocab [[buffer(2)]],
+        threadgroup float *best_values [[threadgroup(0)]],
+        threadgroup uint  *best_indices [[threadgroup(1)]],
+        threadgroup uint  *finite_counts [[threadgroup(2)]],
+        uint tid [[thread_index_in_threadgroup]],
+        ushort3 ntg_u [[threads_per_threadgroup]]) {
+    const uint nth = (uint)ntg_u.x;
+    float best_value = -INFINITY;
+    uint best_index = 0u;
+    uint finite = 0u;
+    for (uint i = tid; i < n_vocab; i += nth) {
+        const float v = logits[i];
+        if (isfinite(v)) {
+            finite++;
+            if (v > best_value) {
+                best_value = v;
+                best_index = i;
+            }
+        }
+    }
+    best_values[tid] = best_value;
+    best_indices[tid] = best_index;
+    finite_counts[tid] = finite;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint step = nth >> 1u; step != 0u; step >>= 1u) {
+        if (tid < step) {
+            const float ov = best_values[tid + step];
+            const uint oi = best_indices[tid + step];
+            const float cv = best_values[tid];
+            const uint ci = best_indices[tid];
+            if (ov > cv || (ov == cv && oi < ci)) {
+                best_values[tid] = ov;
+                best_indices[tid] = oi;
+            }
+            finite_counts[tid] += finite_counts[tid + step];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0u) {
+        stats_out[0].max_logit = best_values[0];
+        stats_out[0].best_id = (int)best_indices[0];
+        stats_out[0].n_finite = (int)finite_counts[0];
+        stats_out[0].sum_T = 0.0f;
+        stats_out[0].n_candidates = 0;
+        stats_out[0].pad = 0;
+    }
+}
+
+/* Dispatch 2: each workgroup keeps the top-K of its vocab slice via streaming
+ * bitonic merge (top-K in slots [0, K), incoming block in [K, 2K)) and computes
+ * its partial sum_T = sum of exp((v - max_logit)/temperature) over finite v. */
+kernel void kernel_laguna_logits_topk_pass_f32(
+        device const float *logits [[buffer(0)]],
+        device ds4_laguna_topk_cand *cands_out [[buffer(1)]],
+        device float *partial_sum_out [[buffer(2)]],
+        device const ds4_laguna_logits_candidates_stats *stats_in [[buffer(3)]],
+        constant uint &n_vocab [[buffer(4)]],
+        constant float &temperature [[buffer(5)]],
+        constant uint &nwg [[buffer(6)]],
+        uint wg_id [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]],
+        threadgroup ds4_laguna_topk_cand *cands [[threadgroup(0)]],
+        threadgroup float *partials [[threadgroup(1)]]) {
+    (void)nwg;
+    const float max_logit = stats_in[0].max_logit;
+    const float inv_t = 1.0f / temperature;
+    const uint base = wg_id * DS4_LAGUNA_TOPK_SLICE;
+    const uint slice_end = base + DS4_LAGUNA_TOPK_SLICE;
+    const ds4_laguna_topk_cand sentinel = ds4_laguna_topk_sentinel();
+    const uint nblocks = DS4_LAGUNA_TOPK_SLICE / DS4_LAGUNA_TOPK_BLOCK;
+
+    /* Prime: load block 0 into [0, K), pad [K, 2K) with sentinels, sort. */
+    for (uint e = 0u; e < 2u; e++) {
+        const uint lane = tid * 2u + e;
+        uint gi = base + lane;
+        ds4_laguna_topk_cand c = sentinel;
+        if (gi < n_vocab) {
+            const float v = logits[gi];
+            if (isfinite(v)) { c.id = gi; c.logit = v; }
+        }
+        cands[lane] = c;
+    }
+    for (uint e = 0u; e < 2u; e++) {
+        const uint lane = DS4_LAGUNA_TOPK_K + tid * 2u + e;
+        if (lane < DS4_LAGUNA_TOPK_N) cands[lane] = sentinel;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    ds4_laguna_topk_bitonic_sort(cands, tid);
+
+    /* Stream the remaining blocks: load into [K, 2K), sort, keep [0, K). */
+    for (uint b = 1u; b < nblocks; b++) {
+        for (uint e = 0u; e < 2u; e++) {
+            const uint lane = tid * 2u + e;
+            uint gi = base + b * DS4_LAGUNA_TOPK_BLOCK + lane;
+            ds4_laguna_topk_cand c = sentinel;
+            if (gi < n_vocab) {
+                const float v = logits[gi];
+                if (isfinite(v)) { c.id = gi; c.logit = v; }
+            }
+            cands[DS4_LAGUNA_TOPK_K + lane] = c;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        ds4_laguna_topk_bitonic_sort(cands, tid);
+    }
+
+    for (uint e = 0u; e < 2u; e++) {
+        const uint lane = tid * 2u + e;
+        cands_out[wg_id * DS4_LAGUNA_TOPK_K + lane] = cands[lane];
+    }
+
+    /* Partial sum_T over this workgroup's slice (independent strided scan). */
+    float psum = 0.0f;
+    for (uint gi = base + tid; gi < slice_end && gi < n_vocab; gi += DS4_LAGUNA_TOPK_THREADS) {
+        const float v = logits[gi];
+        if (isfinite(v)) psum += exp((v - max_logit) * inv_t);
+    }
+    partials[tid] = psum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = DS4_LAGUNA_TOPK_THREADS >> 1u; s != 0u; s >>= 1u) {
+        if (tid < s) partials[tid] += partials[tid + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) partial_sum_out[wg_id] = partials[0];
+}
+
+/* Dispatch 3: one workgroup merges the nwg workgroup top-K buffers into the
+ * global top-K (streaming bitonic merge, final result written to [0, K)) and
+ * tree-sums the partial sum_T values. */
+kernel void kernel_laguna_logits_topk_merge_f32(
+        device ds4_laguna_topk_cand *cands [[buffer(0)]],
+        device const float *partial_sum [[buffer(1)]],
+        device ds4_laguna_logits_candidates_stats *stats [[buffer(2)]],
+        constant uint &nwg [[buffer(3)]],
+        uint tid [[thread_index_in_threadgroup]],
+        threadgroup ds4_laguna_topk_cand *tg_cands [[threadgroup(0)]],
+        threadgroup float *tg_sum [[threadgroup(1)]]) {
+    const ds4_laguna_topk_cand sentinel = ds4_laguna_topk_sentinel();
+
+    for (uint e = 0u; e < 2u; e++) {
+        const uint lane = tid * 2u + e;
+        tg_cands[lane] = cands[lane];
+    }
+    for (uint e = 0u; e < 2u; e++) {
+        const uint lane = DS4_LAGUNA_TOPK_K + tid * 2u + e;
+        if (lane < DS4_LAGUNA_TOPK_N) tg_cands[lane] = sentinel;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    ds4_laguna_topk_bitonic_sort(tg_cands, tid);
+
+    for (uint b = 1u; b < nwg; b++) {
+        for (uint e = 0u; e < 2u; e++) {
+            const uint lane = tid * 2u + e;
+            tg_cands[DS4_LAGUNA_TOPK_K + lane] = cands[b * DS4_LAGUNA_TOPK_K + lane];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        ds4_laguna_topk_bitonic_sort(tg_cands, tid);
+    }
+
+    for (uint e = 0u; e < 2u; e++) {
+        const uint lane = tid * 2u + e;
+        cands[lane] = tg_cands[lane];
+    }
+
+    /* sum_T = tree-sum of the per-workgroup partials. */
+    tg_sum[tid] = (tid < nwg) ? partial_sum[tid] : 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = DS4_LAGUNA_TOPK_THREADS >> 1u; s != 0u; s >>= 1u) {
+        if (tid < s) tg_sum[tid] += tg_sum[tid + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) {
+        stats[0].sum_T = tg_sum[0];
+        const int nf = stats[0].n_finite;
+        stats[0].n_candidates = (nf < (int)DS4_LAGUNA_TOPK_K) ? nf : (int)DS4_LAGUNA_TOPK_K;
+    }
+}
+
+/*
  * Optional Q8_0 Laguna lm-head screen.
  *
  * The screen is deliberately kept separate from the ordinary logits path:

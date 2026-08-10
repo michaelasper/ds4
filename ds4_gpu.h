@@ -628,6 +628,69 @@ int ds4_gpu_laguna_argmax_tensor(
         const ds4_gpu_tensor *logits,
         uint32_t              n_vocab);
 
+/* Optional GPU top-K candidate sampling path (DS4_METAL_LAGUNA_GPU_SAMPLE).
+ * Mirrors the argmax API trio but produces the top-K (id, logit) candidates
+ * plus reduction stats instead of a single winner, so the host can sample
+ * without reading back the full logits row.  The candidate set and
+ * max_logit/best_id are exact; sum_T is a GPU tree-reduced sum of fast-math
+ * exp() and may differ from the host's sequential expf() sum by ulps (the host
+ * candidate sampler falls back to the exact stock path on coverage failure).
+ *
+ * Layout (must match metal/laguna.metal): K candidates as interleaved
+ * (uint32_t id, float logit) pairs sorted by (logit desc, id asc).  The pass
+ * workgroup count is nwg = ceil(n_vocab / DS4_LAGUNA_TOPK_SLICE). */
+#define DS4_LAGUNA_TOPK_K 512u
+#define DS4_LAGUNA_TOPK_SLICE 8192u
+
+static inline uint32_t ds4_gpu_laguna_logits_candidates_nwg(uint32_t n_vocab) {
+    return (n_vocab + DS4_LAGUNA_TOPK_SLICE - 1u) / DS4_LAGUNA_TOPK_SLICE;
+}
+
+typedef struct {
+    uint32_t id;
+    float    logit;
+} ds4_gpu_logit_candidate;
+
+typedef struct {
+    float    max_logit;    /* max over finite logits (exact) */
+    float    sum_T;        /* sum of exp((v - max_logit)/temperature) over finite v */
+    int32_t  best_id;      /* argmax over finite logits, ties to lowest id (exact) */
+    int32_t  n_finite;     /* count of isfinite() logits */
+    int32_t  n_candidates;/* min(K, n_finite): valid entries in candidates[0..n) */
+    int32_t  pad;
+} ds4_gpu_logits_candidates_stats;
+
+int ds4_gpu_laguna_logits_candidates_available(void);
+
+/* Run the three-dispatch candidates kernel on `logits` (n_vocab F32 values,
+ * kept GPU-resident) using the caller-allocated scratch tensors and leave the
+ * top-K candidates + stats resident in them.  Mirrors ds4_gpu_laguna_argmax_tensor:
+ *   cands         - nwg * K * sizeof(ds4_gpu_logit_candidate) bytes; the final
+ *                   top-K is in [0, K) on return.
+ *   partial_sum   - nwg * sizeof(float) bytes of scratch.
+ *   stats         - sizeof(ds4_gpu_logits_candidates_stats) bytes; filled with
+ *                   max_logit/best_id/n_finite/sum_T/n_candidates.
+ * The caller reads the results back with ds4_gpu_tensor_read after this
+ * returns (the command buffer is waited).  Returns 1 on success, 0 on any
+ * failure (the host then falls back to full readback + stock sampling). */
+int ds4_gpu_laguna_logits_candidates_tensor(
+        ds4_gpu_tensor       *cands,
+        ds4_gpu_tensor       *partial_sum,
+        ds4_gpu_tensor       *stats,
+        const ds4_gpu_tensor *logits,
+        uint32_t              n_vocab,
+        float                 temperature);
+
+/* Host-side candidate sampler mirror exposed for A/B testing against the
+ * stock ds4_test_sample_logits path.  Always declared so the Metal ds4_test
+ * binary (which links the standard ds4.o) can reference it.  Returns 1 on
+ * success (token written), 0 to request the stock fallback. */
+int ds4_test_sample_candidates(const ds4_gpu_logit_candidate *cands,
+                               const ds4_gpu_logits_candidates_stats *stats,
+                               float temperature, int top_k,
+                               float top_p, float min_p, uint64_t *rng,
+                               int *token_out);
+
 /* Opt-in Laguna decode-only MoE residual fusion.  This Apple-only API is
  * intentionally append-only: dense layer 0 reuses the cross-backend
  * ds4_gpu_add_rms_norm_weight_rows_tensor API above, while this entry point

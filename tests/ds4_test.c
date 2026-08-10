@@ -9077,6 +9077,267 @@ static void test_metal_laguna_gpu_argmax(void) {
     }
 }
 
+/* ---- GPU top-K candidate sampling (DS4_METAL_LAGUNA_GPU_SAMPLE) ---- */
+
+/* Host reference for the candidates kernel: exact top-K by (logit desc, id
+ * asc) over isfinite() logits, plus max/best/n_finite and the sequential
+ * expf() sum_T the stock sampler accumulates. */
+static int test_laguna_cand_cmp(const void *a, const void *b) {
+    const ds4_gpu_logit_candidate *ca = a;
+    const ds4_gpu_logit_candidate *cb = b;
+    if (ca->logit != cb->logit) return cb->logit > ca->logit ? 1 : -1;
+    return ca->id > cb->id ? 1 : (ca->id < cb->id ? -1 : 0);
+}
+static void test_laguna_logits_candidates_host(
+        const float *logits, uint32_t n, float temperature,
+        ds4_gpu_logit_candidate *out_cands,
+        ds4_gpu_logits_candidates_stats *out_stats) {
+    uint32_t ni = 0xff800000u;
+    float neg_inf;
+    memcpy(&neg_inf, &ni, sizeof(neg_inf));
+    float max_logit = neg_inf;
+    int best_id = 0;
+    uint32_t finite = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!isfinite(logits[i])) continue;
+        finite++;
+        if (logits[i] > max_logit) { max_logit = logits[i]; best_id = (int)i; }
+    }
+    ds4_gpu_logit_candidate *all =
+        malloc((size_t)finite * sizeof(*all));
+    TEST_ASSERT(all != NULL);
+    uint32_t f = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!isfinite(logits[i])) continue;
+        all[f].id = i;
+        all[f].logit = logits[i];
+        f++;
+    }
+    qsort(all, (size_t)finite, sizeof(all[0]), test_laguna_cand_cmp);
+    const uint32_t k = finite < DS4_LAGUNA_TOPK_K ? finite : DS4_LAGUNA_TOPK_K;
+    for (uint32_t i = 0; i < k; i++) out_cands[i] = all[i];
+    for (uint32_t i = k; i < DS4_LAGUNA_TOPK_K; i++) {
+        out_cands[i].id = 0xFFFFFFFFu;
+        out_cands[i].logit = neg_inf;
+    }
+    free(all);
+    float sum_T = 0.0f;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!isfinite(logits[i])) continue;
+        sum_T += expf((logits[i] - max_logit) / temperature);
+    }
+    out_stats->max_logit = max_logit;
+    out_stats->best_id = best_id;
+    out_stats->n_finite = (int32_t)finite;
+    out_stats->n_candidates = (int32_t)k;
+    out_stats->sum_T = sum_T;
+    out_stats->pad = 0;
+}
+
+static void test_metal_laguna_gpu_logits_candidates(void) {
+    static const uint32_t sizes[] = {
+        1u, 7u, 511u, 513u, 8191u, 8193u, 65535u, 100352u,
+    };
+    static const float temps[] = { 0.7f, 1.0f, 1.5f };
+    static const uint32_t nan_bits[] = {
+        0x7fc12345u, 0x7fa00001u, 0xffc12345u, 0xffa00001u,
+    };
+    float nan_values[4];
+    for (size_t i = 0; i < 4; i++) memcpy(&nan_values[i], &nan_bits[i], 4);
+    float pos_inf, neg_inf;
+    uint32_t pi = 0x7f800000u, ni = 0xff800000u;
+    memcpy(&pos_inf, &pi, 4); memcpy(&neg_inf, &ni, 4);
+
+    const int available = ds4_gpu_laguna_logits_candidates_available();
+    if (!available) {
+        fprintf(stderr,
+                "ds4-test: Laguna GPU logits candidates pipeline unavailable; "
+                "skipped\n");
+        return;
+    }
+
+    float max_rel = 0.0f;
+    for (size_t si = 0; si < sizeof(sizes) / sizeof(sizes[0]); si++) {
+        for (size_t ti = 0; ti < sizeof(temps) / sizeof(temps[0]); ti++) {
+            const uint32_t n = sizes[si];
+            const float temperature = temps[ti];
+            const uint32_t nwg = ds4_gpu_laguna_logits_candidates_nwg(n);
+            const uint64_t lbytes = (uint64_t)n * sizeof(float);
+            const uint64_t cbytes =
+                (uint64_t)nwg * DS4_LAGUNA_TOPK_K * sizeof(ds4_gpu_logit_candidate);
+            float *values = malloc(lbytes);
+            ds4_gpu_logit_candidate *hcands =
+                malloc((size_t)DS4_LAGUNA_TOPK_K * sizeof(*hcands));
+            ds4_gpu_logit_candidate *gcands =
+                malloc((size_t)DS4_LAGUNA_TOPK_K * sizeof(*gcands));
+            ds4_gpu_logits_candidates_stats hstats, gstats;
+            ds4_gpu_tensor *logits = ds4_gpu_tensor_alloc(lbytes);
+            ds4_gpu_tensor *cands = ds4_gpu_tensor_alloc(cbytes);
+            ds4_gpu_tensor *psum = ds4_gpu_tensor_alloc((uint64_t)nwg * sizeof(float));
+            ds4_gpu_tensor *stats = ds4_gpu_tensor_alloc(sizeof(gstats));
+            TEST_ASSERT(values && hcands && gcands && logits && cands &&
+                        psum && stats);
+            if (!values || !hcands || !gcands || !logits || !cands || !psum ||
+                !stats) {
+                free(values); free(hcands); free(gcands);
+                ds4_gpu_tensor_free(logits); ds4_gpu_tensor_free(cands);
+                ds4_gpu_tensor_free(psum); ds4_gpu_tensor_free(stats);
+                continue;
+            }
+
+            /* Peaked + flat + ties + a few non-finite entries. */
+            uint32_t state = 0x1234567u ^ (uint32_t)si * 2654435761u ^
+                            (uint32_t)ti * 40503u;
+            for (uint32_t i = 0; i < n; i++) {
+                state = state * 1664525u + 1013904223u;
+                values[i] = ((float)(state >> 8) / 16777216.0f) * 40.0f - 20.0f;
+            }
+            if (n > 8) {
+                values[0] = 50.0f;
+                values[1] = 49.5f;
+                values[n / 2] = 49.5f;      /* tie with id 1 -> id 1 wins */
+                values[2] = nan_values[si % 4];
+                values[3] = pos_inf;
+                values[4] = neg_inf;
+                if (n > 10) values[n - 1] = 49.5f; /* another tie */
+            }
+
+            TEST_ASSERT(ds4_gpu_tensor_write(logits, 0, values, lbytes) != 0);
+            TEST_ASSERT(ds4_gpu_laguna_logits_candidates_tensor(
+                cands, psum, stats, logits, n, temperature) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(cands, 0, gcands,
+                (uint64_t)DS4_LAGUNA_TOPK_K * sizeof(*gcands)) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(stats, 0, &gstats, sizeof(gstats)) != 0);
+
+            test_laguna_logits_candidates_host(values, n, temperature, hcands, &hstats);
+
+            TEST_ASSERT(gstats.n_finite == hstats.n_finite);
+            TEST_ASSERT(gstats.best_id == hstats.best_id);
+            TEST_ASSERT(gstats.n_candidates == hstats.n_candidates);
+            /* max_logit is exact (raw logit compare). */
+            TEST_ASSERT(gstats.max_logit == hstats.max_logit);
+            /* sum_T: tree-reduced fast-math exp() vs sequential expf(). */
+            const float rel = fabsf(gstats.sum_T - hstats.sum_T) /
+                              (hstats.sum_T > 0.0f ? hstats.sum_T : 1.0f);
+            if (rel > max_rel) max_rel = rel;
+            TEST_ASSERT(rel < 1e-4f);
+            /* Candidate set must be exactly the host top-K (same order). */
+            const int nc = gstats.n_candidates;
+            for (int i = 0; i < nc; i++) {
+                TEST_ASSERT(gcands[i].id == hcands[i].id);
+                TEST_ASSERT(gcands[i].logit == hcands[i].logit);
+            }
+
+            free(values); free(hcands); free(gcands);
+            ds4_gpu_tensor_free(logits); ds4_gpu_tensor_free(cands);
+            ds4_gpu_tensor_free(psum); ds4_gpu_tensor_free(stats);
+        }
+    }
+    fprintf(stderr,
+            "ds4-test: Laguna GPU logits candidates sum_T max rel diff = %.3e\n",
+            (double)max_rel);
+}
+
+/* Sampling A/B: sample_candidates (host-exact inputs) must equal the stock
+ * ds4_test_sample_logits path token-for-token, since with the exact host
+ * top-K and the exact sequential sum_T the arithmetic is identical.  This
+ * validates the operation-for-operation mirror in isolation from the GPU
+ * sum_T drift. */
+static void test_laguna_gpu_sample_candidates_ab(void) {
+    const uint32_t n = 1024u;
+    const float temps[] = { 0.6f, 1.0f, 1.7f };
+    const int top_ks[] = { 0, 40, 512 };
+    const float top_ps[] = { 0.9f, 0.95f, 1.0f };
+    const float min_ps[] = { 0.0f, 0.05f };
+    float *logits = malloc((size_t)n * sizeof(float));
+    float *scratch = malloc((size_t)n * sizeof(float));
+    ds4_gpu_logit_candidate *hcands =
+        malloc((size_t)DS4_LAGUNA_TOPK_K * sizeof(*hcands));
+    ds4_gpu_logits_candidates_stats hstats;
+    TEST_ASSERT(logits && scratch && hcands);
+    if (!logits || !scratch || !hcands) {
+        free(logits); free(scratch); free(hcands); return;
+    }
+
+    uint32_t nan_bits = 0x7fc00000u;
+    float nan_val;
+    memcpy(&nan_val, &nan_bits, sizeof(nan_val));
+
+    int cases = 0, mismatches = 0, fallbacks = 0;
+    for (uint32_t dist = 0; dist < 8u; dist++) {
+        uint32_t st = 0xdeadbeefu ^ dist * 2654435761u;
+        for (uint32_t i = 0; i < n; i++) {
+            st = st * 1664525u + 1013904223u;
+            float v = ((float)(st >> 8) / 16777216.0f) * 30.0f - 15.0f;
+            if (dist % 3 == 0) v = (i < 20) ? (20.0f - (float)i * 0.3f) : v - 5.0f;
+            if (dist % 3 == 1 && i > 0 && i % 200 == 0) v += 8.0f;
+            logits[i] = v;
+        }
+        if (dist % 4 == 0 && n > 5) logits[2] = nan_val;
+
+        for (size_t ti = 0; ti < sizeof(temps) / sizeof(temps[0]); ti++) {
+            for (size_t ki = 0; ki < sizeof(top_ks) / sizeof(top_ks[0]); ki++) {
+                for (size_t pi = 0; pi < sizeof(top_ps) / sizeof(top_ps[0]); pi++) {
+                    for (size_t mi = 0; mi < sizeof(min_ps) / sizeof(min_ps[0]); mi++) {
+                        const float temperature = temps[ti];
+                        const int top_k = top_ks[ki];
+                        const float top_p = top_ps[pi];
+                        const float min_p = min_ps[mi];
+                        for (uint32_t seed = 0; seed < 4u; seed++) {
+                            uint64_t rng_s = 0x9e3779b97f4a7c15ULL ^
+                            ((uint64_t)dist << 32) ^ (uint64_t)seed ^
+                            ((uint64_t)ti << 8);
+                            uint64_t rng_c = rng_s;
+                            const int stock = ds4_test_sample_logits(
+                                logits, n, temperature, top_k, top_p, min_p,
+                                &rng_s, scratch);
+                            test_laguna_logits_candidates_host(
+                                logits, n, temperature, hcands, &hstats);
+                            int cand = -1;
+                            const int rc = ds4_test_sample_candidates(
+                                hcands, &hstats, temperature, top_k, top_p,
+                                min_p, &rng_c, &cand);
+                            cases++;
+                            if (!rc) {
+                                /* Fallback: the integrated path runs the stock
+ * sampler, so the emitted token is `stock`.  The hook returns 0
+ * (no token); just sanity-check stock and count the fallback. */
+                                fallbacks++;
+                                TEST_ASSERT(stock >= 0);
+                            } else if (cand != stock) {
+                                mismatches++;
+                                fprintf(stderr,
+                                        "ds4-test: sample_candidates A/B "
+                                        "mismatch dist=%u t=%g k=%d p=%g "
+                                        "m=%g seed=%u stock=%d cand=%d\n",
+                                        dist, temperature, top_k, top_p,
+                                        min_p, seed, stock, cand);
+                                TEST_ASSERT(0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Constructed low-coverage case: a flat distribution with top_k=0 and
+     * top_p<1 must fall back (heap mass < top_p * sum).  Deterministic. */
+    for (uint32_t i = 0; i < n; i++) logits[i] = 0.0f;
+    test_laguna_logits_candidates_host(logits, n, 1.0f, hcands, &hstats);
+    int cand = -99;
+    uint64_t rng = 7;
+    const int rc = ds4_test_sample_candidates(hcands, &hstats, 1.0f, 0,
+                                               0.9f, 0.0f, &rng, &cand);
+    TEST_ASSERT(rc == 0);
+
+    fprintf(stderr,
+            "ds4-test: sample_candidates A/B cases=%d mismatches=%d "
+            "fallbacks=%d (low-coverage fallback ok)\n",
+            cases, mismatches, fallbacks);
+    free(logits); free(scratch); free(hcands);
+}
+
 static void test_metal_laguna_decode_ladder_ordering_exact(void) {
     const uint32_t n = 257u;
     const uint64_t bytes = (uint64_t)n * sizeof(float);
@@ -9289,6 +9550,8 @@ static void test_metal_kernel_group(void) {
     test_metal_laguna_decode_residual_norm_env();
     test_metal_add3_rms_norm_rejects_partial_simd();
     test_metal_laguna_gpu_argmax();
+    test_metal_laguna_gpu_logits_candidates();
+    test_laguna_gpu_sample_candidates_ab();
     test_metal_laguna_decode_ladder_ordering_exact();
     test_metal_laguna_q8_lmhead_screen_gates();
     test_metal_laguna_q8_lmhead_screen();
@@ -11191,6 +11454,12 @@ static const ds4_test_entry test_entries[] = {
     {"--local-golden-vectors", "local-golden-vectors", "local top-k/logit drift regression for long Metal prefill", test_local_golden_vectors, false},
     {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4, false},
     {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group, false},
+    {"--metal-laguna-gpu-logits-candidates", "metal-laguna-gpu-logits-candidates",
+     "Laguna GPU top-K candidate sampling kernel + host sampler A/B",
+     test_metal_laguna_gpu_logits_candidates, true},
+    {"--metal-laguna-gpu-sample-candidates-ab", "metal-laguna-gpu-sample-candidates-ab",
+     "Laguna GPU candidate host sampler A/B against stock sampling",
+     test_laguna_gpu_sample_candidates_ab, true},
 #if defined(__APPLE__)
     {"--metal-laguna-q8-lmhead-screen", "metal-laguna-q8-lmhead-screen",
      "certified Laguna Q8 lm-head top-1 screen (focused opt-in)",
