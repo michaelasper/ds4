@@ -5738,6 +5738,186 @@ static void test_laguna_gqa3_decode_numeric(void) {
     ds4_gpu_cleanup();
 #endif
 }
+
+/*
+ * DS4_METAL_LAGUNA_DIRECT_KV_PREFILL A/B.  The direct non-SWA path converts
+ * the chunk straight into the cache slot and folds the commit away, so heads
+ * and the committed ring must stay bit-identical to the staged path, chunk
+ * after chunk.  A chunk that would wrap the ring must keep the staged path
+ * even with the flag set.
+ */
+static void test_laguna_prefill_direct_kv_ab_case(
+        uint32_t n_head,
+        uint32_t n_head_kv) {
+    const uint32_t head_dim = 128u;
+    const uint32_t cache_cap = 1024u;
+    const uint32_t cache_width = n_head_kv * head_dim;
+    const float scale = 1.0f / sqrtf((float)head_dim);
+    const uint32_t chunk_pos0[] = {0u, 17u, 990u, 1010u};
+    const uint32_t chunk_tokens[] = {17u, 13u, 24u, 24u};
+    const uint32_t n_chunks = 4u;
+    const uint32_t max_tokens = 24u;
+    const uint64_t q_values = (uint64_t)max_tokens * n_head * head_dim;
+    const uint64_t kv_values = (uint64_t)max_tokens * cache_width;
+    const uint64_t gate_values = (uint64_t)max_tokens * n_head;
+    const uint64_t cache_values = (uint64_t)cache_cap * cache_width;
+
+    float *q_host = malloc((size_t)q_values * sizeof(float));
+    float *k_host = malloc((size_t)kv_values * sizeof(float));
+    float *v_host = malloc((size_t)kv_values * sizeof(float));
+    float *gate_host = malloc((size_t)gate_values * sizeof(float));
+    float *heads_runs[2] = {NULL, NULL};
+    uint16_t *key_runs[2] = {NULL, NULL};
+    uint16_t *value_runs[2] = {NULL, NULL};
+    const uint64_t all_heads_values =
+        (uint64_t)n_chunks * q_values;
+    heads_runs[0] = malloc((size_t)all_heads_values * sizeof(float));
+    heads_runs[1] = malloc((size_t)all_heads_values * sizeof(float));
+    key_runs[0] = malloc((size_t)cache_values * sizeof(uint16_t));
+    key_runs[1] = malloc((size_t)cache_values * sizeof(uint16_t));
+    value_runs[0] = malloc((size_t)cache_values * sizeof(uint16_t));
+    value_runs[1] = malloc((size_t)cache_values * sizeof(uint16_t));
+    TEST_ASSERT(q_host && k_host && v_host && gate_host &&
+                heads_runs[0] && heads_runs[1] && key_runs[0] &&
+                key_runs[1] && value_runs[0] && value_runs[1]);
+
+    char *saved_direct = test_save_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL");
+    for (uint32_t run = 0; run < 2u; run++) {
+        if (run == 1u) {
+            setenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", "1", 1);
+        } else {
+            unsetenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL");
+        }
+        ds4_gpu_tensor *heads =
+            ds4_gpu_tensor_alloc(q_values * sizeof(float));
+        ds4_gpu_tensor *key_cache =
+            ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+        ds4_gpu_tensor *value_cache =
+            ds4_gpu_tensor_alloc(cache_values * sizeof(uint16_t));
+        ds4_gpu_tensor *staged_key =
+            ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+        ds4_gpu_tensor *staged_value =
+            ds4_gpu_tensor_alloc(kv_values * sizeof(uint16_t));
+        ds4_gpu_tensor *q = ds4_gpu_tensor_alloc(q_values * sizeof(float));
+        ds4_gpu_tensor *k = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+        ds4_gpu_tensor *v = ds4_gpu_tensor_alloc(kv_values * sizeof(float));
+        ds4_gpu_tensor *gate =
+            ds4_gpu_tensor_alloc(gate_values * sizeof(float));
+        TEST_ASSERT(heads && key_cache && value_cache && staged_key &&
+                    staged_value && q && k && v && gate);
+        /* Seed the ring so stale-row reads cannot hide behind zeros. */
+        for (uint64_t i = 0; i < cache_values; i++) {
+            key_runs[run][i] = (uint16_t)(0x5A00u | (i % 251u));
+            value_runs[run][i] = (uint16_t)(0xA500u | (i % 241u));
+        }
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        key_cache, 0, key_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        value_cache, 0, value_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+
+        for (uint32_t chunk = 0; chunk < n_chunks; chunk++) {
+            const uint32_t n_tokens = chunk_tokens[chunk];
+            const uint64_t chunk_q = (uint64_t)n_tokens * n_head * head_dim;
+            const uint64_t chunk_kv = (uint64_t)n_tokens * cache_width;
+            const uint64_t chunk_gate = (uint64_t)n_tokens * n_head;
+            for (uint64_t i = 0; i < chunk_q; i++) {
+                const int value = (int)((i * 37u + (i >> 3u) * 11u +
+                                         chunk * 29u + 5u) % 191u) - 95;
+                q_host[i] = (float)value / 384.0f;
+            }
+            for (uint64_t i = 0; i < chunk_kv; i++) {
+                const int key_value = (int)((i * 29u + (i >> 2u) * 17u +
+                                             chunk * 31u + 7u) % 181u) - 90;
+                const int value_value = (int)((i * 31u + (i >> 4u) * 13u +
+                                               chunk * 23u + 3u) % 173u) - 86;
+                k_host[i] = (float)key_value / 352.0f;
+                v_host[i] = (float)value_value / 320.0f;
+            }
+            for (uint64_t i = 0; i < chunk_gate; i++) {
+                gate_host[i] =
+                    ((float)((int)((i + chunk) % 13u) - 6)) * 0.1875f;
+            }
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            q, 0, q_host, chunk_q * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            k, 0, k_host, chunk_kv * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            v, 0, v_host, chunk_kv * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            gate, 0, gate_host,
+                            chunk_gate * sizeof(float)) != 0);
+            TEST_ASSERT(ds4_gpu_laguna_attention_prefill_tensor(
+                            heads, key_cache, value_cache, staged_key,
+                            staged_value, q, k, v, gate,
+                            chunk_pos0[chunk], n_tokens, cache_cap,
+                            n_head, n_head_kv, head_dim, scale, 0) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            heads, 0,
+                            heads_runs[run] + chunk * q_values,
+                            chunk_q * sizeof(float)) != 0);
+        }
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        key_cache, 0, key_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        value_cache, 0, value_runs[run],
+                        cache_values * sizeof(uint16_t)) != 0);
+
+        ds4_gpu_tensor_free(gate);
+        ds4_gpu_tensor_free(v);
+        ds4_gpu_tensor_free(k);
+        ds4_gpu_tensor_free(q);
+        ds4_gpu_tensor_free(staged_value);
+        ds4_gpu_tensor_free(staged_key);
+        ds4_gpu_tensor_free(value_cache);
+        ds4_gpu_tensor_free(key_cache);
+        ds4_gpu_tensor_free(heads);
+    }
+    test_restore_env("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL", saved_direct);
+
+    /* The wrapping tail chunk keeps the staged path under the flag, so all
+     * four chunks and the whole ring must match bit for bit. */
+    for (uint32_t chunk = 0; chunk < n_chunks; chunk++) {
+        const size_t chunk_heads = (size_t)chunk_tokens[chunk] *
+            n_head * head_dim;
+        TEST_ASSERT(memcmp(heads_runs[0] + chunk * q_values,
+                           heads_runs[1] + chunk * q_values,
+                           chunk_heads * sizeof(float)) == 0);
+    }
+    TEST_ASSERT(memcmp(key_runs[0], key_runs[1],
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    TEST_ASSERT(memcmp(value_runs[0], value_runs[1],
+                       (size_t)cache_values * sizeof(uint16_t)) == 0);
+    fprintf(stderr,
+            "ds4-test: Laguna direct KV prefill A/B bit-exact "
+            "(heads=%u kv=%u)\n",
+            n_head, n_head_kv);
+
+    free(value_runs[1]);
+    free(value_runs[0]);
+    free(key_runs[1]);
+    free(key_runs[0]);
+    free(heads_runs[1]);
+    free(heads_runs[0]);
+    free(gate_host);
+    free(v_host);
+    free(k_host);
+    free(q_host);
+}
+
+static void test_laguna_prefill_direct_kv_ab(void) {
+#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    TEST_ASSERT(ds4_gpu_init() != 0);
+#endif
+    /* Plain GQA (ratio 4) and grouped GQA3 (ratio 3) staged-slot views. */
+    test_laguna_prefill_direct_kv_ab_case(8u, 2u);
+    test_laguna_prefill_direct_kv_ab_case(9u, 3u);
+#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    ds4_gpu_cleanup();
+#endif
+}
 #endif
 
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
@@ -11178,6 +11358,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-attention-numeric", "laguna-attention-numeric",
      "Laguna decode attention against a double-precision reference",
      test_laguna_gqa3_decode_numeric, false},
+    {"--laguna-prefill-direct-kv-ab", "laguna-prefill-direct-kv-ab",
+     "bit-exact A/B of the opt-in direct non-SWA prefill KV store",
+     test_laguna_prefill_direct_kv_ab, false},
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
     {"--cuda-laguna-moe", "cuda-laguna-moe",
      "CUDA Laguna Q8 signal and Q4/Q3 MoE prefill/decode numerics",
