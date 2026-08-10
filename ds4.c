@@ -22632,24 +22632,109 @@ typedef enum {
     METAL_DECODE_LAYER_FROM_ROUTER,
 } metal_decode_layer_phase;
 
+/* Decode-layer feature switches are process-constant env probes.  The
+ * decode layer encoder runs once per layer per generated token, so resolve
+ * the whole set lazily on first use instead of paying ~20 getenv calls per
+ * invocation.  Same cache idiom as metal_graph_env_flag: like those flags,
+ * a different value must be set before the first decode encode. */
+typedef struct {
+    bool disable_pre_m5_decode_ports;
+    bool disable_pre_m5_parallel_full_ffn;
+    bool disable_m5_parallel_full_ffn;
+    bool disable_pre_m5_hc_producer_pre_norm_fuse;
+    bool disable_m5_hc_producer_pre_norm_fuse;
+    bool disable_pre_m5_qkv_pair_quad_fuse;
+    bool disable_m5_qkv_pair_quad_fuse;
+    bool disable_pre_m5_qkv_pair_compressor_fuse;
+    bool disable_m5_qkv_pair_compressor_fuse;
+    bool disable_pre_m5_comp_finalize_fuse;
+    bool disable_m5_comp_finalize_fuse;
+    bool disable_pre_m5_attn_inv_rope_fuse;
+    bool disable_pre_m5_hc_norm_mix_fuse;
+    bool disable_pre_m5_qkv_norm_kv_store_fuse;
+    bool disable_pre_m5_kv_rope_fp8_fuse;
+    bool disable_pre_m5_compressor_quad_store;
+    bool disable_pre_m5_router_shared_fuse;
+    bool disable_m5_router_project_select_fuse;
+    bool disable_routed_pair_swiglu_fusion;
+    bool moe_one_stage_profile;
+    bool moe_write_clamped_act;
+    bool q8_mv_nsg_override;
+    bool moe_replay_selected_ids;
+} metal_decode_env_switches;
+
+static const metal_decode_env_switches *metal_decode_env_switches_get(void) {
+    static metal_decode_env_switches s;
+    static int initialized = 0;
+    if (!initialized) {
+        s.disable_pre_m5_decode_ports =
+            getenv("DS4_METAL_DISABLE_PRE_M5_DECODE_PORTS") != NULL;
+        s.disable_pre_m5_parallel_full_ffn =
+            getenv("DS4_METAL_DISABLE_PRE_M5_PARALLEL_FULL_FFN") != NULL;
+        s.disable_m5_parallel_full_ffn =
+            getenv("DS4_METAL_DISABLE_M5_PARALLEL_FULL_FFN") != NULL;
+        s.disable_pre_m5_hc_producer_pre_norm_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_HC_PRODUCER_PRE_NORM_FUSE") != NULL;
+        s.disable_m5_hc_producer_pre_norm_fuse =
+            getenv("DS4_METAL_DISABLE_M5_HC_PRODUCER_PRE_NORM_FUSE") != NULL;
+        s.disable_pre_m5_qkv_pair_quad_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_QKV_PAIR_QUAD_FUSE") != NULL;
+        s.disable_m5_qkv_pair_quad_fuse =
+            getenv("DS4_METAL_DISABLE_M5_QKV_PAIR_QUAD_FUSE") != NULL;
+        s.disable_pre_m5_qkv_pair_compressor_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_QKV_PAIR_COMPRESSOR_FUSE") != NULL;
+        s.disable_m5_qkv_pair_compressor_fuse =
+            getenv("DS4_METAL_DISABLE_M5_QKV_PAIR_COMPRESSOR_FUSE") != NULL;
+        s.disable_pre_m5_comp_finalize_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_COMP_FINALIZE_FUSE") != NULL;
+        s.disable_m5_comp_finalize_fuse =
+            getenv("DS4_METAL_DISABLE_M5_COMP_FINALIZE_FUSE") != NULL;
+        s.disable_pre_m5_attn_inv_rope_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_ATTN_INV_ROPE_FUSE") != NULL;
+        s.disable_pre_m5_hc_norm_mix_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_HC_NORM_MIX_FUSE") != NULL;
+        s.disable_pre_m5_qkv_norm_kv_store_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_QKV_NORM_KV_STORE_FUSE") != NULL;
+        s.disable_pre_m5_kv_rope_fp8_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_KV_ROPE_FP8_FUSE") != NULL;
+        s.disable_pre_m5_compressor_quad_store =
+            getenv("DS4_METAL_DISABLE_PRE_M5_COMPRESSOR_QUAD_STORE") != NULL;
+        s.disable_pre_m5_router_shared_fuse =
+            getenv("DS4_METAL_DISABLE_PRE_M5_ROUTER_SHARED_FUSE") != NULL;
+        s.disable_m5_router_project_select_fuse =
+            getenv("DS4_METAL_DISABLE_M5_ROUTER_PROJECT_SELECT_FUSE") != NULL;
+        s.disable_routed_pair_swiglu_fusion =
+            getenv("DS4_METAL_DISABLE_ROUTED_PAIR_SWIGLU_FUSION") != NULL;
+        s.moe_one_stage_profile =
+            getenv("DS4_METAL_MOE_ONE_STAGE_PROFILE") != NULL;
+        s.moe_write_clamped_act =
+            getenv("DS4_METAL_MOE_WRITE_CLAMPED_ACT") != NULL;
+        s.q8_mv_nsg_override = getenv("DS4_METAL_Q8_MV_NSG") != NULL;
+        s.moe_replay_selected_ids =
+            getenv("DS4_MOE_REPLAY_SELECTED_IDS") != NULL;
+        initialized = 1;
+    }
+    return &s;
+}
+
 /* M5 ports default to the existing standard M1-M4 Metal path.  Rollbacks
  * dominate the benchmark force-enables on pre-M5 devices so the aggregate
  * switch is a reliable whole-bundle control. */
 static bool metal_graph_ported_m5_decode_feature_enabled(
-        const char *pre_m5_disable_env,
-        const char *m5_disable_env) {
+        bool pre_m5_feature_disabled,
+        bool m5_feature_disabled) {
 #if defined(__APPLE__)
-    if (m5_disable_env && getenv(m5_disable_env) != NULL) return false;
+    if (m5_feature_disabled) return false;
     const bool pre_m5 = ds4_gpu_device_is_pre_m5_apple_silicon();
     if (pre_m5 &&
-        (getenv("DS4_METAL_DISABLE_PRE_M5_DECODE_PORTS") != NULL ||
-         (pre_m5_disable_env && getenv(pre_m5_disable_env) != NULL))) {
+        (metal_decode_env_switches_get()->disable_pre_m5_decode_ports ||
+         pre_m5_feature_disabled)) {
         return false;
     }
     return pre_m5 || ds4_gpu_device_is_m5_apple_silicon();
 #else
-    (void)pre_m5_disable_env;
-    (void)m5_disable_env;
+    (void)pre_m5_feature_disabled;
+    (void)m5_feature_disabled;
     return false;
 #endif
 }
@@ -22669,8 +22754,9 @@ static bool metal_graph_encode_decode_layer_phase(
     /* Defer the post-attention inverse RoPE tail into the FlashAttention reduce
      * kernel, which already owns each head's whole row. Removes one
      * 64-threadgroup dispatch per layer. */
+    const metal_decode_env_switches *env_sw = metal_decode_env_switches_get();
     const bool fuse_attn_inv_rope =
-        getenv("DS4_METAL_DISABLE_PRE_M5_ATTN_INV_ROPE_FUSE") == NULL &&
+        !env_sw->disable_pre_m5_attn_inv_rope_fuse &&
         (ds4_gpu_device_is_pre_m5_apple_silicon() ||
          ds4_gpu_device_is_m5_apple_silicon()) &&
         ds4_gpu_decode_attn_rope_fuse_available() != 0;
@@ -22738,17 +22824,17 @@ static bool metal_graph_encode_decode_layer_phase(
     const bool parallel_ffn_route_eligible =
         phase == METAL_DECODE_LAYER_FULL &&
         metal_graph_ported_m5_decode_feature_enabled(
-            "DS4_METAL_DISABLE_PRE_M5_PARALLEL_FULL_FFN",
-            "DS4_METAL_DISABLE_M5_PARALLEL_FULL_FFN") &&
+            env_sw->disable_pre_m5_parallel_full_ffn,
+            env_sw->disable_m5_parallel_full_ffn) &&
         !g->quality && g->tp_world < 2 &&
         !g->ssd_streaming && !g->ssd_streaming_cold &&
         !g->cuda_tp_decode && !g->cuda_tp_moe && !g->cuda_tp_shared &&
         !decode_stage_profile &&
         !metal_graph_directional_steering_ffn_enabled(g) &&
         metal_graph_debug_get_config()->prefix == NULL &&
-        getenv("DS4_METAL_MOE_ONE_STAGE_PROFILE") == NULL &&
-        getenv("DS4_METAL_MOE_WRITE_CLAMPED_ACT") == NULL &&
-        getenv("DS4_METAL_DISABLE_ROUTED_PAIR_SWIGLU_FUSION") == NULL &&
+        !env_sw->moe_one_stage_profile &&
+        !env_sw->moe_write_clamped_act &&
+        !env_sw->disable_routed_pair_swiglu_fusion &&
         layer->ffn_gate_exps->type == DS4_TENSOR_IQ2_XXS &&
         layer->ffn_up_exps->type == DS4_TENSOR_IQ2_XXS &&
         layer->ffn_down_exps->type == DS4_TENSOR_Q2_K &&
@@ -22762,7 +22848,7 @@ static bool metal_graph_encode_decode_layer_phase(
 #endif
     const bool parallel_full_ffn_eligible =
         parallel_ffn_route_eligible &&
-        getenv("DS4_METAL_Q8_MV_NSG") == NULL &&
+        !env_sw->q8_mv_nsg_override &&
         fuse_shared_gate_up &&
         layer->ffn_down_shexp->type == DS4_TENSOR_Q8_0 &&
         !keep_ffn_out && !metal_graph_use_reference_shared_down_hc() &&
@@ -22881,7 +22967,7 @@ static bool metal_graph_encode_decode_layer_phase(
             hc_dim == 16384u && mix_hc == 24u &&
             layer->hc_attn_fn->type == DS4_TENSOR_F16 &&
             !metal_graph_use_reference_hc_decode() &&
-            getenv("DS4_METAL_DISABLE_PRE_M5_HC_NORM_MIX_FUSE") == NULL &&
+            !env_sw->disable_pre_m5_hc_norm_mix_fuse &&
             (ds4_gpu_device_is_pre_m5_apple_silicon() ||
              ds4_gpu_device_is_m5_apple_silicon()) &&
             ds4_gpu_hc_rms_norm_mix_f16_available() != 0;
@@ -22889,8 +22975,8 @@ static bool metal_graph_encode_decode_layer_phase(
         const bool fuse_producer_pre_norm =
             fuse_norm_mix && fuse_hc_norm &&
             metal_graph_ported_m5_decode_feature_enabled(
-                "DS4_METAL_DISABLE_PRE_M5_HC_PRODUCER_PRE_NORM_FUSE",
-                "DS4_METAL_DISABLE_M5_HC_PRODUCER_PRE_NORM_FUSE");
+                env_sw->disable_pre_m5_hc_producer_pre_norm_fuse,
+                env_sw->disable_m5_hc_producer_pre_norm_fuse);
         if (fuse_producer_pre_norm) {
             const int fused =
                 ds4_gpu_hc_rms_norm_mix_split_norm_f16_tensor(
@@ -23041,8 +23127,8 @@ static bool metal_graph_encode_decode_layer_phase(
         layer->indexer_compressor_kv->dim[1] == 2u * DS4_N_INDEXER_HEAD_DIM &&
         layer->indexer_compressor_gate->dim[1] == 2u * DS4_N_INDEXER_HEAD_DIM &&
         metal_graph_ported_m5_decode_feature_enabled(
-            "DS4_METAL_DISABLE_PRE_M5_QKV_PAIR_QUAD_FUSE",
-            "DS4_METAL_DISABLE_M5_QKV_PAIR_QUAD_FUSE")) {
+            env_sw->disable_pre_m5_qkv_pair_quad_fuse,
+            env_sw->disable_m5_qkv_pair_quad_fuse)) {
         const int fused = ds4_gpu_qkv_pair_quad_compressor_store_tensor(
                 metal_graph_qr(g),
                 metal_graph_kv_raw(g),
@@ -23099,8 +23185,8 @@ static bool metal_graph_encode_decode_layer_phase(
         layer->attn_compressor_kv->dim[1] == DS4_N_HEAD_DIM &&
         layer->attn_compressor_gate->dim[1] == DS4_N_HEAD_DIM &&
         metal_graph_ported_m5_decode_feature_enabled(
-            "DS4_METAL_DISABLE_PRE_M5_QKV_PAIR_COMPRESSOR_FUSE",
-            "DS4_METAL_DISABLE_M5_QKV_PAIR_COMPRESSOR_FUSE")) {
+            env_sw->disable_pre_m5_qkv_pair_compressor_fuse,
+            env_sw->disable_m5_qkv_pair_compressor_fuse)) {
         const int fused = ds4_gpu_qkv_pair_quad_compressor_store_tensor(
                 metal_graph_qr(g),
                 metal_graph_kv_raw(g),
@@ -23223,7 +23309,7 @@ static bool metal_graph_encode_decode_layer_phase(
                 raw_cache != NULL &&
                 raw_row < raw_cap &&
                 phase == METAL_DECODE_LAYER_FULL &&
-                getenv("DS4_METAL_DISABLE_PRE_M5_QKV_NORM_KV_STORE_FUSE") == NULL &&
+                !env_sw->disable_pre_m5_qkv_norm_kv_store_fuse &&
                 (ds4_gpu_device_is_pre_m5_apple_silicon() ||
                  ds4_gpu_device_is_m5_apple_silicon()) &&
                 ds4_gpu_kv_rope_fp8_fuse_available() != 0) {
@@ -23364,7 +23450,7 @@ static bool metal_graph_encode_decode_layer_phase(
         !tp_ablate_kv && !kv_rope_fused &&
         !metal_graph_use_reference_kv_decode() &&
         !resume_after_kv_store &&
-        getenv("DS4_METAL_DISABLE_PRE_M5_KV_ROPE_FP8_FUSE") == NULL &&
+        !env_sw->disable_pre_m5_kv_rope_fp8_fuse &&
         ds4_gpu_device_is_pre_m5_apple_silicon() &&
         ds4_gpu_kv_rope_fp8_fuse_available() != 0;
     if (ok && !tp_ablate_kv && !kv_rope_fused && !fuse_kv_rope_store) {
@@ -23436,7 +23522,7 @@ static bool metal_graph_encode_decode_layer_phase(
         int quad_store = comp_state_already_stored ? 1 : 0;
         if (ok && quad_store == 0 && ratio == 4u &&
             !metal_graph_use_reference_compressor_pair_proj() &&
-            getenv("DS4_METAL_DISABLE_PRE_M5_COMPRESSOR_QUAD_STORE") == NULL &&
+            !env_sw->disable_pre_m5_compressor_quad_store &&
             (ds4_gpu_device_is_pre_m5_apple_silicon() ||
              ds4_gpu_device_is_m5_apple_silicon()) &&
             layer->indexer_compressor_kv && layer->indexer_compressor_gate &&
@@ -23543,8 +23629,8 @@ static bool metal_graph_encode_decode_layer_phase(
             layer->indexer_compressor_norm->type == DS4_TENSOR_F32 &&
             ds4_gpu_kv_rope_fp8_fuse_available() != 0 &&
             metal_graph_ported_m5_decode_feature_enabled(
-                "DS4_METAL_DISABLE_PRE_M5_COMP_FINALIZE_FUSE",
-                "DS4_METAL_DISABLE_M5_COMP_FINALIZE_FUSE");
+                env_sw->disable_pre_m5_comp_finalize_fuse,
+                env_sw->disable_m5_comp_finalize_fuse);
         if (ok) ok = ds4_gpu_compressor_update_tensor(metal_graph_comp_kv_cur(g),
                                                         metal_graph_comp_sc_cur(g),
                                                         g->layer_attn_state_kv[il],
@@ -24451,7 +24537,7 @@ static bool metal_graph_encode_decode_layer_phase(
             hc_dim == 16384u && mix_hc == 24u &&
             layer->hc_ffn_fn->type == DS4_TENSOR_F16 &&
             !metal_graph_use_reference_hc_decode() &&
-            getenv("DS4_METAL_DISABLE_PRE_M5_HC_NORM_MIX_FUSE") == NULL &&
+            !env_sw->disable_pre_m5_hc_norm_mix_fuse &&
             (ds4_gpu_device_is_pre_m5_apple_silicon() ||
              ds4_gpu_device_is_m5_apple_silicon()) &&
             ds4_gpu_hc_rms_norm_mix_f16_available() != 0;
@@ -24591,14 +24677,14 @@ static bool metal_graph_encode_decode_layer_phase(
             layer->ffn_gate_inp->dim[0] == DS4_N_EMBD &&
             layer->ffn_gate_inp->dim[1] == DS4_N_EXPERT &&
             (!ds4_gpu_device_is_pre_m5_apple_silicon() ||
-             getenv("DS4_METAL_DISABLE_PRE_M5_ROUTER_SHARED_FUSE") == NULL) &&
+             !env_sw->disable_pre_m5_router_shared_fuse) &&
             (ds4_gpu_device_is_pre_m5_apple_silicon() ||
              ds4_gpu_device_is_m5_apple_silicon())) {
 #if defined(__APPLE__)
             const bool fuse_router_project_select =
                 parallel_full_ffn_eligible &&
                 layer->ffn_gate_tid2eid == NULL &&
-                getenv("DS4_METAL_DISABLE_M5_ROUTER_PROJECT_SELECT_FUSE") == NULL &&
+                !env_sw->disable_m5_router_project_select_fuse &&
                 ds4_gpu_device_is_m5_apple_silicon();
             if (fuse_router_project_select) {
                 const int fused =
@@ -25143,7 +25229,7 @@ static bool metal_graph_encode_decode_layer_phase(
         !decode_stage_profile &&
         !metal_graph_decode_cpu_router_applicable(g, layer) &&
         layer->ffn_gate_tid2eid == NULL &&
-        getenv("DS4_MOE_REPLAY_SELECTED_IDS") == NULL &&
+        !env_sw->moe_replay_selected_ids &&
         (q4_selected_shared_overlap ||
          iq2_selected_shared_overlap ||
          mxfp4_selected_shared_overlap ||
@@ -25164,7 +25250,7 @@ static bool metal_graph_encode_decode_layer_phase(
         metal_graph_decode_iq2_selected_slots_expected(g, layer) &&
         !metal_graph_decode_cpu_router_applicable(g, layer) &&
         layer->ffn_gate_tid2eid == NULL &&
-        getenv("DS4_MOE_REPLAY_SELECTED_IDS") == NULL;
+        !env_sw->moe_replay_selected_ids;
     const bool cuda_stream_selected_load =
         ok &&
         !overlap_selected_shared &&
@@ -25172,7 +25258,7 @@ static bool metal_graph_encode_decode_layer_phase(
         g->ssd_streaming &&
         metal_graph_decode_cuda_selected_slots_expected(g, layer) &&
         layer->ffn_gate_tid2eid == NULL &&
-        getenv("DS4_MOE_REPLAY_SELECTED_IDS") == NULL;
+        !env_sw->moe_replay_selected_ids;
     if (cuda_stream_selected_load) {
         ok = metal_graph_decode_cuda_selected_load(g,
                                                    model,
