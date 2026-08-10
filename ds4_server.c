@@ -62,11 +62,7 @@ static void stop_signal_handler(int sig) {
     }
 }
 
-typedef struct {
-    char *ptr;
-    size_t len;
-    size_t cap;
-} buf;
+typedef ds4_buf buf;
 
 static void die(const char *msg) {
     fprintf(stderr, "ds4-server: %s\n", msg);
@@ -4758,6 +4754,17 @@ static void json_escape_fragment_n(buf *b, const char *s, size_t n) {
     }
 }
 
+/* The pre-arena streaming path handed each delta to the C-string JSON
+ * escaper.  Keep that compatibility for direct-buffer deltas: a token may
+ * contain an embedded NUL, but bytes after it are not part of the emitted
+ * protocol text.  Bound the search by the running buffer's logical length so
+ * this remains safe for a non-terminated slice. */
+static size_t sse_cstr_len_n(const char *s, size_t n) {
+    if (!s || n == 0) return 0;
+    const char *nul = memchr(s, '\0', n);
+    return nul ? (size_t)(nul - s) : n;
+}
+
 #define DS4_DSML "｜DSML｜"
 #define DS4_DSML_SHORT "DSML｜"
 #define DS4_TOOL_CALLS_START "<" DS4_DSML "tool_calls>"
@@ -5707,17 +5714,21 @@ static bool sse_error_event(int fd, const request *r, const char *msg) {
     return ok;
 }
 
-static bool sse_chunk(int fd, const request *r, const char *id, const char *text, const char *finish) {
+static bool sse_chunk_n(int fd, const request *r, const char *id,
+                        const char *text, size_t text_len, const char *finish) {
     buf b = {0};
     long now = (long)time(NULL);
+    if (text) text_len = sse_cstr_len_n(text, text_len);
     if (r->kind == REQ_CHAT) {
         buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":", id, now);
         json_escape(&b, r->model);
         buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":");
         if (text) {
-            buf_puts(&b, "{\"content\":");
-            json_escape(&b, text);
-            buf_putc(&b, '}');
+            /* Length-taking escape: the delta stays in the caller's running
+             * buffer, no per-token copy or NUL termination is needed. */
+            buf_puts(&b, "{\"content\":\"");
+            json_escape_fragment_n(&b, text, text_len);
+            buf_puts(&b, "\"}");
         } else {
             buf_puts(&b, finish ? "{}" : "{\"role\":\"assistant\"}");
         }
@@ -5727,15 +5738,19 @@ static bool sse_chunk(int fd, const request *r, const char *id, const char *text
     } else {
         buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"text_completion\",\"created\":%ld,\"model\":", id, now);
         json_escape(&b, r->model);
-        buf_puts(&b, ",\"choices\":[{\"text\":");
-        json_escape(&b, text ? text : "");
-        buf_puts(&b, ",\"index\":0,\"finish_reason\":");
+        buf_puts(&b, ",\"choices\":[{\"text\":\"");
+        if (text) json_escape_fragment_n(&b, text, text_len);
+        buf_puts(&b, "\",\"index\":0,\"finish_reason\":");
         if (finish) json_escape(&b, finish); else buf_puts(&b, "null");
         buf_puts(&b, "}]}\n\n");
     }
     bool ok = send_all(fd, b.ptr, b.len);
     buf_free(&b);
     return ok;
+}
+
+static bool sse_chunk(int fd, const request *r, const char *id, const char *text, const char *finish) {
+    return sse_chunk_n(fd, r, id, text, text ? strlen(text) : 0, finish);
 }
 
 static int clamp_usage_tokens(int value, int max) {
@@ -11950,12 +11965,15 @@ decode_again:
             }
             committed_visible = ti + 1;
 
-            size_t piece_len = 0;
-            char *piece = ds4_token_text(s->engine, token, &piece_len);
+            const size_t piece_start = text.len;
+            ds4_token_text_into(s->engine, token, &text);
+            const size_t piece_len = text.len - piece_start;
+            /* Points into the running buffer; valid only until the next
+             * token append.  NULL for empty pieces. */
+            const char *piece = piece_len ? text.ptr + piece_start : NULL;
             completion++;
 
             trace_piece(s, trace_id, piece, piece_len);
-            buf_append(&text, piece, piece_len);
             thinking_state_feed(&thinking, piece, piece_len);
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
                 dsml_decode_tracker_update(&dsml_tracker, text.ptr, text.len);
@@ -11976,14 +11994,14 @@ decode_again:
             }
 
             if (j->req.stream && !structured_stream && stream_len > plain_stream_pos) {
-                char *delta = xstrndup(text.ptr + plain_stream_pos, stream_len - plain_stream_pos);
-                bool ok = sse_chunk(j->fd, &j->req, id, delta, NULL);
-                free(delta);
+                const size_t delta_len = stream_len - plain_stream_pos;
+                bool ok = sse_chunk_n(j->fd, &j->req, id,
+                                      text.ptr + plain_stream_pos,
+                                      delta_len, NULL);
                 if (!ok) {
                     job_mark_cancelled(j);
                     finish = "error";
                     snprintf(err, sizeof(err), "client stream write failed");
-                    free(piece);
                     stop_decode = true;
                     break;
                 }
@@ -11996,7 +12014,6 @@ decode_again:
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
@@ -12007,7 +12024,6 @@ decode_again:
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
@@ -12018,11 +12034,9 @@ decode_again:
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
-            free(piece);
 
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
                 if (thinking_gates_tool_markers && thinking.inside) {
@@ -12242,12 +12256,14 @@ decode_again:
     }
 
     if (j->req.stream && !structured_stream && text.len > plain_stream_pos) {
-        char *tail = xstrndup(text.ptr + plain_stream_pos, text.len - plain_stream_pos);
-        if (!sse_chunk(j->fd, &j->req, id, tail, NULL)) {
+        const size_t tail_len = text.len - plain_stream_pos;
+        if (!sse_chunk_n(j->fd, &j->req, id,
+                         text.ptr + plain_stream_pos,
+                         tail_len,
+                         NULL)) {
             job_mark_cancelled(j);
             finish = "error";
         }
-        free(tail);
     }
     if (job_cancelled(j)) {
         request_live_state_clear(s, slot);
@@ -14321,6 +14337,66 @@ static void test_cors_sse_headers(void) {
     free(out);
     close(sv[0]);
     close(sv[1]);
+}
+
+static void test_sse_direct_buffer_preserves_bounded_c_string_semantics(void) {
+    request r;
+    request_init(&r, REQ_CHAT, 128);
+    r.api = API_OPENAI;
+
+    /* Immediate deltas used to pass through json_escape(), which stopped at
+     * the first NUL.  sse_chunk_n() must keep that bounded C-string behavior
+     * even when handed the running buffer's full logical length. */
+    const char immediate[] = {'A', '\0', 'I', 'M', 'M'};
+    TEST_ASSERT(sse_cstr_len_n(immediate, sizeof(immediate)) == 1);
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] >= 0 && sv[1] >= 0) {
+        TEST_ASSERT(sse_chunk_n(sv[0], &r, "chatcmpl_nul_immediate",
+                                immediate, sizeof(immediate), NULL));
+        shutdown(sv[0], SHUT_WR);
+        char *out = read_socket_text(sv[1]);
+        TEST_ASSERT(strstr(out, "\"content\":\"A\"") != NULL);
+        TEST_ASSERT(strstr(out, "\\u0000") == NULL);
+        TEST_ASSERT(strstr(out, "IMM") == NULL);
+        free(out);
+        close(sv[0]);
+        close(sv[1]);
+    }
+
+    /* The final held tail must use the same bounded length rule; otherwise a
+     * direct-buffer decode emits bytes after NUL while the old tail path did
+     * not. */
+    const char tail[] = {'T', 'A', 'I', 'L', '\0', 'H', 'E', 'L', 'D'};
+    TEST_ASSERT(sse_cstr_len_n(tail, sizeof(tail)) == 4);
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] >= 0 && sv[1] >= 0) {
+        TEST_ASSERT(sse_chunk_n(sv[0], &r, "chatcmpl_nul_tail",
+                                tail, sizeof(tail), NULL));
+        shutdown(sv[0], SHUT_WR);
+        char *out = read_socket_text(sv[1]);
+        TEST_ASSERT(strstr(out, "\"content\":\"TAIL\"") != NULL);
+        TEST_ASSERT(strstr(out, "\\u0000") == NULL);
+        TEST_ASSERT(strstr(out, "HELD") == NULL);
+        free(out);
+        close(sv[0]);
+        close(sv[1]);
+    }
+
+    const char ordinary[] = "ordinary bytes";
+    TEST_ASSERT(sse_cstr_len_n(ordinary, strlen(ordinary)) == strlen(ordinary));
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] >= 0 && sv[1] >= 0) {
+        TEST_ASSERT(sse_chunk_n(sv[0], &r, "chatcmpl_nul_plain",
+                                ordinary, strlen(ordinary), NULL));
+        shutdown(sv[0], SHUT_WR);
+        char *out = read_socket_text(sv[1]);
+        TEST_ASSERT(strstr(out, "\"content\":\"ordinary bytes\"") != NULL);
+        free(out);
+        close(sv[0]);
+        close(sv[1]);
+    }
+    request_free(&r);
 }
 
 static void test_anthropic_live_stream_sends_incremental_blocks(void) {
@@ -18726,6 +18802,7 @@ static void ds4_server_unit_tests_run(void) {
     test_cors_headers_are_opt_in();
     test_cors_preflight_response_is_no_content();
     test_cors_sse_headers();
+    test_sse_direct_buffer_preserves_bounded_c_string_semantics();
     test_anthropic_live_stream_sends_incremental_blocks();
     test_anthropic_stream_reroutes_second_reasoning_pass();
     test_anthropic_usage_reports_cache_details();

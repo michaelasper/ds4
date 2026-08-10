@@ -39222,6 +39222,37 @@ char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
     return out;
 }
 
+void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b) {
+    ds4_vocab *vocab = &e->vocab;
+    if (!b || token < 0 || token >= vocab->n_vocab) return;
+
+    ds4_str s = vocab->token[token];
+    /* Decoding emits at most one byte per source byte, so one reserve covers
+     * both the raw copy and the GPT-2 byte-mapping loop below. */
+    if (b->len + (size_t)s.len + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < b->len + (size_t)s.len + 1) cap *= 2;
+        b->ptr = xrealloc(b->ptr, cap);
+        b->cap = cap;
+    }
+    char *out = b->ptr + b->len;
+    if (vocab_token_is_named_special(vocab, token) ||
+        vocab_token_is_literal_special(s)) {
+        memcpy(out, s.ptr, (size_t)s.len);
+        b->len += (size_t)s.len;
+    } else {
+        size_t n = 0;
+        uint64_t pos = 0;
+        while (pos < s.len) {
+            uint32_t cp = utf8_decode_one(s.ptr, s.len, &pos);
+            int byte = gpt2_codepoint_to_byte(cp);
+            if (byte >= 0) out[n++] = (char)byte;
+        }
+        b->len += n;
+    }
+    b->ptr[b->len] = '\0';
+}
+
 static bool vocab_token_is_generation_stop(const ds4_vocab *vocab, int token) {
     if (!vocab || token < 0) return false;
     if (token == vocab->eos_id) return true;
@@ -39421,6 +39452,37 @@ typedef struct {
     float prob;
 } sample_candidate;
 
+/* Session-owned candidate arena: the full-vocab candidate list is reused
+ * across tokens instead of a fresh multi-MB malloc/free per decode step. */
+typedef struct {
+    sample_candidate *v;
+    size_t cap;
+} sample_arena;
+
+static sample_candidate *sample_arena_reserve(sample_arena *a, size_t n) {
+    if (n > a->cap) {
+        size_t cap = a->cap ? a->cap : 1024;
+        while (cap < n) cap *= 2;
+        a->v = xrealloc(a->v, cap * sizeof(a->v[0]));
+        a->cap = cap;
+    }
+    return a->v;
+}
+
+#ifdef DS4_TEST_HOOKS
+int ds4_test_sample_arena_lifecycle(void) {
+    sample_arena arena = {0};
+    sample_candidate *first = sample_arena_reserve(&arena, 17);
+    const size_t first_cap = arena.cap;
+    sample_candidate *reuse = sample_arena_reserve(&arena, 9);
+    sample_candidate *grown = sample_arena_reserve(&arena, first_cap + 1);
+    const bool ok = first != NULL && reuse == first && grown != NULL &&
+                    arena.cap > first_cap;
+    free(arena.v);
+    return ok ? 0 : 1;
+}
+#endif
+
 static int sample_candidate_cmp_desc(const void *a, const void *b) {
     const sample_candidate *ca = a;
     const sample_candidate *cb = b;
@@ -39560,7 +39622,8 @@ static int sample_full_vocab(
         float        top_p,
         float        min_p,
         uint64_t    *rng,
-        float       *prob_scratch) {
+        float       *prob_scratch,
+        sample_arena *cands) {
     float max_logit = DS4_NEG_INF;
     int best = 0;
     uint32_t finite = 0;
@@ -39656,23 +39719,17 @@ static int sample_full_vocab(
         if (sum <= 0.0f || !isfinite(sum)) return best;
 
         const float min_prob = (1.0f / sum) * min_p;
+        cand = sample_arena_reserve(cands, finite);
         for (uint32_t i = 0; i < n_vocab; i++) {
             const float p = prob_scratch[i];
             if (p < 0.0f || p / sum < min_prob) continue;
-            n++;
-        }
-        if (n == 0) return best;
-        cand = xmalloc((size_t)n * sizeof(cand[0]));
-        uint32_t out = 0;
-        for (uint32_t i = 0; i < n_vocab; i++) {
-            const float p = prob_scratch[i];
-            if (p < 0.0f || p / sum < min_prob) continue;
-            cand[out++] = (sample_candidate){
+            cand[n++] = (sample_candidate){
                 .id = (int)i, .logit = logits[i], .prob = p
             };
         }
+        if (n == 0) return best;
     } else {
-        cand = xmalloc((size_t)finite * sizeof(cand[0]));
+        cand = sample_arena_reserve(cands, finite);
         for (uint32_t i = 0; i < n_vocab; i++) {
             const float v = logits[i];
             if (!isfinite(v)) continue;
@@ -39681,10 +39738,7 @@ static int sample_full_vocab(
             sum += p;
         }
     }
-    if (sum <= 0.0f || !isfinite(sum)) {
-        free(cand);
-        return best;
-    }
+    if (sum <= 0.0f || !isfinite(sum)) return best;
 
     qsort(cand, n, sizeof(cand[0]), sample_candidate_cmp_desc);
     const float min_prob = (cand[0].prob / sum) * (min_p > 0.0f ? min_p : 0.0f);
@@ -39697,23 +39751,14 @@ static int sample_full_vocab(
         filtered++;
         if (filtered_sum / sum >= top_p) break;
     }
-    if (filtered == 0) {
-        free(cand);
-        return best;
-    }
+    if (filtered == 0) return best;
 
     float r = sample_rng_f32(rng) * filtered_sum;
     for (uint32_t i = 0; i < filtered; i++) {
         r -= cand[i].prob;
-        if (r <= 0.0f) {
-            const int id = cand[i].id;
-            free(cand);
-            return id;
-        }
+        if (r <= 0.0f) return cand[i].id;
     }
-    const int id = cand[filtered - 1].id;
-    free(cand);
-    return id;
+    return cand[filtered - 1].id;
 }
 
 static int sample_top_p_min_p(
@@ -39724,7 +39769,8 @@ static int sample_top_p_min_p(
         float        top_p,
         float        min_p,
         uint64_t    *rng,
-        float       *prob_scratch) {
+        float       *prob_scratch,
+        sample_arena *cands) {
     if (temperature <= 0.0f) return sample_argmax(logits, n_vocab);
     if (top_p <= 0.0f || top_p > 1.0f) top_p = 1.0f;
     if (min_p < 0.0f) min_p = 0.0f;
@@ -39734,7 +39780,8 @@ static int sample_top_p_min_p(
             prob_scratch = xmalloc((size_t)n_vocab * sizeof(prob_scratch[0]));
         }
         const int token = sample_full_vocab(logits, n_vocab, temperature,
-                                            top_p, min_p, rng, prob_scratch);
+                                            top_p, min_p, rng, prob_scratch,
+                                            cands);
         if (owned_scratch) free(prob_scratch);
         return token;
     }
@@ -39794,8 +39841,12 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float top_p, float min_p, uint64_t *rng,
                            float *prob_scratch) {
     if (!logits || !rng || n_vocab == 0) return -1;
-    return sample_top_p_min_p(logits, n_vocab, temperature, top_k,
-                              top_p, min_p, rng, prob_scratch);
+    sample_arena cands = {0};
+    const int token = sample_top_p_min_p(logits, n_vocab, temperature, top_k,
+                                         top_p, min_p, rng, prob_scratch,
+                                         &cands);
+    free(cands.v);
+    return token;
 }
 
 int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
@@ -54064,6 +54115,16 @@ struct ds4_session {
     token_vec greedy_splitkv_segment;
     float *logits;
     float *sample_probs;
+    sample_arena sample_cands;
+    /* Logprob observers share one logsumexp per logits state.  logits_gen is
+     * bumped by every public entry point that can replace the s->logits
+     * content (eval/sync/speculative-commit/payload-load/set); the cache is
+     * recomputed by the first observer call after a bump. */
+    uint64_t logits_gen;
+    uint64_t logsumexp_gen;
+    double logsumexp;
+    bool logsumexp_valid;
+    bool logsumexp_ok;
     double last_sample_ms;
     float *mtp_logits;
     int greedy_splitkv_anchor_len;
@@ -54109,6 +54170,27 @@ struct ds4_session {
     bool mtp_draft_valid;
     bool greedy_splitkv_anchor_valid;
 };
+
+/* Marks the session's logits content as replaced.  Every public entry point
+ * that can write s->logits calls this on entry, which stales the shared
+ * logsumexp cache below.  Over-marking is harmless (it only forces a
+ * recompute), so entry points mark unconditionally. */
+static void ds4_session_note_logits_dirty(ds4_session *s) {
+    if (s) s->logits_gen++;
+}
+
+#ifdef DS4_TEST_HOOKS
+static ds4_test_logprob_stats g_ds4_test_logprob_stats;
+
+void ds4_test_logprob_stats_reset(void) {
+    memset(&g_ds4_test_logprob_stats, 0,
+           sizeof(g_ds4_test_logprob_stats));
+}
+
+void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out) {
+    if (out) *out = g_ds4_test_logprob_stats;
+}
+#endif
 
 #ifndef DS4_NO_GPU
 static bool ds4_dspark_stats_enabled(void);
@@ -56554,6 +56636,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (s->distributed) {
         return ds4_dist_session_load_payload(s->distributed, s, fp, payload_bytes, err, errlen);
     }
@@ -57286,6 +57369,7 @@ int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, 
         payload_set_err(err, errlen, "invalid session snapshot load");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (s->distributed) {
         payload_set_err(err, errlen, "distributed session snapshots are not supported yet");
         return 1;
@@ -57729,6 +57813,7 @@ static bool ds4_session_greedy_splitkv_replay_exact(
 
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
+    ds4_session_note_logits_dirty(s);
     if (ds4_session_is_cpu(s) || ds4_session_is_glm(s)) {
         if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
         return ds4_session_argmax(s);
@@ -64210,6 +64295,7 @@ void ds4_session_free(ds4_session *s) {
     token_vec_free(&s->greedy_splitkv_segment);
     free(s->logits);
     free(s->sample_probs);
+    free(s->sample_cands.v);
 #ifndef DS4_NO_GPU
     free(s->glm_mtp_hc);
     free(s->glm_mtp_logits0);
@@ -65252,6 +65338,7 @@ int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session sync", err, errlen)) return 1;
 #endif
+    ds4_session_note_logits_dirty(s);
     const bool mirror = ds4_session_tp_leader(s);
     if (mirror && prompt && prompt->len > 0) {
         if (!ds4_tp_send_sync(s->engine->tp.ctx, s->tp_session_id,
@@ -66320,6 +66407,7 @@ ds4_session_rewrite_result ds4_session_rewrite_from_common(
                  prompt->len, s->ctx_size);
         return DS4_SESSION_REWRITE_ERROR;
     }
+    ds4_session_note_logits_dirty(s);
     if (!s->checkpoint_valid) {
         snprintf(err, errlen, "session has no valid checkpoint");
         return DS4_SESSION_REWRITE_ERROR;
@@ -66385,9 +66473,11 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
                       int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!logits || n_vocab <= 0) return 0;
     float *scratch = xmalloc((size_t)n_vocab * sizeof(scratch[0]));
+    sample_arena cands = {0};
     const int token = sample_top_p_min_p(logits, (uint32_t)n_vocab,
                                          temperature, top_k, top_p, min_p,
-                                         rng, scratch);
+                                         rng, scratch, &cands);
+    free(cands.v);
     free(scratch);
     return token;
 }
@@ -66395,14 +66485,66 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!s->engine->dflash_ready || !s->speculative_enabled) {
         return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
-                                  top_p, min_p, rng, s->sample_probs);
+                                  top_p, min_p, rng, s->sample_probs,
+                                  &s->sample_cands);
     }
     const double t0 = now_sec();
     const int token =
         sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
-                           top_p, min_p, rng, s->sample_probs);
+                           top_p, min_p, rng, s->sample_probs,
+                           &s->sample_cands);
     s->last_sample_ms = (now_sec() - t0) * 1000.0;
     return token;
+}
+
+/* The full-vocab double-precision softmax normalizer, computed once per
+ * logits state and shared by the logprob observers: a request typically asks
+ * for the sampled token's logprob and the top-k alternatives together, and
+ * the scalar double-exp pass over the vocab dwarfs everything else in those
+ * calls.  The computation keeps the original precision and accumulation
+ * order, so a cached result is bit-identical to recomputation.  The top-k
+ * observer supplies the max from its ranking pass so this helper only scans
+ * the vocabulary for the sum on a cold top-k request. */
+static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out,
+                                  bool have_max, float known_max_logit) {
+    if (s->logsumexp_valid && s->logsumexp_gen == s->logits_gen) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.cache_hits++;
+#endif
+        *logsum_out = s->logsumexp;
+        return s->logsumexp_ok;
+    }
+    float max_logit = known_max_logit;
+    if (!have_max) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.max_scans++;
+#endif
+        max_logit = DS4_NEG_INF;
+        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+            const float v = s->logits[i];
+            if (isfinite(v) && v > max_logit) max_logit = v;
+        }
+    }
+    double logsum = 0.0;
+    bool ok = false;
+    if (isfinite(max_logit)) {
+#ifdef DS4_TEST_HOOKS
+        g_ds4_test_logprob_stats.sum_scans++;
+#endif
+        double sum = 0.0;
+        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+            const float v = s->logits[i];
+            if (isfinite(v)) sum += exp((double)v - (double)max_logit);
+        }
+        logsum = (double)max_logit + log(sum);
+        ok = true;
+    }
+    s->logsumexp = logsum;
+    s->logsumexp_ok = ok;
+    s->logsumexp_gen = s->logits_gen;
+    s->logsumexp_valid = true;
+    *logsum_out = logsum;
+    return ok;
 }
 
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
@@ -66415,6 +66557,9 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     }
 
     float max_logit = DS4_NEG_INF;
+#ifdef DS4_TEST_HOOKS
+    g_ds4_test_logprob_stats.max_scans++;
+#endif
     for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
         const float v = s->logits[i];
         if (!isfinite(v)) continue;
@@ -66430,12 +66575,8 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     }
     if (!isfinite(max_logit)) return 0;
 
-    double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v)) sum += exp((double)v - (double)max_logit);
-    }
-    const double logsum = (double)max_logit + log(sum);
+    double logsum = 0.0;
+    if (!ds4_session_logsumexp(s, &logsum, true, max_logit)) return 0;
     for (int i = 0; i < k && out[i].id >= 0; i++) {
         out[i].logprob = isfinite(out[i].logit) ? (float)((double)out[i].logit - logsum) : DS4_NEG_INF;
     }
@@ -66445,19 +66586,8 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
     if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
 
-    float max_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v) && v > max_logit) max_logit = v;
-    }
-    if (!isfinite(max_logit)) return 0;
-
-    double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
-        const float v = s->logits[i];
-        if (isfinite(v)) sum += exp((double)v - (double)max_logit);
-    }
-    const double logsum = (double)max_logit + log(sum);
+    double logsum = 0.0;
+    if (!ds4_session_logsumexp(s, &logsum, false, DS4_NEG_INF)) return 0;
     out->id = token;
     out->logit = s->logits[token];
     out->logprob = isfinite(out->logit) ? (float)((double)out->logit - logsum) : DS4_NEG_INF;
@@ -66472,9 +66602,89 @@ int ds4_session_copy_logits(ds4_session *s, float *out, int cap) {
 
 int ds4_session_set_logits(ds4_session *s, const float *logits, int n) {
     if (!s || !logits || n != (int)DS4_N_VOCAB) return 1;
+    ds4_session_note_logits_dirty(s);
     memcpy(s->logits, logits, (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
     return 0;
 }
+
+#ifdef DS4_TEST_HOOKS
+/* Exercise the cache without loading a model.  The probe deliberately uses
+ * the public logits setter so a mutation must advance the same generation
+ * counter as production callers. */
+int ds4_test_logprob_cache_probe(void) {
+    ds4_session s = {0};
+    float *initial = xmalloc((size_t)DS4_N_VOCAB * sizeof(initial[0]));
+    float *mutated = xmalloc((size_t)DS4_N_VOCAB * sizeof(mutated[0]));
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        initial[i] = -3.0f - (float)(i % 257u) * 0.001f;
+    }
+    initial[17] = 2.5f;
+    const uint32_t neg_inf_bits = 0xff800000u;
+    const uint32_t nan_bits = 0x7fc00000u;
+    memcpy(&initial[23], &neg_inf_bits, sizeof(neg_inf_bits));
+    memcpy(&initial[29], &nan_bits, sizeof(nan_bits));
+    memcpy(mutated, initial,
+           (size_t)DS4_N_VOCAB * sizeof(mutated[0]));
+    s.logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+    memcpy(s.logits, initial,
+           (size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+    /* A synthetic session has no eval entry point to mark its first logits. */
+    ds4_session_note_logits_dirty(&s);
+
+    ds4_test_logprob_stats_reset();
+    ds4_token_score top[4], top_again[4], token_before, token_after;
+    bool ok = ds4_session_top_logprobs(&s, top, 4) == 4;
+    ds4_test_logprob_stats stats = {0};
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 1 && stats.sum_scans == 1 &&
+         stats.cache_hits == 0 && top[0].id == 17;
+
+    /* Repeating the observer still scans to select the top entries, but must
+     * reuse the already accumulated normalizer. */
+    ok = ok && ds4_session_top_logprobs(&s, top_again, 4) == 4;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
+         stats.cache_hits == 1;
+    ok = ok && ds4_session_token_logprob(&s, 17, &token_before) == 1;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
+         stats.cache_hits == 2;
+
+    /* Check the cached arithmetic against an independent copy that uses the
+     * same max-then-sum order as the original implementation. */
+    float max_logit = DS4_NEG_INF;
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        if (isfinite(initial[i]) && initial[i] > max_logit) {
+            max_logit = initial[i];
+        }
+    }
+    double sum = 0.0;
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        if (isfinite(initial[i])) {
+            sum += exp((double)initial[i] - (double)max_logit);
+        }
+    }
+    const double reference_logsum = (double)max_logit + log(sum);
+    const float reference_logprob =
+        (float)((double)initial[17] - reference_logsum);
+    ok = ok && top[0].logprob == reference_logprob &&
+         top_again[0].logprob == reference_logprob &&
+         token_before.logprob == reference_logprob;
+
+    mutated[17] = 3.75f;
+    ok = ok && ds4_session_set_logits(&s, mutated, (int)DS4_N_VOCAB) == 0;
+    ok = ok && ds4_session_token_logprob(&s, 17, &token_after) == 1;
+    ds4_test_logprob_stats_get(&stats);
+    ok = ok && stats.max_scans == 3 && stats.sum_scans == 2 &&
+         stats.cache_hits == 2 && token_after.logprob != token_before.logprob &&
+         token_after.logit == 3.75f;
+
+    free(s.logits);
+    free(initial);
+    free(mutated);
+    return ok ? 0 : 1;
+}
+#endif
 
 /* Pay the one-time first-submission GPU cost (pipeline ramp plus model-heap
  * residency for the batched prefill kernels) outside any measured window.
@@ -67422,6 +67632,7 @@ int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session eval", err, errlen)) return 1;
 #endif
+    ds4_session_note_logits_dirty(s);
     bool probe_mtp = true;
 #ifndef DS4_NO_GPU
     if (s && s->engine && s->engine->support_kind == DS4_SUPPORT_DSPARK) {
@@ -68207,6 +68418,9 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
         if (err && errlen) snprintf(err, errlen, "decode batch has no session");
         return 1;
     }
+    for (int i = 0; i < count; i++) {
+        ds4_session_note_logits_dirty(items[i].session);
+    }
     ds4_engine *e = first->engine;
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_router_simd_topk_preflight(
@@ -68291,6 +68505,10 @@ int ds4_sessions_eval_batch_with_prefill(
                      "mixed prefill must extend a valid session checkpoint");
         }
         return 1;
+    }
+    ds4_session_note_logits_dirty(prefill_session);
+    for (int i = 0; i < count; i++) {
+        ds4_session_note_logits_dirty(items[i].session);
     }
     for (int i = 0; i < count; i++) {
         ds4_session *s = items[i].session;
@@ -68795,6 +69013,7 @@ int ds4_session_tp_spec_cycle(ds4_session *s, const int *drafts, int draft_n,
         snprintf(err, errlen, "tp: spec cycle outside worker mode");
         return 1;
     }
+    ds4_session_note_logits_dirty(s);
     if (draft_n <= 0 || draft_n > DS4_DSPARK_MAX_BLOCK_SIZE) {
         snprintf(err, errlen, "tp: bad verify block size %d", draft_n);
         return 1;
@@ -72159,6 +72378,7 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                                         int *accepted, int accepted_cap,
                                         char *err, size_t errlen) {
     if (!s || max_tokens <= 0 || accepted_cap <= 0) return 0;
+    ds4_session_note_logits_dirty(s);
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_router_simd_topk_preflight(
             s->engine, "speculative eval", err, errlen)) return -1;
