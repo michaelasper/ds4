@@ -920,160 +920,139 @@ static void kv_cache_rewrite_trailer(ds4_kvstore *kc, const char *path,
     (void)ok;
 }
 
-void ds4_kvstore_staged_store_free(ds4_kvstore_staged_store *st) {
-    if (!st) return;
-    ds4_session_payload_file_free(&st->payload);
-    ds4_tokens_free(&st->tokens);
-    free(st->text);
-    free(st->path);
-    memset(st, 0, sizeof(*st));
-}
+bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
+                                        ds4_engine *engine,
+                                        ds4_session *session,
+                                        const ds4_tokens *tokens,
+                                        int store_len,
+                                        const char *reason,
+                                        const char *cache_text_override,
+                                        uint8_t cache_text_ext,
+                                        const char *cache_text_key,
+                                        const ds4_kvstore_trailer_hooks *hooks,
+                                        char *err,
+                                        size_t err_len) {
+    if (!kc->enabled) return false;
+    if (!tokens || store_len < kc->opt.min_tokens) return false;
+    const int original_len = tokens->len;
 
-int ds4_kvstore_stage_live_prefix_text(ds4_kvstore *kc,
-                                       ds4_engine *engine,
-                                       ds4_session *session,
-                                       const ds4_tokens *tokens,
-                                       int store_len,
-                                       const char *reason,
-                                       const char *cache_text_override,
-                                       uint8_t cache_text_ext,
-                                       const char *cache_text_key,
-                                       const ds4_kvstore_trailer_hooks *hooks,
-                                       ds4_kvstore_staged_store *out,
-                                       char *err,
-                                       size_t err_len) {
-    memset(out, 0, sizeof(*out));
-    if (!kc->enabled) return 0;
-    if (!tokens || store_len < kc->opt.min_tokens) return 0;
-    out->original_len = tokens->len;
-    out->reason = reason;
+    ds4_tokens store_tokens = {0};
+    ds4_kvstore_tokens_copy_prefix(&store_tokens, tokens, store_len);
 
-    ds4_kvstore_tokens_copy_prefix(&out->tokens, tokens, store_len);
-
-    out->quant_bits = ds4_engine_routed_quant_bits(engine);
-    if (out->quant_bits != 2 && out->quant_bits != 4) {
-        ds4_kvstore_staged_store_free(out);
-        return 0;
+    const int quant_bits = ds4_engine_routed_quant_bits(engine);
+    if (quant_bits != 2 && quant_bits != 4) {
+        ds4_tokens_free(&store_tokens);
+        return false;
     }
-    out->model_id = ds4_engine_model_id(engine);
-    out->ctx_size = ds4_session_ctx(session);
+    const int model_id = ds4_engine_model_id(engine);
 
     char save_err[160] = {0};
     const ds4_tokens *live_tokens = ds4_session_tokens(session);
     if (!live_tokens ||
-        live_tokens->len != out->tokens.len ||
-        !ds4_tokens_starts_with(live_tokens, &out->tokens))
+        live_tokens->len != store_tokens.len ||
+        !ds4_tokens_starts_with(live_tokens, &store_tokens))
     {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache skipped tokens=%d reason=%s because live checkpoint is at %d",
                 kv_log_name(kc),
-                out->tokens.len,
+                store_tokens.len,
                 reason,
                 live_tokens ? live_tokens->len : -1);
-        ds4_kvstore_staged_store_free(out);
-        return 0;
+        ds4_tokens_free(&store_tokens);
+        return false;
     }
 
+    size_t text_len = 0;
+    char *text = NULL;
     const bool text_override = cache_text_override && cache_text_override[0];
     if (text_override) {
-        out->text = kv_xstrdup(cache_text_override);
-        out->text_len = strlen(out->text);
-        out->text_ext = cache_text_ext;
-        out->text_key = cache_text_key;
+        text = kv_xstrdup(cache_text_override);
+        text_len = strlen(text);
     } else {
-        out->text = ds4_kvstore_render_tokens_text(engine, &out->tokens,
-                                                   &out->text_len);
+        text = ds4_kvstore_render_tokens_text(engine, &store_tokens, &text_len);
     }
-    if (out->text_len > UINT32_MAX) {
+    if (text_len > UINT32_MAX) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache skipped tokens=%d because rendered text is too large",
-                kv_log_name(kc), out->tokens.len);
-        ds4_kvstore_staged_store_free(out);
-        return 0;
+                kv_log_name(kc), store_tokens.len);
+        free(text);
+        ds4_tokens_free(&store_tokens);
+        return false;
     }
 
-    if (!kv_trailer_serialized_size(hooks, out->text, &out->trailer_est_bytes)) {
+    uint64_t trailer_est_bytes = 0;
+    if (!kv_trailer_serialized_size(hooks, text, &trailer_est_bytes)) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache skipped tokens=%d reason=%s because tool map size overflowed",
-                kv_log_name(kc), out->tokens.len, reason);
-        ds4_kvstore_staged_store_free(out);
-        return 0;
+                kv_log_name(kc), store_tokens.len, reason);
+        free(text);
+        ds4_tokens_free(&store_tokens);
+        return false;
     }
-    ds4_kvstore_sha1_bytes_hex(out->text, out->text_len, out->sha);
-    out->path = ds4_kvstore_path_for_sha(kc, out->sha);
-    out->reason_code = ds4_kvstore_reason_code(reason);
+    char sha[41];
+    ds4_kvstore_sha1_bytes_hex(text, text_len, sha);
+    char *path = ds4_kvstore_path_for_sha(kc, sha);
+    const uint8_t reason_code = ds4_kvstore_reason_code(reason);
 
-    if (kv_cache_existing_compatible(kc, out->path, out->sha, out->text,
-                                     out->text_len, out->model_id,
-                                     out->quant_bits, out->ctx_size)) {
-        kv_cache_rewrite_trailer(kc, out->path, out->text, hooks);
-        ds4_kvstore_staged_store_free(out);
-        return 2;
+    if (kv_cache_existing_compatible(kc, path, sha, text, text_len,
+                                     model_id,
+                                     quant_bits, ds4_session_ctx(session))) {
+        kv_cache_rewrite_trailer(kc, path, text, hooks);
+        free(text);
+        free(path);
+        ds4_tokens_free(&store_tokens);
+        return true;
     }
 
-    if (ds4_session_stage_payload(session, &out->payload,
+    ds4_session_payload_file staged = {0};
+    if (ds4_session_stage_payload(session, &staged,
                                   save_err, sizeof(save_err)) != 0) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache skipped tokens=%d reason=%s because KV payload staging failed: %s",
                 kv_log_name(kc),
-                out->tokens.len,
+                store_tokens.len,
                 reason,
                 save_err[0] ? save_err : "unknown error");
         if (err && err_len) snprintf(err, err_len, "%s",
                                      save_err[0] ? save_err : "unknown error");
-        ds4_kvstore_staged_store_free(out);
-        return 0;
+        free(text);
+        free(path);
+        ds4_tokens_free(&store_tokens);
+        return false;
     }
-    return 1;
-}
-
-bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
-                                     const ds4_kvstore_trailer_hooks *hooks,
-                                     ds4_kvstore_staged_store *st,
-                                     char *err,
-                                     size_t err_len) {
-    char save_err[160] = {0};
-    const uint64_t payload_bytes = st->payload.bytes;
-
-    /* A same-path checkpoint may have landed since staging (a synchronous
-     * end-of-request store, or an earlier queued commit): converge on the
-     * existing file instead of overwriting it with an older snapshot. */
-    if (kv_cache_existing_compatible(kc, st->path, st->sha, st->text,
-                                     st->text_len, st->model_id,
-                                     st->quant_bits, st->ctx_size)) {
-        kv_cache_rewrite_trailer(kc, st->path, st->text, hooks);
-        ds4_kvstore_staged_store_free(st);
-        return true;
-    }
+    uint64_t payload_bytes = staged.bytes;
 
     uint64_t est_file_bytes = 0, est_required_bytes = 0;
-    if (!ds4_kvstore_file_size_fits(kc, (uint64_t)st->text_len, payload_bytes,
-                                    st->trailer_est_bytes,
+    if (!ds4_kvstore_file_size_fits(kc, (uint64_t)text_len, payload_bytes,
+                                    trailer_est_bytes,
                                     &est_file_bytes, &est_required_bytes)) {
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache skipped tokens=%d reason=%s because estimated file size %.2f MiB (%.2f MiB with safety) exceeds budget %.2f MiB",
                 kv_log_name(kc),
-                st->tokens.len,
-                st->reason,
+                store_tokens.len,
+                reason,
                 (double)est_file_bytes / (1024.0 * 1024.0),
                 (double)est_required_bytes / (1024.0 * 1024.0),
                 (double)kc->budget_bytes / (1024.0 * 1024.0));
-        ds4_kvstore_staged_store_free(st);
+        ds4_session_payload_file_free(&staged);
+        free(text);
+        free(path);
+        ds4_tokens_free(&store_tokens);
         return false;
     }
 
     ds4_kvstore_eviction_context incoming = {
-        .text = st->text,
-        .text_len = st->text_len,
-        .model_id = (uint8_t)st->model_id,
-        .quant_bits = (uint8_t)st->quant_bits,
-        .ctx_size = (uint32_t)st->ctx_size,
+        .text = text,
+        .text_len = text_len,
+        .model_id = (uint8_t)model_id,
+        .quant_bits = (uint8_t)quant_bits,
+        .ctx_size = (uint32_t)ds4_session_ctx(session),
         .reject_different_quant = kc->reject_different_quant,
     };
-    ds4_kvstore_evict(kc, &st->tokens, est_file_bytes, &incoming);
+    ds4_kvstore_evict(kc, live_tokens, est_file_bytes, &incoming);
 
     kv_buf tmpb = {0};
-    kv_buf_printf(&tmpb, "%s.tmp.%ld", st->path, (long)getpid());
+    kv_buf_printf(&tmpb, "%s.tmp.%ld", path, (long)getpid());
     char *tmp = kv_buf_take(&tmpb);
     const double save_t0 = kv_now_sec();
     FILE *fp = fopen(tmp, "wb");
@@ -1082,30 +1061,33 @@ bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
                 "%s: kv cache failed to create %s: %s save=%.1f ms",
                 kv_log_name(kc), tmp, strerror(errno),
                 (kv_now_sec() - save_t0) * 1000.0);
-        ds4_kvstore_staged_store_free(st);
+        ds4_session_payload_file_free(&staged);
         free(tmp);
+        free(text);
+        free(path);
+        ds4_tokens_free(&store_tokens);
         return false;
     }
 
     const uint64_t now = (uint64_t)time(NULL);
     uint8_t h[DS4_KVSTORE_FIXED_HEADER];
-    uint8_t ext_flags = st->trailer_est_bytes > 0 && hooks ? hooks->ext_flag : 0;
-    ext_flags |= st->text_ext;
-    ds4_kvstore_fill_header(h, (uint8_t)st->model_id, (uint8_t)st->quant_bits,
-                            st->reason_code, ext_flags,
-                            (uint32_t)st->tokens.len, 0,
-                            (uint32_t)st->ctx_size,
+    uint8_t ext_flags = trailer_est_bytes > 0 && hooks ? hooks->ext_flag : 0;
+    if (text_override) ext_flags |= cache_text_ext;
+    ds4_kvstore_fill_header(h, (uint8_t)model_id, (uint8_t)quant_bits,
+                            reason_code, ext_flags,
+                            (uint32_t)store_tokens.len, 0,
+                            (uint32_t)ds4_session_ctx(session),
                             now, now, payload_bytes);
     uint8_t tb[4];
-    ds4_kvstore_le_put32(tb, (uint32_t)st->text_len);
+    ds4_kvstore_le_put32(tb, (uint32_t)text_len);
     uint64_t trailer_bytes = 0;
     errno = 0;
     bool ok = fwrite(h, 1, sizeof(h), fp) == sizeof(h) &&
               fwrite(tb, 1, sizeof(tb), fp) == sizeof(tb) &&
-              fwrite(st->text, 1, st->text_len, fp) == st->text_len &&
-              ds4_session_write_staged_payload(&st->payload, fp,
+              fwrite(text, 1, text_len, fp) == text_len &&
+              ds4_session_write_staged_payload(&staged, fp,
                                                save_err, sizeof(save_err)) == 0 &&
-              kv_trailer_write(hooks, fp, st->text, &trailer_bytes) &&
+              kv_trailer_write(hooks, fp, text, &trailer_bytes) &&
               fflush(fp) == 0;
     int saved_errno = errno;
     if (fclose(fp) != 0) {
@@ -1114,7 +1096,7 @@ bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
     }
     uint64_t final_file_bytes = 0, final_required_bytes = 0;
     bool final_size_over_budget = false;
-    if (ok && !ds4_kvstore_file_size_fits(kc, (uint64_t)st->text_len, payload_bytes,
+    if (ok && !ds4_kvstore_file_size_fits(kc, (uint64_t)text_len, payload_bytes,
                                           trailer_bytes,
                                           &final_file_bytes,
                                           &final_required_bytes))
@@ -1122,7 +1104,7 @@ bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
         final_size_over_budget = true;
         ok = false;
     }
-    if (ok && rename(tmp, st->path) != 0) {
+    if (ok && rename(tmp, path) != 0) {
         saved_errno = errno;
         ok = false;
     }
@@ -1132,8 +1114,8 @@ bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
             kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                     "%s: kv cache skipped tokens=%d reason=%s because final file size %.2f MiB (%.2f MiB with safety) exceeds budget %.2f MiB save=%.1f ms",
                     kv_log_name(kc),
-                    st->tokens.len,
-                    st->reason,
+                    store_tokens.len,
+                    reason,
                     (double)final_file_bytes / (1024.0 * 1024.0),
                     (double)final_required_bytes / (1024.0 * 1024.0),
                     (double)kc->budget_bytes / (1024.0 * 1024.0),
@@ -1142,7 +1124,7 @@ bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
             kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                     "%s: kv cache store failed (%s): %s save=%.1f ms",
                     kv_log_name(kc),
-                    st->reason,
+                    reason,
                     saved_errno ? strerror(saved_errno) :
                     (save_err[0] ? save_err : "unknown error"),
                     save_ms);
@@ -1157,41 +1139,19 @@ bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
         kv_logf(kc, DS4_KVSTORE_LOG_KVCACHE,
                 "%s: kv cache stored tokens=%d trimmed=%d reason=%s key=%s size=%.2f MiB save=%.1f ms",
                 kv_log_name(kc),
-                st->tokens.len,
-                st->original_len - st->tokens.len,
-                st->reason,
-                st->text_ext ? (st->text_key ? st->text_key : "visible-transcript") : "token-text",
-                (double)(DS4_KVSTORE_FIXED_HEADER + 4ull + st->text_len + payload_bytes + trailer_bytes) / (1024.0 * 1024.0),
+                store_tokens.len,
+                original_len - store_tokens.len,
+                reason,
+                text_override ? (cache_text_key ? cache_text_key : "visible-transcript") : "token-text",
+                (double)(DS4_KVSTORE_FIXED_HEADER + 4ull + text_len + payload_bytes + trailer_bytes) / (1024.0 * 1024.0),
                 save_ms);
     }
-    ds4_kvstore_staged_store_free(st);
+    ds4_session_payload_file_free(&staged);
     free(tmp);
+    free(text);
+    free(path);
+    ds4_tokens_free(&store_tokens);
     return ok;
-}
-
-bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
-                                        ds4_engine *engine,
-                                        ds4_session *session,
-                                        const ds4_tokens *tokens,
-                                        int store_len,
-                                        const char *reason,
-                                        const char *cache_text_override,
-                                        uint8_t cache_text_ext,
-                                        const char *cache_text_key,
-                                        const ds4_kvstore_trailer_hooks *hooks,
-                                        char *err,
-                                        size_t err_len) {
-    ds4_kvstore_staged_store staged;
-    const int rc = ds4_kvstore_stage_live_prefix_text(kc, engine, session,
-                                                      tokens, store_len, reason,
-                                                      cache_text_override,
-                                                      cache_text_ext,
-                                                      cache_text_key,
-                                                      hooks, &staged,
-                                                      err, err_len);
-    if (rc == 2) return true;
-    if (rc != 1) return false;
-    return ds4_kvstore_commit_staged_store(kc, hooks, &staged, err, err_len);
 }
 
 bool ds4_kvstore_store_live_prefix(ds4_kvstore *kc,

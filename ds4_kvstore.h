@@ -171,58 +171,6 @@ bool ds4_kvstore_store_live_prefix_text(ds4_kvstore *kc,
                                         const ds4_kvstore_trailer_hooks *hooks,
                                         char *err,
                                         size_t err_len);
-
-/* A validated live-prefix snapshot with its staged session payload, ready
- * for a possibly-deferred file commit.  ds4_kvstore_store_live_prefix_text
- * is exactly stage + commit; the split exists so a frontend can move the
- * multi-MB commit off a latency-critical thread. */
-typedef struct {
-    ds4_tokens tokens;          /* validated live-prefix snapshot */
-    int original_len;           /* live token count at snapshot (log only) */
-    int ctx_size;               /* session context capacity at snapshot */
-    int model_id;
-    int quant_bits;
-    const char *reason;         /* store reason literal (log only) */
-    uint8_t reason_code;
-    uint8_t text_ext;           /* override ext flag; 0 for token-rendered text */
-    const char *text_key;       /* log label for the override kind */
-    char *text;                 /* owned cache key text */
-    size_t text_len;
-    char sha[41];
-    char *path;                 /* owned final cache file path */
-    uint64_t trailer_est_bytes;
-    ds4_session_payload_file payload;   /* owned staged tmp file */
-} ds4_kvstore_staged_store;
-
-/* Validates the live prefix and stages the session payload.
- * Returns 1 with *out filled (caller must commit or free it), 0 when the
- * store is skipped or fails (same cases as a false sync store), or 2 when an
- * identical checkpoint already exists (trailer refreshed, nothing to commit).
- * Needs the same locks as a synchronous store: the session must stay frozen
- * and the cache index consistent while the snapshot is taken. */
-int ds4_kvstore_stage_live_prefix_text(ds4_kvstore *kc,
-                                       ds4_engine *engine,
-                                       ds4_session *session,
-                                       const ds4_tokens *tokens,
-                                       int store_len,
-                                       const char *reason,
-                                       const char *cache_text_override,
-                                       uint8_t cache_text_ext,
-                                       const char *cache_text_key,
-                                       const ds4_kvstore_trailer_hooks *hooks,
-                                       ds4_kvstore_staged_store *out,
-                                       char *err,
-                                       size_t err_len);
-/* Writes the staged checkpoint (tmp file + atomic rename), evicts for budget,
- * and logs.  Never touches the session or engine, so it may run on another
- * thread while inference continues; serialize with other cache mutations
- * (the caller holds the cache lock).  Consumes *st on every path. */
-bool ds4_kvstore_commit_staged_store(ds4_kvstore *kc,
-                                     const ds4_kvstore_trailer_hooks *hooks,
-                                     ds4_kvstore_staged_store *st,
-                                     char *err,
-                                     size_t err_len);
-void ds4_kvstore_staged_store_free(ds4_kvstore_staged_store *st);
 bool ds4_kvstore_store_live_prefix(ds4_kvstore *kc,
                                    ds4_engine *engine,
                                    ds4_session *session,
