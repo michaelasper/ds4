@@ -36937,23 +36937,46 @@ int ds4_gpu_laguna_attention_prefill_tensor(
             .scale = scale,
             .pad0 = 0,
         };
+        /*
+         * Opt-in direct KV store for global layers.  When the whole chunk
+         * fits past pos0 the ring cannot wrap inside the chunk, so the f16
+         * conversion may land directly in the cache slot and the commit pass
+         * is folded away; attention then reads the chunk rows from the cache
+         * through the staged-slot view (staged row t == cache row pos0 + t).
+         * SWA layers keep the staged path: their ring can overwrite rows
+         * that early queries in the chunk still read.
+         */
+        const bool direct_kv =
+            ds4_gpu_env_bool("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL") > 0 &&
+            cache_cap > 512u && (uint64_t)pos0 + n_tokens <= cache_cap;
+        id<MTLComputePipelineState> store_rows_pipeline = direct_kv ?
+            ds4_gpu_get_pipeline("kernel_laguna_store_kv_rows_f16") : nil;
+        if (direct_kv && !store_rows_pipeline) return 0;
+
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
 
         id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
-        [enc setComputePipelineState:stage_pipeline];
+        [enc setComputePipelineState:direct_kv ? store_rows_pipeline
+                                               : stage_pipeline];
         [enc setBytes:&args length:sizeof(args) atIndex:0];
         [enc setBuffer:kbuf offset:ds4_gpu_tensor_offset(k) atIndex:1];
         [enc setBuffer:vbuf offset:ds4_gpu_tensor_offset(v) atIndex:2];
-        [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
+        [enc setBuffer:direct_kv ? keybuf : stagedkeybuf
+                offset:ds4_gpu_tensor_offset(
+                            direct_kv ? key_cache : staged_key)
                 atIndex:3];
-        [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
+        [enc setBuffer:direct_kv ? valuebuf : stagedvaluebuf
+                offset:ds4_gpu_tensor_offset(
+                            direct_kv ? value_cache : staged_value)
                 atIndex:4];
         [enc dispatchThreads:MTLSizeMake((NSUInteger)kv_values, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
+        const NSUInteger chunk_kv_bytes = direct_kv ?
+            (NSUInteger)pos0 * n_head_kv * head_dim * sizeof(uint16_t) : 0u;
         enc = ds4_gpu_compute_encoder(cb);
         [enc setComputePipelineState:attention_pipeline];
         [enc setBytes:&args length:sizeof(args) atIndex:0];
@@ -36961,9 +36984,15 @@ int ds4_gpu_laguna_attention_prefill_tensor(
         [enc setBuffer:gatebuf offset:ds4_gpu_tensor_offset(gate) atIndex:2];
         [enc setBuffer:keybuf offset:ds4_gpu_tensor_offset(key_cache) atIndex:3];
         [enc setBuffer:valuebuf offset:ds4_gpu_tensor_offset(value_cache) atIndex:4];
-        [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
+        [enc setBuffer:direct_kv ? keybuf : stagedkeybuf
+                offset:ds4_gpu_tensor_offset(
+                            direct_kv ? key_cache : staged_key) +
+                       chunk_kv_bytes
                 atIndex:5];
-        [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
+        [enc setBuffer:direct_kv ? valuebuf : stagedvaluebuf
+                offset:ds4_gpu_tensor_offset(
+                            direct_kv ? value_cache : staged_value) +
+                       chunk_kv_bytes
                 atIndex:6];
         [enc setBuffer:headsbuf offset:ds4_gpu_tensor_offset(heads) atIndex:7];
         const uint32_t attention_groups = use_gqa6 ?
@@ -36974,18 +37003,20 @@ int ds4_gpu_laguna_attention_prefill_tensor(
              threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
-        enc = ds4_gpu_compute_encoder(cb);
-        [enc setComputePipelineState:commit_pipeline];
-        [enc setBytes:&args length:sizeof(args) atIndex:0];
-        [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
-                atIndex:1];
-        [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
-                atIndex:2];
-        [enc setBuffer:keybuf offset:ds4_gpu_tensor_offset(key_cache) atIndex:3];
-        [enc setBuffer:valuebuf offset:ds4_gpu_tensor_offset(value_cache) atIndex:4];
-        [enc dispatchThreads:MTLSizeMake((NSUInteger)kv_values, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        ds4_gpu_end_compute_encoder(cb, enc);
+        if (!direct_kv) {
+            enc = ds4_gpu_compute_encoder(cb);
+            [enc setComputePipelineState:commit_pipeline];
+            [enc setBytes:&args length:sizeof(args) atIndex:0];
+            [enc setBuffer:stagedkeybuf offset:ds4_gpu_tensor_offset(staged_key)
+                    atIndex:1];
+            [enc setBuffer:stagedvaluebuf offset:ds4_gpu_tensor_offset(staged_value)
+                    atIndex:2];
+            [enc setBuffer:keybuf offset:ds4_gpu_tensor_offset(key_cache) atIndex:3];
+            [enc setBuffer:valuebuf offset:ds4_gpu_tensor_offset(value_cache) atIndex:4];
+            [enc dispatchThreads:MTLSizeMake((NSUInteger)kv_values, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            ds4_gpu_end_compute_encoder(cb, enc);
+        }
 
         if (!ds4_gpu_finish_command_buffer(cb, owned,
                                             "Laguna prefill attention")) {
