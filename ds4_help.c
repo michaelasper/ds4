@@ -146,26 +146,9 @@ static void print_laguna_dflash_options(FILE *fp, const help_colors *c) {
 
 static void print_model_runtime(FILE *fp, const help_colors *c,
                                 ds4_help_tool tool, bool full) {
-    const bool laguna_metal_product =
-        tool == DS4_HELP_DS4 || tool == DS4_HELP_SERVER;
     title(fp, c, "Model And Runtime");
     opt(fp, c, "-m, --model FILE", "GGUF model path. Default: ds4flash.gguf");
-    if (laguna_metal_product) {
-        opt(fp, c, "--metal", "Use Apple Metal (the only supported inference backend).");
-    } else {
-#ifdef DS4_ROCM_BUILD
-        opt(fp, c, "--metal | --rocm | --cpu", "Select the backend explicitly.");
-        opt(fp, c, "--backend NAME", "Backend name: metal, rocm, or cpu.");
-#else
-        opt(fp, c, "--metal | --cuda | --cpu", "Select the backend explicitly.");
-        opt(fp, c, "--backend NAME", "Backend name: metal, cuda, or cpu.");
-        opt(fp, c, "--gpu-vram N[,N,...]|auto", "CUDA VRAM budgets per device, in GiB, or auto-detect free VRAM.");
-        opt(fp, c, "--gpu-devices N[,N,...]", "CUDA device indices used by multi-GPU placement.");
-        if (tool != DS4_HELP_EVAL) {
-            opt(fp, c, "--cuda-tensor-parallel", "Enable the paired DeepSeek tensor/expert path on an even multi-GPU CUDA placement.");
-        }
-#endif
-    }
+    opt(fp, c, "--metal", "Use Apple Metal (the only supported inference backend).");
     if (tool != DS4_HELP_BENCH) {
         opt(fp, c, "-c, --ctx N", "Allocated context tokens.");
     }
@@ -173,40 +156,21 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
         opt(fp, c, "-n, --tokens N", "Default max output tokens when clients omit a limit.");
     }
     opt(fp, c, "-t, --threads N", "CPU helper threads for host-side/reference work.");
-    if (!laguna_metal_product) {
-        opt(fp, c, "--power N", "GPU duty-cycle target, 1..100. Default: 100");
-        opt(fp, c, "--ssd-streaming", "Metal/CUDA/ROCm: opt in to SSD-backed model streaming instead of full residency.");
-        opt(fp, c, "--ssd-streaming-cold", "SSD streaming: skip default popularity-based expert-cache preload.");
-        opt(fp, c, "--ssd-streaming-cache-experts N|NGB", "SSD streaming: N is an exact dynamic expert count; NGB is a routed memory budget that also reserves two full prefill layers. Auto: 80% working set minus non-routed weights; GLM Metal caps lower.");
-        opt(fp, c, "--ssd-streaming-full-layers N", "GLM Metal streaming: keep the first N routed layers fully resident. Default: auto from NGB expert budget; use 0 to disable.");
-        opt(fp, c, "--ssd-streaming-preload-experts N", "SSD streaming: upfront popularity preload count. DeepSeek auto-seeds by default; GLM demand-fills unless N is explicit.");
-        opt(fp, c, "--simulate-used-memory NGB", "Diagnostic: lock N GiB before model load to simulate a smaller-memory machine.");
-        opt(fp, c, "--prefill-chunk N", "Graph prefill chunk size. Default: CUDA TP 2048; PRO 8192; Laguna 16384; others 4096.");
-    }
     if (full) {
-        if (!laguna_metal_product && tool != DS4_HELP_BENCH) {
-            opt(fp, c, "--mtp FILE", "Optional MTP support GGUF used for draft-token probes.");
-        }
-        if (laguna_metal_product) {
-            print_laguna_dflash_options(fp, c);
-        } else if (tool != DS4_HELP_BENCH) {
-            opt(fp, c, "--mtp-draft N", "Maximum autoregressive MTP draft tokens. Default: 1");
-            opt(fp, c, "--mtp-margin F", "Verifier confidence margin for fast MTP acceptance. Default: 3");
-        }
+        if (tool != DS4_HELP_BENCH) print_laguna_dflash_options(fp, c);
         opt(fp, c, "--quality", "Prefer exact kernels where faster approximate paths exist.");
         opt(fp, c, "--warm-weights", "Touch mapped tensor pages at startup to reduce first-use stalls.");
         if (tool == DS4_HELP_DS4 || tool == DS4_HELP_BENCH) {
             opt(fp, c, "--expert-profile FILE", "Metal-only: write routed expert locality/cache simulation JSON.");
         }
     }
-    if (!full && laguna_metal_product) {
+    if (!full && (tool == DS4_HELP_DS4 || tool == DS4_HELP_SERVER)) {
         print_laguna_dflash_options(fp, c);
     }
     fputc('\n', fp);
 }
 
-static void print_sampling(FILE *fp, const help_colors *c,
-                           ds4_help_tool tool, bool full) {
+static void print_sampling(FILE *fp, const help_colors *c, bool full) {
     title(fp, c, "Prompt And Sampling");
     opt(fp, c, "-n, --tokens N", "Maximum generated tokens.");
     opt(fp, c, "--temp F", "Sampling temperature. 0 is greedy/deterministic.");
@@ -214,11 +178,7 @@ static void print_sampling(FILE *fp, const help_colors *c,
     opt(fp, c, "--top-p F", "Nucleus sampling probability.");
     opt(fp, c, "--min-p F", "Keep tokens scoring at least F times the top token.");
     opt(fp, c, "--seed N", "Sampling seed for reproducible non-greedy runs.");
-    if (tool == DS4_HELP_DS4) {
-        para(fp, c, "Laguna defaults to temperature 0.7, top-k 20, top-p 0.95, and min-p 0.05. Explicit options always win.");
-    } else {
-        para(fp, c, "GLM defaults to temperature 1.0, top-p 0.95, and min-p 0. Laguna defaults to temperature 0.7, top-k 20, top-p 0.95, and min-p 0.05. Explicit options always win.");
-    }
+    para(fp, c, "Laguna defaults to temperature 0.7, top-k 20, top-p 0.95, and min-p 0.05. Explicit options always win.");
     opt(fp, c, "--think", "Use normal thinking mode.");
     opt(fp, c, "--think-max", "Use Think Max when context is large enough.");
     opt(fp, c, "--nothink", "Disable thinking and ask for direct replies.");
@@ -228,34 +188,6 @@ static void print_sampling(FILE *fp, const help_colors *c,
         opt(fp, c, "--prompt-file FILE", "Read one-shot prompt text from FILE.");
         opt(fp, c, "--raw-prompt", "Tokenize the one-shot prompt without chat markers.");
     }
-    fputc('\n', fp);
-}
-
-static void print_distributed(FILE *fp, const help_colors *c) {
-    title(fp, c, "Distributed Inference");
-    fputc('\n', fp);
-    para(fp, c, "Distributed mode runs one logical session across several machines by assigning contiguous model layer ranges to workers. Workers own their layer slice and KV-cache shard; the coordinator owns the prompt, sampling loop, and client/API flow. Start workers first, then start the coordinator. The coordinator waits for a complete route and streams hidden states through the workers.");
-    fputc('\n', fp);
-    opt(fp, c, "--role ROLE", "Distributed role: coordinator or worker.");
-    opt(fp, c, "--layers A:B", "Inclusive layer slice, e.g. 0:20 or 21:output.");
-    opt(fp, c, "--listen HOST PORT", "Coordinator listen address; workers may use it for their data listener.");
-    opt(fp, c, "--coordinator HOST PORT", "Coordinator address for --role worker.");
-    opt(fp, c, "--dist-prefill-chunk N", "Coordinator prefill pipeline chunk size. Default: session cap.");
-    opt(fp, c, "--dist-prefill-window N", "Max prefill chunks in flight. Default: workers+2, capped at 8.");
-    opt(fp, c, "--dist-activation-bits N", "Hidden-state transport width: 32, 16, or 8. Default: 32");
-    opt(fp, c, "--dist-replay-check", "Diagnostic: reset and replay prompt, then compare logits.");
-    opt(fp, c, "--debug", "Print coordinator route/debug logs.");
-    fputc('\n', fp);
-    title(fp, c, "Tensor Parallelism");
-    fputc('\n', fp);
-    para(fp, c, "Tensor parallelism uses the same coordinator/worker addresses as distributed mode, but always runs one 50/50 worker. Add --tensor-parallel, omit --layers, start the worker, then start the coordinator.");
-    fputc('\n', fp);
-    opt(fp, c, "--tensor-parallel", "Switch --role/--listen/--coordinator to two-machine tensor parallelism.");
-    opt(fp, c, "--transport auto|rdma|tcp", "Tensor gate transport. Default: auto");
-    opt(fp, c, "--rdma-device NAME", "Select a verbs device when auto-detection is ambiguous.");
-    opt(fp, c, "--rdma-gid-index N", "Select the local verbs GID index.");
-    opt(fp, c, "--tensor-parallel-token-prefill", "GLM diagnostic: prefill one token at a time for exact arithmetic.");
-    opt(fp, c, "--debug-hash N", "Cross-check hidden state every N tokens.");
     fputc('\n', fp);
 }
 
@@ -313,13 +245,13 @@ static void print_server_api(FILE *fp, const help_colors *c) {
     opt(fp, c, "--batched-session N", "Keep N resident sessions and batch decode-ready requests.");
     opt(fp, c, "--mixed-prefill-quantum N", "Prefill chunk while generations are active. Default: 128");
     para(fp, c, "Endpoints: /v1/chat/completions, /v1/responses, /v1/completions, and /v1/messages.");
-    para(fp, c, "Model aliases are available for DeepSeek V4, GLM-5.2, and Laguna-S-2.1; every alias serves the loaded GGUF.");
+    para(fp, c, "The server exposes the loaded Laguna S2.1 model through every compatible endpoint.");
     fputc('\n', fp);
 }
 
 static void print_server_thinking(FILE *fp, const help_colors *c) {
     title(fp, c, "Server Thinking Defaults");
-    para(fp, c, "DeepSeek-compatible chat requests default to high-effort thinking.");
+    para(fp, c, "Chat requests default to high-effort thinking.");
     para(fp, c, "reasoning_effort=max or output_config.effort=max requests Think Max.");
     para(fp, c, "Think Max requires --ctx >= 393216; smaller contexts use high.");
     para(fp, c, "thinking={type:disabled}, think=false, or model=deepseek-chat selects non-thinking mode.");
@@ -381,8 +313,6 @@ static bool tool_has_topic(ds4_help_tool tool, const char *topic) {
     if (!topic) return true;
     if (streq(topic, "all")) return true;
     if (streq(topic, "runtime")) return true;
-    if (streq(topic, "distributed"))
-        return tool == DS4_HELP_BENCH || tool == DS4_HELP_EVAL;
     if (streq(topic, "sampling"))
         return tool == DS4_HELP_DS4 || tool == DS4_HELP_EVAL;
     switch (tool) {
@@ -415,8 +345,6 @@ static void print_more_info(FILE *fp, const help_colors *c, ds4_help_tool tool) 
     more_line(fp, c, "Runtime full info:", "runtime");
     if (tool_has_topic(tool, "sampling"))
         more_line(fp, c, "Sampling full info:", "sampling");
-    if (tool_has_topic(tool, "distributed"))
-        more_line(fp, c, "Distributed inference:", "distributed");
     if (tool == DS4_HELP_DS4) {
         more_line(fp, c, "Interactive commands:", "commands");
         more_line(fp, c, "Diagnostics:", "diagnostics");
@@ -434,19 +362,14 @@ static void print_more_info(FILE *fp, const help_colors *c, ds4_help_tool tool) 
 
 static void print_examples(FILE *fp, const help_colors *c, ds4_help_tool tool, const char *topic) {
     title(fp, c, "Examples");
-    if (topic_is(topic, "distributed")) {
-        opt(fp, c, "worker", "./ds4 --role worker --layers 21:output --coordinator 192.168.0.181 9000 -m ds4flash.gguf");
-        opt(fp, c, "coordinator", "./ds4 --role coordinator --layers 0:20 --listen 0.0.0.0 9000 -p \"Hello\" -m ds4flash.gguf");
-    } else if (topic_is(topic, "runtime")) {
+    if (topic_is(topic, "runtime")) {
         if (tool == DS4_HELP_SERVER) {
             opt(fp, c, "Metal API", "./ds4-server -m ds4flash.gguf --metal --ctx 100000");
             opt(fp, c, "batched API", "./ds4-server --batched-session 2 --host 127.0.0.1 --port 8000");
         } else if (tool == DS4_HELP_BENCH) {
             opt(fp, c, "bench", "./ds4-bench --prompt-file long.txt --ctx-max 32768");
-            opt(fp, c, "quiet bench", "./ds4-bench --prompt-file long.txt --power 70");
         } else if (tool == DS4_HELP_EVAL) {
             opt(fp, c, "eval", "./ds4-eval --questions 10 --ctx 100000");
-            opt(fp, c, "CPU debug", "./ds4-eval --cpu --questions 1 --tokens 32");
         } else {
             opt(fp, c, "Metal", "./ds4 -m ds4flash.gguf --metal -c 100000");
         }
@@ -470,8 +393,7 @@ static void print_examples(FILE *fp, const help_colors *c, ds4_help_tool tool, c
 static void print_topic(FILE *fp, const help_colors *c, ds4_help_tool tool, const char *topic) {
     if (streq(topic, "all")) {
         print_model_runtime(fp, c, tool, true);
-        if (tool_has_topic(tool, "sampling")) print_sampling(fp, c, tool, true);
-        if (tool_has_topic(tool, "distributed")) print_distributed(fp, c);
+        if (tool_has_topic(tool, "sampling")) print_sampling(fp, c, true);
         if (tool == DS4_HELP_DS4) {
             print_cli_specific(fp, c, true);
             print_cli_commands(fp, c);
@@ -488,8 +410,7 @@ static void print_topic(FILE *fp, const help_colors *c, ds4_help_tool tool, cons
     }
 
     if (streq(topic, "runtime")) print_model_runtime(fp, c, tool, true);
-    else if (streq(topic, "sampling")) print_sampling(fp, c, tool, true);
-    else if (streq(topic, "distributed")) print_distributed(fp, c);
+    else if (streq(topic, "sampling")) print_sampling(fp, c, true);
     else if (tool == DS4_HELP_DS4 && streq(topic, "diagnostics")) print_cli_diagnostics(fp, c);
     else if (tool == DS4_HELP_DS4 && streq(topic, "commands")) print_cli_commands(fp, c);
     else if (tool == DS4_HELP_SERVER && streq(topic, "api")) print_server_api(fp, c);
@@ -504,7 +425,7 @@ static void print_default(FILE *fp, const help_colors *c, ds4_help_tool tool) {
 
     if (tool == DS4_HELP_DS4) {
         print_cli_specific(fp, c, true);
-        print_sampling(fp, c, tool, false);
+        print_sampling(fp, c, false);
     } else if (tool == DS4_HELP_SERVER) {
         print_server_api(fp, c);
         print_kv_cache(fp, c);
