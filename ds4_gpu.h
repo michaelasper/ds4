@@ -104,6 +104,23 @@ typedef struct {
 int ds4_gpu_init(void);
 void ds4_gpu_cleanup(void);
 
+#ifdef __APPLE__
+/* Process-lifecycle snapshot for the Q8 decode dispatch selectors.  The
+ * graph admission code and every Metal TP-world descriptor consume this same
+ * snapshot.  The snapshot is intentionally immutable for the lifetime of a
+ * process; changing the environment after the first GPU lifecycle probe does
+ * not change an in-flight or subsequently-created graph.  A fresh process is
+ * the reset boundary. */
+typedef struct ds4_gpu_q8_decode_config {
+    int32_t q8_mv_nsg_override; /* -1 malformed, 0 default, 1..8 override */
+    int32_t q8_mv_rows;         /* -1 malformed, otherwise 2 or 4 */
+} ds4_gpu_q8_decode_config;
+
+/* Returns 1 for a valid snapshot and -1 for a malformed explicit selector.
+ * `out` may be NULL when only validation is required. */
+int ds4_gpu_q8_decode_config_snapshot(ds4_gpu_q8_decode_config *out);
+#endif
+
 ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_view(const ds4_gpu_tensor *base, uint64_t offset, uint64_t bytes);
@@ -1039,6 +1056,13 @@ int ds4_gpu_matmul_f16_rms_norm_mv_tensor(
         uint32_t              out_dim,
         const ds4_gpu_tensor *x,
         float                 eps);
+
+/* Admission-only check for the fused output head.  It validates the literal
+ * selector's requested source/PSO and the exact TEW/shape certificate without
+ * opening a command buffer or mutating activation/KV state. */
+int ds4_gpu_matmul_f16_rms_norm_mv_preflight(
+        uint32_t in_dim,
+        uint32_t out_dim);
 
 /* CUDA batch path: fold an input RMS normalization into the FP16 activation
  * conversion used by the following projection. Returns 0 without touching
@@ -2735,6 +2759,23 @@ int ds4_gpu_laguna_router_decode_fused_tensor(
         uint32_t              n_expert,
         uint32_t              n_expert_used,
         float                 expert_weight_scale);
+
+/* Admission-only certificate for the normal one-token Laguna router.  The
+ * check validates shape, source-provided PSO, TEW, and threadgroup capacity
+ * without opening a command buffer or touching router/KV tensors. */
+int ds4_gpu_laguna_router_decode_fused_preflight(
+        uint32_t in_dim,
+        uint32_t n_expert,
+        uint32_t n_expert_used,
+        float    expert_weight_scale);
+
+#ifdef DS4_TEST_HOOKS
+/* Completion-scoped diagnostics for focused production-graph tests. */
+void ds4_gpu_laguna_router_decode_fused_stats_reset(void);
+int ds4_gpu_laguna_router_decode_fused_stats(
+        uint64_t *encoded_dispatches,
+        uint64_t *completed_dispatches);
+#endif
 
 /* Laguna S2.1 decode-router SIMD top-k graph preflight.  Returns 0 when the
  * public opt-in is off, 1 when the exact 256/10/2.5 path is available, and

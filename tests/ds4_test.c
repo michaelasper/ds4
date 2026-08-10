@@ -1327,6 +1327,32 @@ static void test_metal_laguna_dense_q8_gate_up_swiglu(void) {
     test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
 }
 
+/* Q8 dispatch selectors are a process-lifecycle snapshot, not per-world
+ * getenv probes.  Mutating either selector after the first Metal probe must
+ * leave the descriptor configuration unchanged; cleanup is intentionally not
+ * a reset boundary. */
+static void test_metal_q8_decode_lifecycle_snapshot(void) {
+    ds4_gpu_q8_decode_config first;
+    ds4_gpu_q8_decode_config mutated;
+    TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&first) > 0);
+
+    char *saved_nsg = test_save_env("DS4_METAL_Q8_MV_NSG");
+    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_NSG", "8", 1) == 0);
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "4", 1) == 0);
+    TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
+    TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
+    TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
+
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_NSG") == 0);
+    TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
+    TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
+    TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
+    TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
+    test_restore_env("DS4_METAL_Q8_MV_NSG", saved_nsg);
+    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+}
+
 /* The focused selector starts in a fresh process, so use it to prove that a
  * fast-compiled Metal library cannot be certified merely by setting
  * DS4_METAL_MATH_SAFE after initialization.  The ordinary Metal suite does
@@ -1433,8 +1459,21 @@ static void test_metal_laguna_q8_lmhead_screen_gates(void) {
                     dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_DECODE_MPP") == 0);
     TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "4", 1) == 0);
-    TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
-                    dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+    /* Q8 rows are frozen at the first GPU lifecycle probe.  A post-init
+     * mutation therefore cannot turn the certified NR2 screen off. */
+    ds4_gpu_q8_decode_config q8_snapshot;
+    TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&q8_snapshot) > 0);
+    if (q8_snapshot.q8_mv_rows == 2) {
+        ds4_gpu_laguna_q8_lmhead_screen *snapshot_screen =
+            ds4_gpu_laguna_q8_lmhead_screen_create(
+                dummy, valid_alloc, 0, 3072u, 100352u);
+        TEST_ASSERT(snapshot_screen != NULL);
+        ds4_gpu_laguna_q8_lmhead_screen_destroy(snapshot_screen);
+    } else {
+        TEST_ASSERT(q8_snapshot.q8_mv_rows == 4);
+        TEST_ASSERT(ds4_gpu_laguna_q8_lmhead_screen_create(
+                        dummy, valid_alloc, 0, 3072u, 100352u) == NULL);
+    }
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
     /* The dense selector and the screen share the same certified NR2
      * dispatch.  Exact literal 2 is compatible when both are requested. */
@@ -8121,6 +8160,11 @@ static void test_metal_laguna_router_fused_exact_case(
                     value = 1.0e38f;
                 }
                 w[(uint64_t)r * in_dim + i] = value;
+                if (pattern == 3u && r == 17u && i == 0u) {
+                    const uint32_t qnan = 0x7fc00011u;
+                    memcpy(&w[(uint64_t)r * in_dim + i],
+                           &qnan, sizeof(qnan));
+                }
             }
             const uint32_t bkey = r * 53u + seed * 11u;
             bias[r] = (float)((int)(bkey % 61u) - 30) / 128.0f;
@@ -8229,10 +8273,16 @@ static void test_metal_laguna_router_fused_exact(void) {
     const char *simd_env = "DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK";
     char *saved_simd = test_save_env(simd_env);
     TEST_ASSERT(unsetenv(simd_env) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_preflight(
+                    3072u, 256u, 10u, 2.5f) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_preflight(
+                    3072u, 256u, 9u, 2.5f) == 0);
+    ds4_gpu_laguna_router_decode_fused_stats_reset();
 
     test_metal_laguna_router_fused_exact_case(4096u, 0u, 59u);
     test_metal_laguna_router_fused_exact_case(4096u, 1u, 61u);
     test_metal_laguna_router_fused_exact_case(4096u, 2u, 67u);
+    test_metal_laguna_router_fused_exact_case(4096u, 3u, 69u);
     test_metal_laguna_router_fused_exact_case(2048u, 0u, 71u);
 
     /* Outside the replicated shape class the fused dispatch fails closed. */
@@ -8266,6 +8316,13 @@ static void test_metal_laguna_router_fused_exact(void) {
     ds4_gpu_tensor_free(logits);
     ds4_gpu_tensor_free(x);
     free(model_raw);
+
+    uint64_t encoded_dispatches = 0;
+    uint64_t completed_dispatches = 0;
+    TEST_ASSERT(ds4_gpu_laguna_router_decode_fused_stats(
+                    &encoded_dispatches, &completed_dispatches) != 0);
+    TEST_ASSERT(encoded_dispatches >= 4u);
+    TEST_ASSERT(completed_dispatches == encoded_dispatches);
 
     test_restore_env(simd_env, saved_simd);
 }
@@ -8564,6 +8621,8 @@ static void test_metal_glm_router_simd_topk_source_override(void) {
     TEST_ASSERT(setenv(enable_env, "1", 1) == 0);
     const int mode = ds4_gpu_laguna_router_simd_topk_preflight(
         256u, 10u, 2.5f);
+    const int fused_mode = ds4_gpu_laguna_router_decode_fused_preflight(
+        3072u, 256u, 10u, 2.5f);
     if (mode > 0) {
         fprintf(stderr,
                 "ds4-test: Laguna router SIMD top-k current source override "
@@ -8572,6 +8631,7 @@ static void test_metal_glm_router_simd_topk_source_override(void) {
         test_metal_glm_router_simd_topk_exact_suite();
     } else {
         TEST_ASSERT(mode < 0);
+        TEST_ASSERT(fused_mode == 0);
         fprintf(stderr,
                 "ds4-test: Laguna router SIMD top-k old source override "
                 "env-off=stock env-on=fail-closed source=%s\n",
@@ -9685,6 +9745,7 @@ static void test_metal_kernel_group(void) {
     test_dspark_cache_window_crop();
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
+    test_metal_q8_decode_lifecycle_snapshot();
     test_metal_laguna_decode_residual_norm_env();
     test_metal_add3_rms_norm_rejects_partial_simd();
     test_metal_laguna_gpu_argmax();
@@ -11644,6 +11705,7 @@ static void test_print_help(const char *prog) {
     puts("  DS4_METAL_GLM_QMV_R1=1  Enable resident decode-only one-row-per-SIMD GLM QMV.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK=1  Enable exact finite-domain Laguna router top-k SIMD selector.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE=1  Collect optimized/fallback selector row counters.");
+    puts("  DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED=1  Enable the strict opt-in normal one-token Laguna fused router.");
     puts("  DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED=1  Enable ordinary Laguna prefill paired Q/K norm/RoPE.");
     puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU=1  Enable opt-in Laguna leading-dense Q8 fused gate/up+SwiGLU.");
     puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE=1  Report each fused/stock route once after a waited graph.");

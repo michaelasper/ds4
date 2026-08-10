@@ -17660,6 +17660,12 @@ static uint64_t metal_graph_q8_0_row_bytes(uint64_t in_dim) {
  * Metal Release Graph Allocation.
  * ========================================================================= */
 
+#if defined(__APPLE__)
+static int metal_graph_output_head_norm_fuse_mode(void);
+static bool metal_graph_output_head_norm_fuse_preflight(
+        const ds4_weights *weights);
+#endif
+
 /* Allocate the Metal graph state for a chosen raw-cache capacity.  The model
  * weights are not copied here; tensors reference the mapped GGUF.
  *
@@ -17684,6 +17690,14 @@ static bool metal_graph_alloc_raw_cap(
         const int              *placement,
         bool                    cuda_tensor_parallel,
         const ds4_gpu_graph    *shared_prefill_workspace) {
+#if defined(__APPLE__)
+    if (ds4_gpu_q8_decode_config_snapshot(NULL) < 0) return false;
+    /* This admission probe must precede memset, tensor/KV allocation, and any
+     * caller-owned command batch.  An explicit output-head fusion request on
+     * an old source or incompatible PSO is therefore a clean failure rather
+     * than a partially-mutated graph that later falls back. */
+    if (!metal_graph_output_head_norm_fuse_preflight(weights)) return false;
+#endif
     const int saved_dspark_exec_tier = g->dspark_exec_tier;
     memset(g, 0, sizeof(*g));
     g->dspark_exec_tier = saved_dspark_exec_tier;
@@ -22863,6 +22877,8 @@ typedef struct {
     bool moe_one_stage_profile;
     bool moe_write_clamped_act;
     bool q8_mv_nsg_override;
+    int q8_mv_nsg_mode;
+    int q8_mv_rows;
     bool moe_replay_selected_ids;
 } metal_decode_env_switches;
 
@@ -22912,7 +22928,19 @@ static const metal_decode_env_switches *metal_decode_env_switches_get(void) {
             getenv("DS4_METAL_MOE_ONE_STAGE_PROFILE") != NULL;
         s.moe_write_clamped_act =
             getenv("DS4_METAL_MOE_WRITE_CLAMPED_ACT") != NULL;
-        s.q8_mv_nsg_override = getenv("DS4_METAL_Q8_MV_NSG") != NULL;
+#if defined(__APPLE__)
+        ds4_gpu_q8_decode_config q8_config;
+        const int q8_config_valid =
+            ds4_gpu_q8_decode_config_snapshot(&q8_config);
+        s.q8_mv_nsg_mode = q8_config_valid < 0 ? -1 :
+            q8_config.q8_mv_nsg_override;
+        s.q8_mv_rows = q8_config_valid < 0 ? -1 : q8_config.q8_mv_rows;
+        s.q8_mv_nsg_override = s.q8_mv_nsg_mode > 0;
+#else
+        s.q8_mv_nsg_mode = 0;
+        s.q8_mv_rows = 2;
+        s.q8_mv_nsg_override = false;
+#endif
         s.moe_replay_selected_ids =
             getenv("DS4_MOE_REPLAY_SELECTED_IDS") != NULL;
         initialized = 1;
@@ -22958,6 +22986,14 @@ static bool metal_graph_encode_decode_layer_phase(
      * kernel, which already owns each head's whole row. Removes one
      * 64-threadgroup dispatch per layer. */
     const metal_decode_env_switches *env_sw = metal_decode_env_switches_get();
+#if defined(__APPLE__)
+    if (env_sw->q8_mv_nsg_mode < 0 || env_sw->q8_mv_rows < 0) {
+        /* The graph admission probe normally catches this before any scratch
+         * or KV allocation.  Keep the encode boundary fail-closed as well
+         * for diagnostic graphs constructed by older callers. */
+        return false;
+    }
+#endif
     const bool fuse_attn_inv_rope =
         !env_sw->disable_pre_m5_attn_inv_rope_fuse &&
         (ds4_gpu_device_is_pre_m5_apple_silicon() ||
@@ -24748,8 +24784,8 @@ static bool metal_graph_encode_decode_layer_phase(
         const bool fuse_producer_pre_norm =
             fuse_norm_mix && fuse_hc_norm &&
             metal_graph_ported_m5_decode_feature_enabled(
-                "DS4_METAL_DISABLE_PRE_M5_HC_PRODUCER_PRE_NORM_FUSE",
-                "DS4_METAL_DISABLE_M5_HC_PRODUCER_PRE_NORM_FUSE");
+                env_sw->disable_pre_m5_hc_producer_pre_norm_fuse,
+                env_sw->disable_m5_hc_producer_pre_norm_fuse);
         if (fuse_producer_pre_norm) {
             const int fused =
                 ds4_gpu_hc_rms_norm_mix_split_norm_f16_tensor(
@@ -26260,6 +26296,26 @@ static int metal_graph_output_head_norm_fuse_mode(void) {
     return cache;
 }
 
+static bool metal_graph_output_head_norm_fuse_preflight(
+        const ds4_weights *weights) {
+    const int mode = metal_graph_output_head_norm_fuse_mode();
+    if (mode < 0) return false;
+    if (mode == 0) return true;
+    if (!weights || !weights->output_hc_fn ||
+        weights->output_hc_fn->ndim < 2 ||
+        weights->output_hc_fn->dim[0] !=
+            (uint64_t)DS4_N_HC * DS4_N_EMBD ||
+        weights->output_hc_fn->dim[1] != DS4_N_HC) {
+        fprintf(stderr,
+                "ds4: output-head norm fusion requested but HC-head "
+                "weights have an unsupported shape\n");
+        return false;
+    }
+    return ds4_gpu_matmul_f16_rms_norm_mv_preflight(
+               (uint32_t)((uint64_t)DS4_N_HC * DS4_N_EMBD),
+               (uint32_t)DS4_N_HC) != 0;
+}
+
 static bool metal_graph_encode_output_head(
         ds4_gpu_graph *g,
         const ds4_model       *model,
@@ -26271,12 +26327,18 @@ static bool metal_graph_encode_output_head(
      * helper consults it directly (and also covers the case where the
      * preceding decode layer ran on a different tier — copy_xdev ferries
      * the active cur_hc across the boundary). */
-    if (g->placement) {
-        if (!metal_graph_set_active_tier_decode(g, g->head_tier)) return false;
-    }
     const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
     const int output_head_norm_fuse = metal_graph_output_head_norm_fuse_mode();
     if (output_head_norm_fuse < 0) return false;
+    /* Admission normally ran in metal_graph_alloc_raw_cap.  Keep the
+     * encode-side selector check before changing active tiers so direct
+     * diagnostic/session callers cannot mutate graph state on malformed
+     * requests. */
+    if (output_head_norm_fuse > 0 &&
+        !metal_graph_output_head_norm_fuse_preflight(weights)) return false;
+    if (g->placement) {
+        if (!metal_graph_set_active_tier_decode(g, g->head_tier)) return false;
+    }
     const bool output_stage_profile = g->output_stage_profile;
     double output_stage_t0 = output_stage_profile ? now_sec() : 0.0;
 #define DS4_METAL_PROFILE_OUTPUT_STAGE(name) do { \
@@ -50572,9 +50634,18 @@ static bool laguna_dense_q8_gate_up_swiglu_preflight(
                 DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
         return false;
     }
+#if defined(__APPLE__)
+    ds4_gpu_q8_decode_config q8_config;
+    const int q8_config_valid =
+        ds4_gpu_q8_decode_config_snapshot(&q8_config);
+    const int q8_rows_mode = q8_config_valid < 0 ? -1 : q8_config.q8_mv_rows;
+    const char *q8_rows_value = q8_config_valid < 0 ? "invalid snapshot" :
+        (q8_rows_mode == 2 ? "2" : "4");
+#else
     const char *q8_rows_value = getenv("DS4_METAL_Q8_MV_ROWS");
     const int q8_rows_mode =
         ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(q8_rows_value);
+#endif
     if (q8_rows_mode != 2) {
         fprintf(stderr,
                 "ds4: %s requires DS4_METAL_Q8_MV_ROWS unset/2 for "
@@ -50959,12 +51030,13 @@ static bool laguna_graph_router_decode_rows(
         ds4_laguna_gpu_graph    *g,
         const ds4_model         *model,
         const ds4_layer_weights *l,
-        uint32_t                 n_rows) {
+        uint32_t                 n_rows,
+        bool                     allow_fused) {
     if (!g || !model || !l || n_rows == 0u) return false;
     const int fused_router = laguna_metal_router_decode_fused_mode();
     if (fused_router < 0) return false;
 #if defined(__APPLE__)
-    if (fused_router > 0 && n_rows == 1u) {
+    if (allow_fused && fused_router > 0 && n_rows == 1u) {
         return ds4_gpu_laguna_router_decode_fused_tensor(
                    g->router_selected,
                    g->router_weights,
@@ -51608,6 +51680,9 @@ static bool dflash_graph_draft_block(
 #ifdef __APPLE__
 static int laguna_metal_decode_residual_norm_mode(void);
 static bool laguna_metal_decode_residual_norm_preflight(void);
+static bool laguna_metal_router_decode_fused_preflight(
+        const ds4_model   *model,
+        const ds4_weights *weights);
 #endif
 
 static bool laguna_graph_forward_token(
@@ -51626,6 +51701,13 @@ static bool laguna_graph_forward_token(
         token >= (int)DS4_N_VOCAB || pos >= g->ctx_size) {
         return false;
     }
+#ifdef __APPLE__
+    const int fused_router_mode = laguna_metal_router_decode_fused_mode();
+    if (fused_router_mode < 0 ||
+        !laguna_metal_router_decode_fused_preflight(model, weights)) {
+        return false;
+    }
+#endif
     /* A new graph call owns a new evidence unit.  This also scrubs any
      * uncommitted trace state left by a failed caller while remaining a
      * no-op on the timed trace-off path when the slot is already empty. */
@@ -51984,26 +52066,49 @@ static bool laguna_graph_forward_token(
                 }
             }
         } else if (ok) {
-            ok = ds4_gpu_matmul_f32_tensor(g->router_logits,
-                                            model->map,
-                                            model->size,
-                                            l->ffn_gate_inp->abs_offset,
-                                            DS4_N_EMBD,
-                                            DS4_N_EXPERT,
-                                            g->ffn_norm,
-                                            1) != 0;
-            if (ok) {
-                ok = ds4_gpu_glm_router_select_tensor(
+#ifdef __APPLE__
+            if (fused_router_mode > 0) {
+                /* This is the normal one-token Laguna decode hot path.  The
+                 * fused helper owns both router projection and top-k; stock
+                 * projection/selection remains the opt-out default. */
+                ok = ds4_gpu_laguna_router_decode_fused_tensor(
                         g->router_selected,
                         g->router_weights,
                         g->router_probs,
+                        g->router_logits,
                         model->map,
                         model->size,
+                        l->ffn_gate_inp->abs_offset,
                         l->ffn_exp_probs_b->abs_offset,
-                        g->router_logits,
+                        g->ffn_norm,
+                        (uint32_t)DS4_N_EMBD,
                         DS4_N_EXPERT,
                         DS4_N_EXPERT_USED,
                         DS4_EXPERT_WEIGHT_SCALE) != 0;
+            } else
+#endif
+            {
+                ok = ds4_gpu_matmul_f32_tensor(g->router_logits,
+                                                model->map,
+                                                model->size,
+                                                l->ffn_gate_inp->abs_offset,
+                                                DS4_N_EMBD,
+                                                DS4_N_EXPERT,
+                                                g->ffn_norm,
+                                                1) != 0;
+                if (ok) {
+                    ok = ds4_gpu_glm_router_select_tensor(
+                            g->router_selected,
+                            g->router_weights,
+                            g->router_probs,
+                            model->map,
+                            model->size,
+                            l->ffn_exp_probs_b->abs_offset,
+                            g->router_logits,
+                            DS4_N_EXPERT,
+                            DS4_N_EXPERT_USED,
+                            DS4_EXPERT_WEIGHT_SCALE) != 0;
+                }
             }
 
             const uint64_t gate_row_bytes =
@@ -52448,6 +52553,16 @@ static bool laguna_graph_forward_batch(
         n_tokens > g->prefill_cap || pos0 > g->ctx_size - n_tokens) {
         return false;
     }
+#ifdef __APPLE__
+    const int fused_router_mode = laguna_metal_router_decode_fused_mode();
+    if (fused_router_mode < 0 ||
+        !laguna_metal_router_decode_fused_preflight(model, weights)) {
+        return false;
+    }
+    const bool fused_router_batch = fused_router_mode > 0 && n_tokens == 1u;
+#else
+    const bool fused_router_batch = false;
+#endif
     laguna_dense_q8_gate_up_swiglu_pending_clear(g);
 #ifdef __APPLE__
     const bool router_simd_topk_trace =
@@ -52799,7 +52914,26 @@ static bool laguna_graph_forward_batch(
             if (exact_q8_rows) {
                 failed_stage = "decode-row router";
                 ok = laguna_graph_router_decode_rows(
-                        g, model, l, n_tokens);
+                        g, model, l, n_tokens, false);
+            } else if (fused_router_batch) {
+                /* A one-row ordinary graph uses the same production fused
+                 * dispatch as laguna_graph_forward_token.  Exact verifier
+                 * batches deliberately stay on their row-replay path above. */
+                failed_stage = "fused router";
+                ok = ds4_gpu_laguna_router_decode_fused_tensor(
+                         g->router_selected,
+                         g->router_weights,
+                         g->router_probs,
+                         g->router_logits,
+                         model->map,
+                         model->size,
+                         l->ffn_gate_inp->abs_offset,
+                         l->ffn_exp_probs_b->abs_offset,
+                         g->ffn_norm,
+                         (uint32_t)DS4_N_EMBD,
+                         DS4_N_EXPERT,
+                         DS4_N_EXPERT_USED,
+                         DS4_EXPERT_WEIGHT_SCALE) != 0;
             } else {
                 failed_stage = "router projection";
                 ok = ds4_gpu_matmul_f32_tensor(
@@ -52812,7 +52946,7 @@ static bool laguna_graph_forward_batch(
                         g->ffn_norm,
                         n_tokens) != 0;
             }
-            if (ok && !exact_q8_rows) {
+            if (ok && !exact_q8_rows && !fused_router_batch) {
                 failed_stage = "router selection";
                 ok = ds4_gpu_glm_router_select_batch_tensor(
                         g->router_selected,
@@ -53205,9 +53339,12 @@ static bool laguna_metal_q8_lmhead_screen_requested(void) {
  * reject it alongside the other generation preflights before allocating the
  * raw Laguna graph. */
 static bool laguna_metal_q8_lmhead_screen_dispatch_env_preflight(void) {
-    const char *rows_value = getenv("DS4_METAL_Q8_MV_ROWS");
-    const int rows_mode =
-        ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(rows_value);
+    ds4_gpu_q8_decode_config q8_config;
+    const int q8_config_valid =
+        ds4_gpu_q8_decode_config_snapshot(&q8_config);
+    const int rows_mode = q8_config_valid < 0 ? -1 : q8_config.q8_mv_rows;
+    const char *rows_value = q8_config_valid < 0 ?
+        "invalid snapshot" : (rows_mode == 2 ? "2" : "4");
     if (rows_mode != 2) {
         fprintf(stderr,
                 "ds4: Laguna Q8 lm-head screen requires "
@@ -53288,6 +53425,58 @@ static bool laguna_metal_router_simd_topk_preflight(
         return false;
     }
     return true;
+}
+
+/* Admission certificate for the normal one-token fused Laguna router.  The
+ * selector is frozen by laguna_metal_router_decode_fused_mode(); weight
+ * layouts/ranges are checked here for every sparse layer, while the Metal
+ * backend certifies the optional source PSO, TEW, and threadgroup geometry.
+ * This function intentionally runs before command/KV/capture mutation at each
+ * public graph boundary. */
+static bool laguna_metal_router_decode_fused_preflight(
+        const ds4_model   *model,
+        const ds4_weights *weights) {
+    const int mode = laguna_metal_router_decode_fused_mode();
+    if (mode < 0) return false;
+    if (mode == 0) return true;
+    if (!model || !model->map || !weights) {
+        fprintf(stderr,
+                "ds4: Laguna fused router requested without a mapped model "
+                "and bound weights\n");
+        return false;
+    }
+
+    const uint64_t gate_bytes =
+        (uint64_t)DS4_N_EMBD * (uint64_t)DS4_N_EXPERT * sizeof(float);
+    const uint64_t bias_bytes = (uint64_t)DS4_N_EXPERT * sizeof(float);
+    for (uint32_t il = DS4_N_LEADING_DENSE;
+         il < (uint32_t)DS4_N_LAYER;
+         il++) {
+        const ds4_layer_weights *l = &weights->layer[il];
+        const ds4_tensor *gate = l->ffn_gate_inp;
+        const ds4_tensor *bias = l->ffn_exp_probs_b;
+        if (!gate || !bias || gate->type != DS4_TENSOR_F32 ||
+            gate->ndim < 2u || gate->dim[0] != DS4_N_EMBD ||
+            gate->dim[1] != DS4_N_EXPERT ||
+            bias->type != DS4_TENSOR_F32 || bias->ndim < 1u ||
+            bias->dim[0] != DS4_N_EXPERT ||
+            gate->bytes < gate_bytes || bias->bytes < bias_bytes ||
+            gate->abs_offset > model->size ||
+            gate->bytes > model->size - gate->abs_offset ||
+            bias->abs_offset > model->size ||
+            bias->bytes > model->size - bias->abs_offset) {
+            fprintf(stderr,
+                    "ds4: Laguna fused router requested but sparse layer "
+                    "%u has unavailable or incompatible F32 router weights\n",
+                    il);
+            return false;
+        }
+    }
+    return ds4_gpu_laguna_router_decode_fused_preflight(
+               (uint32_t)DS4_N_EMBD,
+               DS4_N_EXPERT,
+               DS4_N_EXPERT_USED,
+               DS4_EXPERT_WEIGHT_SCALE) != 0;
 }
 
 /* The router trace is intentionally opt-in and is kept out of timed runs.
@@ -53426,6 +53615,7 @@ static int generate_laguna_metal_argmax(
 #if defined(__APPLE__)
     if (!laguna_metal_router_simd_topk_preflight(
             NULL, "Laguna generation", NULL, 0)) return 1;
+    if (!laguna_metal_router_decode_fused_preflight(model, weights)) return 1;
     if (laguna_metal_q8_lmhead_screen_v2_mode() < 0) return 1;
     if (!laguna_metal_decode_residual_norm_preflight()) return 1;
     const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
@@ -64614,6 +64804,9 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_router_simd_topk_preflight(
             e, "session create", NULL, 0)) return 1;
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA &&
+        !laguna_metal_router_decode_fused_preflight(
+            &e->model, &e->weights)) return 1;
 #endif
     if (e->backend == DS4_BACKEND_CPU) {
         if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||

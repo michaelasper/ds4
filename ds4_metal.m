@@ -612,6 +612,20 @@ static int g_initialized;
 static int g_quality_mode;
 static int g_tensor_matmul_suppressed;
 static int g_mpp_invalid_env_reported;
+#ifdef DS4_TEST_HOOKS
+/* Completion-scoped evidence for the opt-in Laguna decode-router path.  The
+ * counters are deliberately test-only: production inference has no extra
+ * synchronization or reporting work. */
+static uint64_t g_laguna_router_fused_encoded_dispatches;
+/* Dispatches recorded in the current command batch, an owned one-off
+ * command buffer, or already-committed pending command buffers are tracked
+ * separately so discard and asynchronous submit cannot be mistaken for
+ * completion. */
+static uint64_t g_laguna_router_fused_batch_dispatches;
+static uint64_t g_laguna_router_fused_owned_dispatches;
+static uint64_t g_laguna_router_fused_pending_dispatches;
+static uint64_t g_laguna_router_fused_completed_dispatches;
+#endif
 #define DS4_METAL_MAX_ROUTED_EXPERT_USED 8
 static int32_t g_routed_moe_selected_override[DS4_METAL_MAX_ROUTED_EXPERT_USED];
 static uint32_t g_routed_moe_selected_override_n;
@@ -1250,6 +1264,14 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     }
     [g_pending_cbs removeAllObjects];
     ds4_gpu_stream_expert_cache_note_pending_completed();
+#ifdef DS4_TEST_HOOKS
+    /* These command buffers were already committed by flush/submit (or by a
+     * shared-event path).  Count them only after their completion wait, and
+     * drop the evidence on an error or timeout. */
+    if (ok) g_laguna_router_fused_completed_dispatches +=
+        g_laguna_router_fused_pending_dispatches;
+    g_laguna_router_fused_pending_dispatches = 0;
+#endif
     if (!ok) ds4_gpu_invalidate_zero_prefix_prefill_block_maps();
     return ok;
 }
@@ -1266,6 +1288,16 @@ static int ds4_gpu_finish_command_buffer(id<MTLCommandBuffer> cb, int owned, con
     ds4_gpu_stream_expert_cache_note_owned_completed();
     [g_transient_buffers removeAllObjects];
     ds4_gpu_model_buffer_cache_maybe_evict(label);
+#ifdef DS4_TEST_HOOKS
+    /* A dispatch is evidence only after its owning command buffer has
+     * completed.  Failed command buffers never report a successful fused
+     * graph execution. */
+    if (ok) g_laguna_router_fused_completed_dispatches +=
+        g_laguna_router_fused_batch_dispatches +
+        g_laguna_router_fused_owned_dispatches;
+    g_laguna_router_fused_batch_dispatches = 0;
+    g_laguna_router_fused_owned_dispatches = 0;
+#endif
     return ok;
 }
 
@@ -2312,6 +2344,46 @@ ds4_gpu_mul_mv_f16_rms_norm_pipeline(void) {
     return g_mul_mv_f16_rms_norm_pipeline;
 }
 
+static id<MTLComputePipelineState> ds4_gpu_hot_pipeline(
+        id<MTLComputePipelineState> pipeline,
+        const char *fallback_name);
+static NSUInteger ds4_gpu_rms_norm_threads(uint32_t n);
+
+int ds4_gpu_matmul_f16_rms_norm_mv_preflight(
+        uint32_t in_dim,
+        uint32_t out_dim) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    if (in_dim == 0u || out_dim == 0u || (in_dim % 32u) != 0u) return 0;
+
+    const uint32_t nsg =
+        (in_dim + 127u) / 128u > 8u ? 8u : (in_dim + 127u) / 128u;
+    const uint32_t norm_threads = (uint32_t)ds4_gpu_rms_norm_threads(in_dim);
+    if (nsg != 8u || norm_threads < 256u ||
+        (norm_threads % 256u) != 0u ||
+        (!g_quality_mode && (out_dim == 512u || out_dim == 1024u) &&
+         in_dim >= 4096u)) {
+        fprintf(stderr,
+                "ds4: Metal fused RMS-norm F16 matvec preflight rejected "
+                "shape in=%u out=%u\n", in_dim, out_dim);
+        return 0;
+    }
+
+    /* Pipeline lookup is intentionally the only optional-source probe here:
+     * an old DS4_METAL_DENSE_SOURCE therefore fails closed before the graph
+     * opens commands or allocates any layer/KV state. */
+    id<MTLComputePipelineState> pipeline = ds4_gpu_hot_pipeline(
+        ds4_gpu_mul_mv_f16_rms_norm_pipeline(),
+        "kernel_mul_mv_f16_f32_rms_norm_4");
+    if (!pipeline || pipeline.threadExecutionWidth != 32u ||
+        pipeline.maxTotalThreadsPerThreadgroup < 256u) {
+        fprintf(stderr,
+                "ds4: Metal fused RMS-norm F16 matvec preflight requires "
+                "the current source PSO with TEW=32 and maxThreads>=256\n");
+        return 0;
+    }
+    return 1;
+}
+
 static int ds4_gpu_disable_hot_pipeline_statics(void) {
     static int initialized;
     static int disabled;
@@ -2388,6 +2460,79 @@ static int ds4_gpu_env_bool(const char *name) {
         g_mpp_invalid_env_reported = 1;
     }
     return 1;
+}
+
+/* Q8 decode dispatch configuration is a process-lifecycle snapshot.  Keep
+ * this parser next to the Metal environment helpers so graph admission and
+ * every TP-world descriptor cannot accidentally grow separate getenv caches.
+ * Empty/unset/0 select the established defaults; explicit numeric values are
+ * validated instead of silently clamped or falling back. */
+static ds4_gpu_q8_decode_config g_q8_decode_config;
+static int g_q8_decode_config_initialized;
+
+static int ds4_gpu_q8_parse_decimal_selector(
+        const char *name,
+        int         default_value,
+        int         min_value,
+        int         max_value,
+        int         zero_is_default,
+        int        *value_out) {
+    const char *v = getenv(name);
+    if (!v || v[0] == '\0') {
+        *value_out = default_value;
+        return 1;
+    }
+    if (zero_is_default && v[0] == '0' && v[1] == '\0') {
+        *value_out = default_value;
+        return 1;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long parsed = strtoul(v, &end, 10);
+    if (end == v || errno == ERANGE || *end != '\0' ||
+        parsed < (unsigned long)min_value ||
+        parsed > (unsigned long)max_value) {
+        fprintf(stderr,
+                "ds4: fatal: invalid %s='%s'; expected %s\n",
+                name,
+                v,
+                zero_is_default ?
+                    "unset, empty, 0, or a bounded decimal value" :
+                    "unset, empty, or a bounded decimal value");
+        *value_out = -1;
+        return 0;
+    }
+    *value_out = (int)parsed;
+    return 1;
+}
+
+int ds4_gpu_q8_decode_config_snapshot(ds4_gpu_q8_decode_config *out) {
+    if (!g_q8_decode_config_initialized) {
+        g_q8_decode_config.q8_mv_nsg_override = 0;
+        g_q8_decode_config.q8_mv_rows = 2;
+        const int nsg_ok = ds4_gpu_q8_parse_decimal_selector(
+            "DS4_METAL_Q8_MV_NSG", 0, 1, 8, 1,
+            &g_q8_decode_config.q8_mv_nsg_override);
+        int rows_ok = ds4_gpu_q8_parse_decimal_selector(
+            "DS4_METAL_Q8_MV_ROWS", 2, 2, 4, 1,
+            &g_q8_decode_config.q8_mv_rows);
+        if (rows_ok && g_q8_decode_config.q8_mv_rows != 2 &&
+            g_q8_decode_config.q8_mv_rows != 4) {
+            fprintf(stderr,
+                    "ds4: fatal: invalid DS4_METAL_Q8_MV_ROWS='%s'; "
+                    "expected unset, empty, 0, 2, or 4\n",
+                    getenv("DS4_METAL_Q8_MV_ROWS"));
+            g_q8_decode_config.q8_mv_rows = -1;
+            rows_ok = 0;
+        }
+        g_q8_decode_config_initialized = 1;
+        (void)nsg_ok;
+        (void)rows_ok;
+    }
+    if (out) *out = g_q8_decode_config;
+    return g_q8_decode_config.q8_mv_nsg_override < 0 ||
+                   g_q8_decode_config.q8_mv_rows < 0 ? -1 : 1;
 }
 
 static uint64_t ds4_gpu_env_u64(const char *name,
@@ -5191,25 +5336,22 @@ typedef struct {
 static int ds4_gpu_tp_world_is_two(void);
 
 static ds4_gpu_mv_dispatch ds4_gpu_make_q8_0_mv_dispatch(void) {
-    /* Decode recomputes this per matvec per layer per token, but the result
-     * depends only on the TP world and the process-constant nsg override,
-     * so memoize per TP mode instead of probing the environment each call. */
+    /* The selector was parsed once at the Metal lifecycle boundary.  Every
+     * descriptor, including world-1 and world-2 TP slots, consumes that same
+     * immutable value; changing getenv() after one slot's first use cannot
+     * produce a mixed dispatch geometry in the other slot. */
     const int tp2 = ds4_gpu_tp_world_is_two() ? 1 : 0;
-    static ds4_gpu_mv_dispatch cache[2];
-    static int cache_valid[2];
-    if (!cache_valid[tp2]) {
-        const uint64_t default_nsg = tp2 ? 2u : 4u;
-        const int16_t nsg = (int16_t)ds4_gpu_env_u64(
-            "DS4_METAL_Q8_MV_NSG", default_nsg, 1u, 8u);
-        cache[tp2] = (ds4_gpu_mv_dispatch) {
-            .function_name = "kernel_mul_mv_q8_0_f32",
-            .nsg = nsg,
-            .nr0 = 2,
-            .smem = 32u * 2u * sizeof(float),
-        };
-        cache_valid[tp2] = 1;
-    }
-    return cache[tp2];
+    ds4_gpu_q8_decode_config config;
+    const int valid = ds4_gpu_q8_decode_config_snapshot(&config);
+    const int16_t nsg = valid < 0 ? 0 : (int16_t)(
+        config.q8_mv_nsg_override > 0 ?
+            config.q8_mv_nsg_override : (tp2 ? 2 : 4));
+    return (ds4_gpu_mv_dispatch) {
+        .function_name = "kernel_mul_mv_q8_0_f32",
+        .nsg = nsg,
+        .nr0 = 2,
+        .smem = 32u * 2u * sizeof(float),
+    };
 }
 
 static ds4_gpu_mv_dispatch ds4_gpu_make_plain_mv_dispatch(
@@ -6702,6 +6844,12 @@ typedef struct {
  * while long-context prefill and decode can still pick specialized variants. */
 int ds4_gpu_init(void) {
     if (g_initialized) return 1;
+
+    /* Freeze Q8 decode selectors before any Metal graph, command buffer, or
+     * TP-world descriptor can be admitted.  This is deliberately a process
+     * boundary: ds4_gpu_cleanup() releases Metal resources but does not
+     * reopen the environment snapshot for a later in-process engine. */
+    if (ds4_gpu_q8_decode_config_snapshot(NULL) < 0) return 0;
 
     @autoreleasepool {
         ds4_gpu_decode_pipeline_fast_cache_reset();
@@ -9434,6 +9582,11 @@ int ds4_gpu_flush_commands(void) {
     id<MTLCommandBuffer> cb = g_batch_cb;
     g_batch_cb = nil;
     g_batch_has_work = NO;
+#ifdef DS4_TEST_HOOKS
+    g_laguna_router_fused_pending_dispatches +=
+        g_laguna_router_fused_batch_dispatches;
+    g_laguna_router_fused_batch_dispatches = 0;
+#endif
     [cb commit];
     [g_pending_cbs addObject:cb];
     ds4_gpu_stream_expert_cache_note_batch_committed();
@@ -9463,6 +9616,11 @@ int ds4_gpu_submit_commands(void) {
     g_batch_has_work = NO;
     g_stream_expert_cache_owned_seq = g_stream_expert_cache_batch_seq;
     g_stream_expert_cache_batch_seq = 0;
+#ifdef DS4_TEST_HOOKS
+    g_laguna_router_fused_pending_dispatches +=
+        g_laguna_router_fused_batch_dispatches;
+    g_laguna_router_fused_batch_dispatches = 0;
+#endif
     [cb commit];
     [g_pending_cbs addObject:cb];
     ds4_gpu_stream_expert_cache_note_batch_committed();
@@ -9484,6 +9642,11 @@ int ds4_gpu_discard_commands(void) {
     ds4_gpu_close_batch_encoder();
     g_batch_cb = nil;
     g_batch_has_work = NO;
+#ifdef DS4_TEST_HOOKS
+    /* The current batch is discarded; only previously committed pending
+     * batches, if any, remain eligible for completion accounting. */
+    g_laguna_router_fused_batch_dispatches = 0;
+#endif
     const uint64_t discarded_seq = g_stream_expert_cache_batch_seq;
     g_stream_expert_cache_batch_seq = 0;
     if ([g_pending_cbs count] != 0 &&
@@ -9914,6 +10077,11 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
         id<MTLCommandBuffer> cb = g_batch_cb;
         g_batch_cb = nil;
         g_batch_has_work = NO;
+#ifdef DS4_TEST_HOOKS
+        g_laguna_router_fused_pending_dispatches +=
+            g_laguna_router_fused_batch_dispatches;
+        g_laguna_router_fused_batch_dispatches = 0;
+#endif
         [cb commit];
         ds4_gpu_stream_expert_cache_note_batch_committed();
 
@@ -10561,6 +10729,11 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
         ds4_gpu_close_batch_encoder();
         id<MTLCommandBuffer> cb = g_batch_cb;
         g_batch_cb = nil;
+#ifdef DS4_TEST_HOOKS
+        g_laguna_router_fused_pending_dispatches +=
+            g_laguna_router_fused_batch_dispatches;
+        g_laguna_router_fused_batch_dispatches = 0;
+#endif
         const uint64_t value = ++g_selected_readback_event_value;
         [cb encodeSignalEvent:g_selected_readback_event value:value];
         g_batch_has_work = YES;
@@ -11039,6 +11212,13 @@ void ds4_gpu_cleanup(void) {
         g_queue = nil;
         g_device = nil;
         g_metal_math_safe = 0;
+#ifdef DS4_TEST_HOOKS
+        g_laguna_router_fused_encoded_dispatches = 0;
+        g_laguna_router_fused_batch_dispatches = 0;
+        g_laguna_router_fused_owned_dispatches = 0;
+        g_laguna_router_fused_pending_dispatches = 0;
+        g_laguna_router_fused_completed_dispatches = 0;
+#endif
         g_initialized = 0;
     }
 }
@@ -18793,9 +18973,12 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
         ds4_gpu_laguna_q8_lmhead_screen_v2_fallback_requested();
     if (requested_v2 < 0 || allow_v2_fallback < 0) return NULL;
     int use_v2 = requested_v2 > 0;
-    const int q8_rows_mode =
-        ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(
-            getenv("DS4_METAL_Q8_MV_ROWS"));
+    ds4_gpu_q8_decode_config q8_config;
+    const int q8_config_valid =
+        ds4_gpu_q8_decode_config_snapshot(&q8_config);
+    const int q8_rows_mode = q8_config_valid < 0 ? -1 : q8_config.q8_mv_rows;
+    const char *q8_rows_value = q8_config_valid < 0 ?
+        "invalid snapshot" : (q8_rows_mode == 2 ? "2" : "4");
     const int math_safe = g_metal_math_safe &&
         ds4_gpu_env_bool("DS4_METAL_MATH_SAFE") > 0;
     if (!model_map || model_size == 0 ||
@@ -18818,8 +19001,7 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
                     "ds4: Laguna Q8 lm-head screen requires "
                     "DS4_METAL_Q8_MV_ROWS unset/empty or literal 2 "
                     "(got '%s')\n",
-                    getenv("DS4_METAL_Q8_MV_ROWS") ?
-                        getenv("DS4_METAL_Q8_MV_ROWS") : "");
+                    q8_rows_value);
         }
         return NULL;
     }
@@ -39461,12 +39643,62 @@ typedef struct {
     uint32_t stats_enabled;
 } ds4_gpu_laguna_router_fused_args;
 
+int ds4_gpu_laguna_router_decode_fused_preflight(
+        uint32_t in_dim,
+        uint32_t n_expert,
+        uint32_t n_expert_used,
+        float    expert_weight_scale) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    if (in_dim == 0u || (in_dim % 32u) != 0u ||
+        in_dim > UINT32_MAX - 127u || n_expert != 256u ||
+        n_expert_used != 10u || !isfinite(expert_weight_scale) ||
+        expert_weight_scale != 2.5f) {
+        fprintf(stderr,
+                "ds4: Metal fused Laguna router preflight rejected shape "
+                "in=%u experts=%u/%u scale=%g\n",
+                in_dim, n_expert, n_expert_used, expert_weight_scale);
+        return 0;
+    }
+    const uint32_t nsg_raw = (in_dim + 127u) / 128u;
+    const uint32_t nsg = nsg_raw > 8u ? 8u : nsg_raw;
+    if (nsg != 8u) {
+        fprintf(stderr,
+                "ds4: Metal fused Laguna router preflight requires NSG=8 "
+                "(in=%u gives NSG=%u)\n", in_dim, nsg);
+        return 0;
+    }
+
+    /* This is a single 256-threadgroup serial router by design.  Its shape
+     * and source certificate are correctness gates; performance remains a
+     * benchmark risk until the M5 measurements justify the opt-in. */
+    if (!g_laguna_router_decode_fused_pipeline) {
+        g_laguna_router_decode_fused_pipeline =
+            ds4_gpu_get_pipeline("kernel_laguna_router_decode_fused");
+    }
+    id<MTLComputePipelineState> pipeline = ds4_gpu_hot_pipeline(
+        g_laguna_router_decode_fused_pipeline,
+        "kernel_laguna_router_decode_fused");
+    if (!pipeline || pipeline.threadExecutionWidth != 32u ||
+        pipeline.maxTotalThreadsPerThreadgroup < 256u) {
+        fprintf(stderr,
+                "ds4: Metal fused Laguna router preflight requires the "
+                "current source PSO with TEW=32 and maxThreads>=256\n");
+        return 0;
+    }
+    /* The fused kernel always binds its completion/statistics buffer, even
+     * with atomic reporting disabled.  Allocate it during admission so a
+     * later command path cannot fail after it has changed graph state. */
+    return ds4_gpu_laguna_router_simd_topk_stats_buffer() != nil;
+}
+
 /* Opt-in fused Laguna decode router (DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED):
  * the F32 router matvec and the SIMD top-k selection share one dispatch with
  * the logits staged in threadgroup memory.  The matvec stage replicates the
  * stock decode-row matvec reduction tree, so selected/weights/probs/logits
  * are bit-identical to the two-dispatch path (see metal/dsv4_misc.metal).
- * Fails closed outside the replicated shape class. */
+ * Fails closed outside the replicated shape class.  The one-TG serial
+ * geometry is a benchmark risk, not a reason to weaken these correctness
+ * gates before M5 measurements exist. */
 int ds4_gpu_laguna_router_decode_fused_tensor(
         ds4_gpu_tensor       *selected,
         ds4_gpu_tensor       *weights,
@@ -39486,14 +39718,20 @@ int ds4_gpu_laguna_router_decode_fused_tensor(
         return 0;
     }
 
-    const uint32_t nsg =
-        (in_dim + 127u) / 128u > 8u ? 8u : (in_dim + 127u) / 128u;
+    const uint32_t nsg_raw =
+        in_dim <= UINT32_MAX - 127u ? (in_dim + 127u) / 128u : 0u;
+    const uint32_t nsg = nsg_raw > 8u ? 8u : nsg_raw;
     if (in_dim == 0u || (in_dim % 32u) != 0u || nsg != 8u ||
-        n_expert != 256u ||
-        n_expert_used == 0u || n_expert_used > n_expert) {
+        n_expert != 256u || n_expert_used != 10u ||
+        !isfinite(expert_weight_scale) || expert_weight_scale != 2.5f) {
         fprintf(stderr,
                 "ds4: Metal fused Laguna router received unsupported shape "
-                "in=%u experts=%u/%u\n", in_dim, n_expert, n_expert_used);
+                "in=%u experts=%u/%u scale=%g\n",
+                in_dim, n_expert, n_expert_used, expert_weight_scale);
+        return 0;
+    }
+    if (!ds4_gpu_laguna_router_decode_fused_preflight(
+            in_dim, n_expert, n_expert_used, expert_weight_scale)) {
         return 0;
     }
 
@@ -39587,6 +39825,11 @@ int ds4_gpu_laguna_router_decode_fused_tensor(
              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
+#ifdef DS4_TEST_HOOKS
+        g_laguna_router_fused_encoded_dispatches++;
+        if (owned) g_laguna_router_fused_owned_dispatches++;
+        else g_laguna_router_fused_batch_dispatches++;
+#endif
         if (!ds4_gpu_finish_command_buffer(cb, owned, "fused Laguna router decode")) return 0;
     }
 
@@ -39727,6 +39970,25 @@ int ds4_gpu_laguna_router_simd_topk_stats(
     *encoded_dispatches = g_glm_router_simd_topk_encoded_dispatches;
     return 1;
 }
+
+#ifdef DS4_TEST_HOOKS
+void ds4_gpu_laguna_router_decode_fused_stats_reset(void) {
+    g_laguna_router_fused_encoded_dispatches = 0;
+    g_laguna_router_fused_batch_dispatches = 0;
+    g_laguna_router_fused_owned_dispatches = 0;
+    g_laguna_router_fused_pending_dispatches = 0;
+    g_laguna_router_fused_completed_dispatches = 0;
+}
+
+int ds4_gpu_laguna_router_decode_fused_stats(
+        uint64_t *encoded_dispatches,
+        uint64_t *completed_dispatches) {
+    if (!encoded_dispatches || !completed_dispatches) return 0;
+    *encoded_dispatches = g_laguna_router_fused_encoded_dispatches;
+    *completed_dispatches = g_laguna_router_fused_completed_dispatches;
+    return 1;
+}
+#endif
 
 int ds4_gpu_laguna_router_simd_topk_stats_after_wait(
         uint32_t *optimized_rows,
