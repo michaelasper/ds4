@@ -25,15 +25,16 @@ The refactor branch already:
 - exposes a Metal-only CLI and server contract and rejects retired backend,
   topology, steering, MTP, and DSpark options;
 - routes raw generation directly through the Laguna graph;
-- removes the obsolete GLM one-shot generation graph and the distributed
-  transport/runtime;
+- removes the obsolete GLM one-shot generation graph, distributed runtime,
+  and tensor-parallel transport/lifecycle;
 - retains only Laguna quality fixtures and tooling under `quality/`;
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.
 
-Tensor parallelism, multi-GPU placement, SSD expert streaming, legacy model
-helpers, and broad shared-backend Metal code still remain internally. Their
-presence is transitional and must not be interpreted as supported behavior.
+Multi-GPU placement, CUDA-oriented tensor-parallel graph helpers, SSD expert
+streaming, legacy model helpers, and broad shared-backend Metal code still
+remain internally. Their presence is transitional and must not be interpreted
+as supported behavior.
 
 ## Staged deletion and extraction order
 
