@@ -7,6 +7,30 @@
 /* These selectors are backend-independent, so keep their strict parser and
  * route-boundary checks runnable in the default CPU/no-GPU test binary too. */
 static void test_laguna_selector_parser(void) {
+    /* DS4_LAGUNA_BENCH_TRACE is the sole production diagnostic selector:
+     * malformed values fail closed, while the disabled spellings are all
+     * side-effect free. */
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode(NULL) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode("") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode("0") == 0);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode("1") == 1);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode("01") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode("true") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode(" 1") < 0);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_env_mode("1 ") < 0);
+
+    /* The trace classifier reports the kernel that actually runs.  Staged
+     * precedence suppresses single-token GQA, but staged attention is only
+     * emitted by the multi-row verifier seam. */
+    TEST_ASSERT(ds4_gpu_laguna_bench_attention_route_kind(
+                    512u, 0u, 512u, 72u, 8u, 1, 1, 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_bench_attention_route_kind(
+                    512u, 0u, 512u, 72u, 8u, 1, 1, 0) == 2);
+    TEST_ASSERT(ds4_gpu_laguna_bench_attention_route_kind(
+                    512u, 0u, 512u, 72u, 8u, 0, 1, 0) == 1);
+    TEST_ASSERT(ds4_gpu_laguna_bench_attention_route_kind(
+                    2048u, 0u, 1024u, 72u, 8u, 0, 0, 0) == 4);
+
     TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse(NULL) == 16u);
     TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("") == 16u);
     TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("  2 \t") == 2u);
@@ -63,6 +87,128 @@ static void test_laguna_selector_parser(void) {
     TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
                     1, 0, 129, 128) ==
                 DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED);
+}
+
+/* Exercise the graph-owned completion contract without opening a model or
+ * requiring a Metal device.  The production graph supplies `planned`; the
+ * GPU backend supplies the cumulative before/after snapshots. */
+static void test_laguna_bench_trace_transaction(void) {
+#ifdef DS4_TEST_HOOKS
+#if defined(__APPLE__)
+    /* The backend accessor is intentionally model-less.  Verify both
+     * directions of a mid-process mutation while preserving the caller's
+     * environment for the rest of the suite. */
+    const char *saved_trace_env = getenv("DS4_LAGUNA_BENCH_TRACE");
+    const bool saved_trace_disabled =
+        !saved_trace_env || saved_trace_env[0] == '\0' ||
+        strcmp(saved_trace_env, "0") == 0;
+    char *saved_trace_copy = saved_trace_env ? strdup(saved_trace_env) : NULL;
+    if (saved_trace_disabled) {
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_plan_reset_for_test() == 1);
+        unsetenv("DS4_LAGUNA_BENCH_TRACE");
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_lifecycle_mode() == 0);
+        TEST_ASSERT(setenv("DS4_LAGUNA_BENCH_TRACE", "1", 1) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_lifecycle_mode() < 0);
+        TEST_ASSERT(unsetenv("DS4_LAGUNA_BENCH_TRACE") == 0);
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_lifecycle_mode() == 0);
+
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_plan_reset_for_test() == 1);
+        TEST_ASSERT(setenv("DS4_LAGUNA_BENCH_TRACE", "1", 1) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_lifecycle_mode() == 1);
+        TEST_ASSERT(setenv("DS4_LAGUNA_BENCH_TRACE", "0", 1) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_lifecycle_mode() < 0);
+    }
+    if (saved_trace_copy) {
+        TEST_ASSERT(setenv("DS4_LAGUNA_BENCH_TRACE", saved_trace_copy, 1) == 0);
+    } else {
+        TEST_ASSERT(unsetenv("DS4_LAGUNA_BENCH_TRACE") == 0);
+    }
+    if (saved_trace_disabled) {
+        /* Restore the caller's environment and establish a fresh disabled
+         * epoch so later tests do not inherit the mutation probe's mode. */
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_plan_reset_for_test() == 1);
+        TEST_ASSERT(ds4_gpu_laguna_bench_trace_lifecycle_mode() == 0);
+    }
+    free(saved_trace_copy);
+#endif
+
+    ds4_gpu_laguna_bench_trace_stats before = {0};
+    ds4_gpu_laguna_bench_trace_stats after = {0};
+    ds4_gpu_laguna_bench_trace_stats planned = {0};
+    ds4_gpu_laguna_bench_trace_stats published = {0};
+
+    before.generated = 10u;
+    before.consumers = 20u;
+    before.family0 = 7u;
+    before.family1 = 13u;
+    before.ordinary = 1u;
+    after = before;
+    after.router_fused = 2u;
+    after.direct_kv = 3u;
+    after.staged_kv = 4u;
+    after.moe_grouped = 5u;
+    after.moe_stock = 6u;
+    after.moe_grouped_rows = 40960u;
+    after.moe_stock_rows = 49152u;
+    after.moe_tokens = 8192u;
+    after.moe_chunk = 47u;
+    after.ordinary = 8u;
+    after.gqa3 = 8u;
+    after.gqa9 = 9u;
+    after.global_grouped = 11u;
+    after.simd32 = 12u;
+    after.ordinary_qk = 13u;
+    after.generated += 14u;
+    after.consumers += 15u;
+    after.family0 += 16u;
+    after.family1 += 17u;
+    planned.router_stock = 1u;
+    planned.dense_decode_fused = 2u;
+    planned.dense_decode_stock = 3u;
+    planned.dense_prefill_fused = 4u;
+    planned.dense_prefill_stock = 5u;
+    planned.ordinary_qk = 19u;
+
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_test_commit(
+                    1, 1, 1, &before, &after, &planned, &published) == 1);
+    TEST_ASSERT(published.router_fused == 2u);
+    TEST_ASSERT(published.router_stock == 1u);
+    TEST_ASSERT(published.dense_decode_fused == 2u &&
+                published.dense_decode_stock == 3u &&
+                published.dense_prefill_fused == 4u &&
+                published.dense_prefill_stock == 5u);
+    TEST_ASSERT(published.direct_kv == 3u && published.staged_kv == 4u);
+    TEST_ASSERT(published.moe_grouped == 5u && published.moe_stock == 6u &&
+                published.moe_grouped_rows == 40960u &&
+                published.moe_stock_rows == 49152u &&
+                published.moe_tokens == 8192u && published.moe_chunk == 47u);
+    TEST_ASSERT(published.ordinary == 7u && published.gqa3 == 8u &&
+                published.gqa9 == 9u &&
+                published.global_grouped == 11u);
+    TEST_ASSERT(published.simd32 == 12u && published.ordinary_qk == 32u &&
+                published.generated == 14u && published.consumers == 15u &&
+                published.family0 == 16u && published.family1 == 17u);
+
+    /* Trace-off, failed, un-waited, and regressed transactions never mutate
+     * a previously published value.  This is the model-less equivalent of
+     * discard-before-success and a failed owning wait. */
+    published.router_stock = 91u;
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_test_commit(
+                    0, 1, 1, &before, &after, &planned, &published) == 0);
+    TEST_ASSERT(published.router_stock == 91u);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_test_commit(
+                    1, 0, 1, &before, &after, &planned, &published) == 0);
+    TEST_ASSERT(published.router_stock == 91u);
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_test_commit(
+                    1, 1, 0, &before, &after, &planned, &published) == 0);
+    TEST_ASSERT(published.router_stock == 91u);
+    ds4_gpu_laguna_bench_trace_stats regressed = after;
+    regressed.ordinary = 0u;
+    TEST_ASSERT(ds4_gpu_laguna_bench_trace_test_commit(
+                    1, 1, 1, &before, &regressed, &planned, &published) == 0);
+    TEST_ASSERT(published.router_stock == 91u);
+
+#endif
 }
 
 #ifndef DS4_NO_GPU
@@ -15662,6 +15808,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-selector-parser", "laguna-selector-parser",
      "strict Laguna selector and prefill-route parser boundaries",
      test_laguna_selector_parser, false},
+    {"--laguna-bench-trace-transaction", "laguna-bench-trace-transaction",
+     "model-less Laguna trace completion/discard transaction contract",
+     test_laguna_bench_trace_transaction, false},
 #ifndef DS4_NO_GPU
     {"--laguna-attention-numeric", "laguna-attention-numeric",
      "Laguna decode attention against a double-precision reference",

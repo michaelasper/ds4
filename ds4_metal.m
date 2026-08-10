@@ -77,10 +77,50 @@ typedef struct {
     uint32_t support_generated_tokens;
     uint32_t support_generated_pos0;
     uint64_t support_consumed;
+    /* Benchmark-only route evidence.  These fields are host-side planned
+     * counts and are promoted by ds4_gpu_laguna_atlas_publish() only after
+     * the owning command buffer has completed successfully. */
+    uint64_t bench_direct_kv;
+    uint64_t bench_staged_kv;
+    uint64_t bench_ordinary;
+    uint64_t bench_gqa3;
+    uint64_t bench_gqa9;
+    uint64_t bench_global_grouped;
+    uint64_t bench_moe_grouped;
+    uint64_t bench_moe_stock;
+    uint64_t bench_moe_grouped_rows;
+    uint64_t bench_moe_stock_rows;
+    uint32_t bench_moe_tokens;
+    uint32_t bench_moe_chunk;
+    uint64_t bench_router_fused;
+    uint64_t bench_simd32;
+    uint64_t bench_ordinary_qk;
 } ds4_gpu_laguna_atlas_cb_evidence;
 static NSMutableArray<NSData *> *g_pending_laguna_atlas_evidence;
 static ds4_gpu_laguna_atlas_cb_evidence g_batch_laguna_atlas_evidence;
 static ds4_gpu_laguna_atlas_cb_evidence g_owned_laguna_atlas_evidence;
+/* DS4_LAGUNA_BENCH_TRACE is frozen with the Metal lifecycle.  Route notes
+ * are branch-cold when this is zero, and cumulative values below are only
+ * incremented by successful completion publication. */
+static int g_laguna_bench_trace_mode = -2;
+/* Keep the selector frozen across ds4_gpu_cleanup(); cleanup releases the
+ * device but does not make an in-process environment mutation a new run. */
+static int g_laguna_bench_trace_frozen_mode = -2;
+static uint64_t g_laguna_bench_completed_direct_kv;
+static uint64_t g_laguna_bench_completed_staged_kv;
+static uint64_t g_laguna_bench_completed_ordinary;
+static uint64_t g_laguna_bench_completed_gqa3;
+static uint64_t g_laguna_bench_completed_gqa9;
+static uint64_t g_laguna_bench_completed_global_grouped;
+static uint64_t g_laguna_bench_completed_moe_grouped;
+static uint64_t g_laguna_bench_completed_moe_stock;
+static uint64_t g_laguna_bench_completed_moe_grouped_rows;
+static uint64_t g_laguna_bench_completed_moe_stock_rows;
+static uint32_t g_laguna_bench_moe_tokens;
+static uint32_t g_laguna_bench_moe_chunk;
+static uint64_t g_laguna_bench_completed_router_fused;
+static uint64_t g_laguna_bench_completed_simd32;
+static uint64_t g_laguna_bench_completed_ordinary_qk;
 static id<MTLSharedEvent> g_selected_readback_event;
 static uint64_t g_selected_readback_event_value;
 static id<MTLComputePipelineState> g_set_rows_f32_i32_pipeline;
@@ -1131,6 +1171,83 @@ static void ds4_gpu_laguna_atlas_evidence_zero(
     if (e) memset(e, 0, sizeof(*e));
 }
 
+static inline int ds4_gpu_laguna_bench_trace_on(void) {
+    return g_laguna_bench_trace_mode == 1;
+}
+
+static ds4_gpu_laguna_atlas_cb_evidence *
+ds4_gpu_laguna_bench_trace_current_evidence(void) {
+    return ds4_gpu_laguna_atlas_current_cb_evidence();
+}
+
+static void ds4_gpu_laguna_bench_trace_note_attention(uint32_t route) {
+    if (!ds4_gpu_laguna_bench_trace_on()) return;
+    ds4_gpu_laguna_atlas_cb_evidence *e =
+        ds4_gpu_laguna_bench_trace_current_evidence();
+    switch (route) {
+    case 1u: e->bench_gqa3++; break;
+    case 2u: e->bench_gqa9++; break;
+    case 4u: e->bench_global_grouped++; break;
+    default: e->bench_ordinary++; break;
+    }
+}
+
+static void ds4_gpu_laguna_bench_trace_note_kv(int direct) {
+    if (!ds4_gpu_laguna_bench_trace_on()) return;
+    ds4_gpu_laguna_atlas_cb_evidence *e =
+        ds4_gpu_laguna_bench_trace_current_evidence();
+    if (direct) e->bench_direct_kv++;
+    else e->bench_staged_kv++;
+}
+
+static void ds4_gpu_laguna_bench_trace_note_moe(
+        int grouped, uint32_t n_tokens, uint32_t chunk) {
+    if (!ds4_gpu_laguna_bench_trace_on()) return;
+    ds4_gpu_laguna_atlas_cb_evidence *e =
+        ds4_gpu_laguna_bench_trace_current_evidence();
+    if (grouped) {
+        e->bench_moe_grouped++;
+        e->bench_moe_grouped_rows += n_tokens;
+    } else {
+        e->bench_moe_stock++;
+        e->bench_moe_stock_rows += n_tokens;
+    }
+    e->bench_moe_tokens = n_tokens;
+    e->bench_moe_chunk = chunk;
+}
+
+static void ds4_gpu_laguna_bench_trace_note_router_fused(void) {
+    if (!ds4_gpu_laguna_bench_trace_on()) return;
+    ds4_gpu_laguna_bench_trace_current_evidence()->bench_router_fused++;
+}
+
+static void ds4_gpu_laguna_bench_trace_note_qk(int simd32) {
+    if (!ds4_gpu_laguna_bench_trace_on()) return;
+    ds4_gpu_laguna_atlas_cb_evidence *e =
+        ds4_gpu_laguna_bench_trace_current_evidence();
+    if (simd32) e->bench_simd32++;
+    else e->bench_ordinary_qk++;
+}
+
+static void ds4_gpu_laguna_bench_trace_clear(void) {
+    g_laguna_bench_trace_mode = -2;
+    g_laguna_bench_completed_direct_kv = 0;
+    g_laguna_bench_completed_staged_kv = 0;
+    g_laguna_bench_completed_ordinary = 0;
+    g_laguna_bench_completed_gqa3 = 0;
+    g_laguna_bench_completed_gqa9 = 0;
+    g_laguna_bench_completed_global_grouped = 0;
+    g_laguna_bench_completed_moe_grouped = 0;
+    g_laguna_bench_completed_moe_stock = 0;
+    g_laguna_bench_completed_moe_grouped_rows = 0;
+    g_laguna_bench_completed_moe_stock_rows = 0;
+    g_laguna_bench_moe_tokens = 0;
+    g_laguna_bench_moe_chunk = 0;
+    g_laguna_bench_completed_router_fused = 0;
+    g_laguna_bench_completed_simd32 = 0;
+    g_laguna_bench_completed_ordinary_qk = 0;
+}
+
 static void ds4_gpu_laguna_atlas_publish(
         const ds4_gpu_laguna_atlas_cb_evidence *e) {
     if (!e) return;
@@ -1141,6 +1258,27 @@ static void ds4_gpu_laguna_atlas_publish(
     g_laguna_rope_atlas_completed_consumed_family_count[1] += e->target_family[1];
     g_laguna_rope_support_atlas_completed_generated_count += e->support_generated;
     g_laguna_rope_support_atlas_completed_consumed_dispatch_count += e->support_consumed;
+    if (ds4_gpu_laguna_bench_trace_on()) {
+        g_laguna_bench_completed_direct_kv += e->bench_direct_kv;
+        g_laguna_bench_completed_staged_kv += e->bench_staged_kv;
+        g_laguna_bench_completed_ordinary += e->bench_ordinary;
+        g_laguna_bench_completed_gqa3 += e->bench_gqa3;
+        g_laguna_bench_completed_gqa9 += e->bench_gqa9;
+        g_laguna_bench_completed_global_grouped += e->bench_global_grouped;
+        g_laguna_bench_completed_moe_grouped += e->bench_moe_grouped;
+        g_laguna_bench_completed_moe_stock += e->bench_moe_stock;
+        g_laguna_bench_completed_moe_grouped_rows +=
+            e->bench_moe_grouped_rows;
+        g_laguna_bench_completed_moe_stock_rows +=
+            e->bench_moe_stock_rows;
+        if (e->bench_moe_tokens != 0u) {
+            g_laguna_bench_moe_tokens = e->bench_moe_tokens;
+            g_laguna_bench_moe_chunk = e->bench_moe_chunk;
+        }
+        g_laguna_bench_completed_router_fused += e->bench_router_fused;
+        g_laguna_bench_completed_simd32 += e->bench_simd32;
+        g_laguna_bench_completed_ordinary_qk += e->bench_ordinary_qk;
+    }
     if (e->target_generated != 0 &&
         g_laguna_rope_atlas_valid &&
         g_laguna_rope_atlas_valid_tokens == e->target_generated_tokens &&
@@ -3419,6 +3557,26 @@ static int ds4_gpu_laguna_staged_swa_enabled(void) {
 }
 
 static int ds4_gpu_snapshot_lifecycle_selectors(void) {
+    const char *bench_trace_value = getenv("DS4_LAGUNA_BENCH_TRACE");
+    const int parsed_bench_trace =
+        ds4_gpu_laguna_bench_trace_env_mode(bench_trace_value);
+    if (parsed_bench_trace < 0) {
+        fprintf(stderr,
+                "ds4: invalid DS4_LAGUNA_BENCH_TRACE='%s'; "
+                "expected unset, empty, 0, or literal 1\n",
+                bench_trace_value ? bench_trace_value : "");
+        return 0;
+    }
+    if (g_laguna_bench_trace_frozen_mode < 0) {
+        g_laguna_bench_trace_frozen_mode = parsed_bench_trace;
+    } else if (g_laguna_bench_trace_frozen_mode != parsed_bench_trace) {
+        fprintf(stderr,
+                "ds4: DS4_LAGUNA_BENCH_TRACE is frozen at %d; "
+                "restart is required before changing it\n",
+                g_laguna_bench_trace_frozen_mode);
+        return 0;
+    }
+    g_laguna_bench_trace_mode = g_laguna_bench_trace_frozen_mode;
     g_laguna_swa_gqa9_mode = ds4_gpu_laguna_swa_gqa9_parse(
         getenv(DS4_METAL_LAGUNA_SWA_GQA9));
     if (g_laguna_swa_gqa9_mode < 0) {
@@ -3450,6 +3608,71 @@ static int ds4_gpu_snapshot_lifecycle_selectors(void) {
 uint32_t ds4_gpu_laguna_q8_mv_ext_max_tokens(void) {
     return g_q8_mv_ext_max_tokens;
 }
+
+int ds4_gpu_laguna_bench_trace_enabled(void) {
+    return ds4_gpu_laguna_bench_trace_on();
+}
+
+int ds4_gpu_laguna_bench_trace_lifecycle_mode(void) {
+    const char *value = getenv("DS4_LAGUNA_BENCH_TRACE");
+    const int parsed = ds4_gpu_laguna_bench_trace_env_mode(value);
+    if (parsed < 0) {
+        fprintf(stderr,
+                "ds4: invalid DS4_LAGUNA_BENCH_TRACE='%s'; "
+                "expected unset, empty, 0, or literal 1\n",
+                value ? value : "");
+        return -1;
+    }
+    if (g_laguna_bench_trace_frozen_mode < 0) {
+        g_laguna_bench_trace_frozen_mode = parsed;
+        return parsed;
+    }
+    if (g_laguna_bench_trace_frozen_mode != parsed) {
+        fprintf(stderr,
+                "ds4: DS4_LAGUNA_BENCH_TRACE is frozen at %d; "
+                "restart is required before changing it\n",
+                g_laguna_bench_trace_frozen_mode);
+        return -1;
+    }
+    return g_laguna_bench_trace_frozen_mode;
+}
+
+int ds4_gpu_laguna_bench_trace_snapshot(
+        ds4_gpu_laguna_bench_trace_stats *out) {
+    if (!out || !ds4_gpu_laguna_bench_trace_on()) return 0;
+    memset(out, 0, sizeof(*out));
+    out->direct_kv = g_laguna_bench_completed_direct_kv;
+    out->staged_kv = g_laguna_bench_completed_staged_kv;
+    out->ordinary = g_laguna_bench_completed_ordinary;
+    out->gqa3 = g_laguna_bench_completed_gqa3;
+    out->gqa9 = g_laguna_bench_completed_gqa9;
+    out->global_grouped = g_laguna_bench_completed_global_grouped;
+    out->moe_grouped = g_laguna_bench_completed_moe_grouped;
+    out->moe_stock = g_laguna_bench_completed_moe_stock;
+    out->moe_grouped_rows = g_laguna_bench_completed_moe_grouped_rows;
+    out->moe_stock_rows = g_laguna_bench_completed_moe_stock_rows;
+    out->moe_tokens = g_laguna_bench_moe_tokens;
+    out->moe_chunk = g_laguna_bench_moe_chunk;
+    out->router_fused = g_laguna_bench_completed_router_fused;
+    out->simd32 = g_laguna_bench_completed_simd32;
+    out->ordinary_qk = g_laguna_bench_completed_ordinary_qk;
+    out->generated = g_laguna_rope_atlas_completed_generated_count;
+    out->consumers = g_laguna_rope_atlas_completed_consumed_dispatch_count;
+    out->family0 = g_laguna_rope_atlas_completed_consumed_family_count[0];
+    out->family1 = g_laguna_rope_atlas_completed_consumed_family_count[1];
+    return 1;
+}
+
+#ifdef DS4_TEST_HOOKS
+int ds4_gpu_laguna_bench_trace_plan_reset_for_test(void) {
+    if (g_batch_cb || (g_pending_cbs && [g_pending_cbs count] != 0)) {
+        return 0;
+    }
+    ds4_gpu_laguna_bench_trace_clear();
+    g_laguna_bench_trace_frozen_mode = -2;
+    return 1;
+}
+#endif
 
 #ifdef DS4_TEST_HOOKS
 void ds4_gpu_test_laguna_route_counters_reset(void) {
@@ -7913,6 +8136,7 @@ int ds4_gpu_init(void) {
     if (ds4_gpu_q8_decode_config_snapshot(NULL) < 0) return 0;
 
     @autoreleasepool {
+        ds4_gpu_laguna_bench_trace_clear();
         /* A failed init must not leave a stale lifecycle snapshot visible to
          * a later raw preflight after the caller changes the environment. */
         g_laguna_swa_selectors_snapshot_valid = 0;
@@ -12007,6 +12231,7 @@ void ds4_gpu_cleanup(void) {
         g_laguna_rope_atlas_valid_completed = 0;
         g_laguna_rope_support_atlas_valid = 0;
         g_laguna_rope_support_atlas_valid_completed = 0;
+        ds4_gpu_laguna_bench_trace_clear();
         return;
     }
 
@@ -12457,6 +12682,7 @@ void ds4_gpu_cleanup(void) {
         g_laguna_swa_gqa3_mode = 0;
         g_laguna_staged_swa_mode = 0;
         g_laguna_swa_selectors_snapshot_valid = 0;
+        ds4_gpu_laguna_bench_trace_clear();
 #ifdef DS4_TEST_HOOKS
         g_laguna_test_route_hooks = 0;
         g_laguna_test_direct_kv_count = 0;
@@ -37777,6 +38003,7 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
                     (uint32_t)atlas_family, n_tokens, pos0);
             }
         }
+        ds4_gpu_laguna_bench_trace_note_qk(use_simd32 ? 1 : 0);
         ds4_gpu_end_compute_encoder(cb, enc);
         if (!ds4_gpu_finish_command_buffer(
                 cb, owned, use_simd32
@@ -38092,6 +38319,7 @@ int ds4_gpu_laguna_store_attention_tensor(
     const int gqa3_selected = ds4_gpu_laguna_swa_gqa3_enabled();
     const int staged_swa_active =
         ds4_gpu_laguna_staged_swa_enabled() > 0;
+    int bench_decode_route_kind = 0;
 #ifdef DS4_TEST_HOOKS
     int decode_route_kind = DS4_LAGUNA_TEST_DECODE_ORDINARY;
 #endif
@@ -38216,6 +38444,18 @@ int ds4_gpu_laguna_store_attention_tensor(
                 gqa3_selected,
                 staged_swa_active);
 #endif
+            if (ds4_gpu_laguna_bench_trace_on()) {
+                bench_decode_route_kind =
+                    ds4_gpu_laguna_bench_attention_route_kind(
+                        cache_cap,
+                        key_start,
+                        key_count,
+                        n_head,
+                        n_head_kv,
+                        gqa9_selected,
+                        gqa3_selected,
+                        staged_swa_active);
+            }
         } else {
             ds4_gpu_laguna_attention_args attention_args = {
                 .n_head = n_head,
@@ -38241,6 +38481,8 @@ int ds4_gpu_laguna_store_attention_tensor(
                  threadsPerThreadgroup:MTLSizeMake(attention_threads, 1, 1)];
             ds4_gpu_end_compute_encoder(cb, enc);
         }
+        ds4_gpu_laguna_bench_trace_note_attention(
+            (uint32_t)bench_decode_route_kind);
         if (!ds4_gpu_finish_command_buffer(cb, owned, "Laguna KV store + attention")) return 0;
 #ifdef DS4_TEST_HOOKS
         ds4_gpu_laguna_test_decode_route_note(decode_route_kind, owned);
@@ -38808,6 +39050,7 @@ int ds4_gpu_laguna_attention_prefill_tensor(
                         scale)) {
                     return 0;
                 }
+                ds4_gpu_laguna_bench_trace_note_attention(4u);
                 if (!ds4_gpu_finish_command_buffer(
                         cb, owned, "Laguna batched-row split attention")) {
                     return 0;
@@ -38886,12 +39129,14 @@ int ds4_gpu_laguna_attention_prefill_tensor(
                                         atIndex:0];
                 const uint32_t last_key_count = pos0 + n_tokens;
                 const NSUInteger threads =
-                    last_key_count > 256u ? 256u : 32u;
+                        last_key_count > 256u ? 256u : 32u;
                 [enc dispatchThreadgroups:
                         MTLSizeMake(n_head, n_tokens, 1)
                      threadsPerThreadgroup:
                         MTLSizeMake(threads, 1, 1)];
                 ds4_gpu_end_compute_encoder(cb, enc);
+
+                ds4_gpu_laguna_bench_trace_note_attention(0u);
 
                 if (!ds4_gpu_finish_command_buffer(
                         cb, owned,
@@ -38901,6 +39146,13 @@ int ds4_gpu_laguna_attention_prefill_tensor(
                 return 1;
             }
 
+#ifdef __APPLE__
+            /* The split-row fallback may encode several rows for one layer.
+             * Keep its summary unit at one logical layer-route invocation,
+             * matching the batched verifier branches above. */
+            uint32_t bench_route_kind = 0u;
+            bool bench_route_kind_set = false;
+#endif
             for (uint32_t row = 0; row < n_tokens; row++) {
                 const uint32_t pos = pos0 + row;
                 const uint32_t key_count = MIN(pos + 1u, cache_cap);
@@ -39013,7 +39265,28 @@ int ds4_gpu_laguna_attention_prefill_tensor(
                             MTLSizeMake(threads, 1, 1)];
                     ds4_gpu_end_compute_encoder(cb, enc);
                 }
+#ifdef __APPLE__
+                if (ds4_gpu_laguna_bench_trace_on() &&
+                    !bench_route_kind_set) {
+                    bench_route_kind =
+                        (uint32_t)ds4_gpu_laguna_bench_attention_route_kind(
+                            cache_cap,
+                            key_start,
+                            key_count,
+                            n_head,
+                            n_head_kv,
+                            gqa9_selected,
+                            gqa3_selected,
+                            staged_swa_active);
+                    bench_route_kind_set = true;
+                }
+#endif
             }
+#ifdef __APPLE__
+            if (bench_route_kind_set) {
+                ds4_gpu_laguna_bench_trace_note_attention(bench_route_kind);
+            }
+#endif
             if (!ds4_gpu_finish_command_buffer(
                     cb, owned, "Laguna split-row attention")) {
                 return 0;
@@ -39133,6 +39406,8 @@ int ds4_gpu_laguna_attention_prefill_tensor(
             ds4_gpu_end_compute_encoder(cb, enc);
         }
 
+        ds4_gpu_laguna_bench_trace_note_kv(direct_kv ? 1 : 0);
+        ds4_gpu_laguna_bench_trace_note_attention(use_gqa3 ? 1u : 0u);
         if (!ds4_gpu_finish_command_buffer(cb, owned,
                                             "Laguna prefill attention")) {
             return 0;
@@ -41784,6 +42059,7 @@ int ds4_gpu_laguna_router_decode_fused_tensor(
         if (owned) g_laguna_router_fused_owned_dispatches++;
         else g_laguna_router_fused_batch_dispatches++;
 #endif
+        ds4_gpu_laguna_bench_trace_note_router_fused();
         if (!ds4_gpu_finish_command_buffer(cb, owned, "fused Laguna router decode")) return 0;
     }
 
@@ -42722,6 +42998,7 @@ int ds4_gpu_glm_routed_moe_one_tensor(
         DS4_METAL_PROFILE_GLM_MOE_ONE_STAGE("down");
 
         if (!ok) return 0;
+        ds4_gpu_laguna_bench_trace_note_moe(0, 1u, 1u);
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM routed MoE")) return 0;
 #undef DS4_METAL_PROFILE_GLM_MOE_ONE_STAGE
     }
@@ -42975,6 +43252,10 @@ int ds4_gpu_laguna_routed_shared_moe_one_tensor(
              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
 
+        /* This one-token routed/shared helper is an ungrouped route.  Keep
+         * it in the stock bucket; grouped counts are reserved for the
+         * n_tokens batch helpers below. */
+        ds4_gpu_laguna_bench_trace_note_moe(0, 1u, 1u);
         if (!ds4_gpu_finish_command_buffer(
                 cb, owned, "Laguna routed/shared MoE")) {
             return 0;
@@ -43311,6 +43592,7 @@ static int ds4_gpu_glm_routed_moe_batch_grouped_tensor(
         DS4_METAL_PROFILE_GLM_GROUPED_MOE_STAGE("sum");
         if (!ok) return 0;
 
+        ds4_gpu_laguna_bench_trace_note_moe(1, n_tokens, n_tokens);
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM grouped routed batch MoE")) {
             return 0;
         }
@@ -43593,6 +43875,7 @@ static int ds4_gpu_glm_routed_moe_batch_grouped_addr_tensor(
         DS4_METAL_PROFILE_GLM_GROUPED_ADDR_MOE_STAGE("sum");
         if (!ok) return 0;
 
+        ds4_gpu_laguna_bench_trace_note_moe(1, n_tokens, n_tokens);
         if (!ds4_gpu_finish_command_buffer(cb, owned,
                                            "GLM grouped-address routed batch MoE")) {
             return 0;
@@ -44126,6 +44409,7 @@ static int ds4_gpu_glm_routed_moe_batch_tensor_impl(
         DS4_METAL_PROFILE_GLM_MOE_BATCH_STAGE("down");
 
         if (!ok) return 0;
+        ds4_gpu_laguna_bench_trace_note_moe(0, n_tokens, n_tokens);
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM routed batch MoE")) return 0;
 #undef DS4_METAL_PROFILE_GLM_MOE_BATCH_STAGE
     }
@@ -44547,8 +44831,10 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         }
         ds4_gpu_end_compute_encoder(cb, enc);
 
+        /* Exact Q2/Q3 verifier rows are the ungrouped stock MoE route. */
+        ds4_gpu_laguna_bench_trace_note_moe(0, n_tokens, n_tokens);
         return ds4_gpu_finish_command_buffer(
-            cb, owned, "GLM exact Q2/Q3 verifier MoE");
+                cb, owned, "GLM exact Q2/Q3 verifier MoE");
     }
 }
 
@@ -47387,6 +47673,7 @@ int ds4_gpu_routed_moe_one_tensor(
         }
         if (!ok) { if (getenv("DS4_GLM_TP_DEBUG")) fprintf(stderr, "ds4: routed_moe_one silent return at line %d\n", 34395); return 0; }
 
+        ds4_gpu_laguna_bench_trace_note_moe(0, n_tokens, n_tokens);
         if (!ds4_gpu_finish_command_buffer(cb, owned, "routed tensor MoE")) { if (getenv("DS4_GLM_TP_DEBUG")) fprintf(stderr, "ds4: routed_moe_one silent return at line %d\n", 34397); return 0; }
         if (q4_grouped_boundary || q4_exact_boundary || q4_table_boundary) {
             if (ds4_gpu_end_commands() == 0 || ds4_gpu_begin_commands() == 0) {
@@ -48677,6 +48964,7 @@ int ds4_gpu_routed_moe_batch_tensor(
             return 0;
         }
 
+        ds4_gpu_laguna_bench_trace_note_moe(0, n_tokens, n_tokens);
         if (!ds4_gpu_finish_command_buffer(cb, owned, "routed batch MoE")) {
             if (use_iq2_batch_selected_addr) {
                 ds4_gpu_stream_expert_cache_clear_layer(layer_index);

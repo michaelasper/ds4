@@ -50053,6 +50053,16 @@ typedef struct {
     uint32_t n_rows;
 } ds4_laguna_feature_capture;
 
+#ifdef __APPLE__
+/* One graph-call transaction for DS4_LAGUNA_BENCH_TRACE.  Route notes are
+ * local until the graph's owning command buffer(s) have completed; a failed
+ * or discarded call clears the transaction without publishing a success. */
+static void laguna_bench_trace_pending_clear(
+        ds4_gpu_laguna_bench_trace_stats *pending) {
+    if (pending) memset(pending, 0, sizeof(*pending));
+}
+#endif
+
 typedef struct {
     uint32_t feature_cap;
     uint32_t block_cap;
@@ -50148,6 +50158,14 @@ typedef struct {
      * promoted to the process report only after the owning work is waited. */
     laguna_dense_q8_gate_up_swiglu_counters dense_q8_pending;
 #ifdef __APPLE__
+    ds4_gpu_laguna_bench_trace_stats bench_trace_pending;
+    ds4_gpu_laguna_bench_trace_stats bench_trace_before;
+    uint64_t bench_trace_expected_generation;
+    uint64_t bench_trace_reuse;
+    uint32_t bench_trace_n_tokens;
+    uint32_t bench_trace_pos0;
+    const char *bench_trace_kind;
+    bool bench_trace_active;
     /* A deferred DFlash verifier keeps the target command buffer open while
      * support features are appended.  Retain encoded and completion-counter
      * snapshots until that command is actually completed for diagnostics. */
@@ -50170,12 +50188,188 @@ typedef struct {
 } ds4_laguna_gpu_graph;
 
 #ifdef __APPLE__
+static bool laguna_bench_trace_on(void) {
+    return ds4_gpu_laguna_bench_trace_enabled() != 0;
+}
+
+static bool laguna_bench_trace_begin(
+        ds4_laguna_gpu_graph *g,
+        uint32_t              n_tokens,
+        uint32_t              pos0,
+        const char            *kind,
+        uint64_t              expected_generation,
+        uint64_t              reuse) {
+    if (!g || !laguna_bench_trace_on()) return true;
+    if (g->bench_trace_active) {
+        fprintf(stderr,
+                "ds4-laguna-bench-trace graph=%s status=failure "
+                "reason=overlapping_transaction\n",
+                g->bench_trace_kind ? g->bench_trace_kind : "unknown");
+        laguna_bench_trace_pending_clear(&g->bench_trace_pending);
+        laguna_bench_trace_pending_clear(&g->bench_trace_before);
+        g->bench_trace_active = false;
+        return false;
+    }
+    laguna_bench_trace_pending_clear(&g->bench_trace_pending);
+    if (!ds4_gpu_laguna_bench_trace_snapshot(&g->bench_trace_before)) {
+        fprintf(stderr,
+                "ds4-laguna-bench-trace graph=%s status=failure "
+                "reason=completion_snapshot_unavailable\n",
+                kind ? kind : "unknown");
+        g->bench_trace_active = false;
+        return false;
+    }
+    g->bench_trace_expected_generation = expected_generation;
+    g->bench_trace_reuse = reuse;
+    g->bench_trace_n_tokens = n_tokens;
+    g->bench_trace_pos0 = pos0;
+    g->bench_trace_kind = kind;
+    g->bench_trace_active = true;
+    return true;
+}
+
+static void laguna_bench_trace_abort(
+        ds4_laguna_gpu_graph *g,
+        const char            *reason) {
+    if (!g || !g->bench_trace_active) return;
+    fprintf(stderr,
+            "ds4-laguna-bench-trace graph=%s status=failure reason=%s\n",
+            g->bench_trace_kind ? g->bench_trace_kind : "unknown",
+            reason ? reason : "graph_failed");
+    laguna_bench_trace_pending_clear(&g->bench_trace_pending);
+    laguna_bench_trace_pending_clear(&g->bench_trace_before);
+    g->bench_trace_expected_generation = 0;
+    g->bench_trace_reuse = 0;
+    g->bench_trace_n_tokens = 0;
+    g->bench_trace_pos0 = 0;
+    g->bench_trace_kind = NULL;
+    g->bench_trace_active = false;
+}
+
+static void laguna_bench_trace_note_dense(
+        ds4_laguna_gpu_graph *g,
+        bool                   decode,
+        bool                   fused) {
+    if (!g || !g->bench_trace_active) return;
+    if (decode) {
+        if (fused) g->bench_trace_pending.dense_decode_fused++;
+        else g->bench_trace_pending.dense_decode_stock++;
+    } else {
+        if (fused) g->bench_trace_pending.dense_prefill_fused++;
+        else g->bench_trace_pending.dense_prefill_stock++;
+    }
+}
+
+static void laguna_bench_trace_note_router_stock(
+        ds4_laguna_gpu_graph *g) {
+    if (g && g->bench_trace_active) g->bench_trace_pending.router_stock++;
+}
+
+static void laguna_bench_trace_note_ordinary_qk(
+        ds4_laguna_gpu_graph *g) {
+    if (g && g->bench_trace_active) g->bench_trace_pending.ordinary_qk++;
+}
+
+static void laguna_bench_trace_report_waited(
+        ds4_laguna_gpu_graph *g) {
+    if (!g || !g->bench_trace_active) return;
+    ds4_gpu_laguna_bench_trace_stats after;
+    ds4_gpu_laguna_bench_trace_stats delta;
+    if (!ds4_gpu_laguna_bench_trace_snapshot(&after) ||
+        !ds4_gpu_laguna_bench_trace_stats_delta(
+                &g->bench_trace_before, &after, &delta)) {
+        laguna_bench_trace_abort(g, "completion_snapshot_mismatch");
+        return;
+    }
+    ds4_gpu_laguna_bench_trace_stats *s = &g->bench_trace_pending;
+#define DS4_BENCH_DELTA(field) s->field += delta.field
+    DS4_BENCH_DELTA(router_fused);
+    DS4_BENCH_DELTA(direct_kv);
+    DS4_BENCH_DELTA(staged_kv);
+    DS4_BENCH_DELTA(moe_grouped);
+    DS4_BENCH_DELTA(moe_stock);
+    DS4_BENCH_DELTA(moe_grouped_rows);
+    DS4_BENCH_DELTA(moe_stock_rows);
+    DS4_BENCH_DELTA(ordinary);
+    DS4_BENCH_DELTA(gqa3);
+    DS4_BENCH_DELTA(gqa9);
+    DS4_BENCH_DELTA(global_grouped);
+    DS4_BENCH_DELTA(simd32);
+    DS4_BENCH_DELTA(ordinary_qk);
+    DS4_BENCH_DELTA(generated);
+    DS4_BENCH_DELTA(consumers);
+    DS4_BENCH_DELTA(family0);
+    DS4_BENCH_DELTA(family1);
+#undef DS4_BENCH_DELTA
+    if (delta.moe_grouped != 0u || delta.moe_stock != 0u) {
+        s->moe_tokens = delta.moe_tokens;
+        s->moe_chunk = delta.moe_chunk;
+    }
+    s->expected_generation = g->bench_trace_expected_generation;
+    s->reuse = g->bench_trace_reuse;
+    fprintf(stderr,
+            "ds4-laguna-bench-trace v=1 completion=waited graph=%s "
+            "status=ok n_tokens=%u pos0=%u "
+            "router_fused=%llu router_stock=%llu "
+            "dense_decode_fused=%llu dense_decode_stock=%llu "
+            "dense_prefill_fused=%llu dense_prefill_stock=%llu "
+            "direct_kv=%llu staged_kv=%llu "
+            "moe_grouped=%llu moe_stock=%llu moe_grouped_rows=%llu "
+            "moe_stock_rows=%llu moe_tokens=%u moe_chunk=%u "
+            "ordinary=%llu gqa3=%llu gqa9=%llu global_grouped=%llu "
+            "simd32=%llu ordinary_qk=%llu "
+            "generated=%llu consumers=%llu family0=%llu family1=%llu "
+            "expected_generation=%llu reuse=%llu\n",
+            g->bench_trace_kind ? g->bench_trace_kind : "unknown",
+            g->bench_trace_n_tokens,
+            g->bench_trace_pos0,
+            (unsigned long long)s->router_fused,
+            (unsigned long long)s->router_stock,
+            (unsigned long long)s->dense_decode_fused,
+            (unsigned long long)s->dense_decode_stock,
+            (unsigned long long)s->dense_prefill_fused,
+            (unsigned long long)s->dense_prefill_stock,
+            (unsigned long long)s->direct_kv,
+            (unsigned long long)s->staged_kv,
+            (unsigned long long)s->moe_grouped,
+            (unsigned long long)s->moe_stock,
+            (unsigned long long)s->moe_grouped_rows,
+            (unsigned long long)s->moe_stock_rows,
+            s->moe_tokens,
+            s->moe_chunk,
+            (unsigned long long)s->ordinary,
+            (unsigned long long)s->gqa3,
+            (unsigned long long)s->gqa9,
+            (unsigned long long)s->global_grouped,
+            (unsigned long long)s->simd32,
+            (unsigned long long)s->ordinary_qk,
+            (unsigned long long)s->generated,
+            (unsigned long long)s->consumers,
+            (unsigned long long)s->family0,
+            (unsigned long long)s->family1,
+            (unsigned long long)s->expected_generation,
+            (unsigned long long)s->reuse);
+    laguna_bench_trace_pending_clear(&g->bench_trace_pending);
+    laguna_bench_trace_pending_clear(&g->bench_trace_before);
+    g->bench_trace_expected_generation = 0;
+    g->bench_trace_reuse = 0;
+    g->bench_trace_n_tokens = 0;
+    g->bench_trace_pos0 = 0;
+    g->bench_trace_kind = NULL;
+    g->bench_trace_active = false;
+}
+
 static void laguna_graph_report_q8_lmhead_screen(
         const ds4_laguna_gpu_graph *g);
 #endif
 
 static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     if (!g) return;
+#ifdef __APPLE__
+    /* A session close can tear down a graph without a final owning wait.
+     * Drop its transaction before the structure is cleared. */
+    laguna_bench_trace_abort(g, "graph_freed");
+#endif
 #define DS4_LAGUNA_FREE(name) do { \
         ds4_gpu_tensor_free(g->name); \
         g->name = NULL; \
@@ -52204,6 +52398,7 @@ int ds4_laguna_test_rope_atlas_deferred_complete(void) {
 #endif
 
 static void laguna_metal_target_evidence_discard(ds4_laguna_gpu_graph *g) {
+    laguna_bench_trace_abort(g, "target_evidence_discarded");
     laguna_metal_qk_norm_rope_simd32_target_evidence_discard(g);
     laguna_metal_rope_atlas_target_evidence_discard(g);
 }
@@ -52339,6 +52534,20 @@ static bool laguna_graph_forward_token(
         return false;
     }
 #endif /* __APPLE__ decode ladder parsing */
+
+#ifdef __APPLE__
+    if (!laguna_bench_trace_begin(
+            g,
+            1u,
+            pos,
+            "decode",
+            rope_atlas_target_evidence ?
+                rope_atlas_target_generation_expected : 0u,
+            rope_atlas_target_evidence &&
+                rope_atlas_target_generation_expected == 0u ? 1u : 0u)) {
+        return false;
+    }
+#endif
 
     /* A new graph call owns a new evidence unit.  Keep this graph-local
      * cleanup after every enabled selector preflight so a rejected request
@@ -52579,6 +52788,11 @@ static bool laguna_graph_forward_token(
                          g->ffn_norm,
                          0.0f) != 0;
                 if (ok) laguna_dense_q8_gate_up_swiglu_note_decode_mid(g);
+                if (ok) {
+#ifdef __APPLE__
+                    laguna_bench_trace_note_dense(g, true, true);
+#endif
+                }
                 if (!ok) {
                     fprintf(stderr,
                             "ds4: Laguna dense Q8 gate/up+SwiGLU fused "
@@ -52613,6 +52827,12 @@ static bool laguna_graph_forward_token(
                                          l->ffn_down,
                                          g->ffn_mid,
                                          1);
+            }
+            if (ok && dense_q8_route !=
+                           DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID) {
+#ifdef __APPLE__
+                laguna_bench_trace_note_dense(g, true, false);
+#endif
             }
             if (ok) {
 #ifdef __APPLE__
@@ -52699,6 +52919,12 @@ static bool laguna_graph_forward_token(
                             DS4_EXPERT_WEIGHT_SCALE) != 0;
                 }
             }
+
+#ifdef __APPLE__
+            if (ok && fused_router_mode <= 0) {
+                laguna_bench_trace_note_router_stock(g);
+            }
+#endif
 
             const uint64_t gate_row_bytes =
                 routed_expert_row_bytes(l->ffn_gate_exps);
@@ -53034,6 +53260,8 @@ static bool laguna_graph_forward_token(
     if (router_simd_topk_trace) {
         laguna_metal_router_simd_topk_trace_report("Laguna decode");
     }
+    if (ok) laguna_bench_trace_report_waited(g);
+    else laguna_bench_trace_abort(g, "graph_failed");
 #endif
     if (!ok) laguna_dense_q8_gate_up_swiglu_pending_clear(g);
     return ok;
@@ -53183,6 +53411,12 @@ static bool laguna_graph_forward_batch(
         void                 *display_progress_ud,
         int                   display_total) {
 #ifdef __APPLE__
+    if (gpu_draft_tokens && laguna_bench_trace_on()) {
+        fprintf(stderr,
+                "ds4-laguna-bench-trace graph=speculative-verifier "
+                "status=unsupported reason=dflash_deferred\n");
+        return false;
+    }
     if (!laguna_metal_swa_gqa9_preflight(
             NULL, "Laguna prefill/speculative batch", NULL, 0)) return false;
     if (!laguna_metal_router_simd_topk_preflight(
@@ -53268,6 +53502,20 @@ static bool laguna_graph_forward_batch(
         return false;
     }
 
+#ifdef __APPLE__
+    if (!laguna_bench_trace_begin(
+            g,
+            n_tokens,
+            pos0,
+            row_argmax_out ? "speculative-verifier" : "prefill",
+            rope_atlas_target_evidence ?
+                rope_atlas_target_generation_expected : 0u,
+            rope_atlas_target_evidence &&
+                rope_atlas_target_generation_expected == 0u ? 1u : 0u)) {
+        return false;
+    }
+#endif
+
     bool ok = true;
     bool dense_q8_completion_waited = false;
 #ifdef DS4_ROCM_BUILD
@@ -53284,6 +53532,9 @@ static bool laguna_graph_forward_batch(
             tokens[0] < 0 || tokens[0] >= (int)DS4_N_VOCAB ||
             ds4_gpu_tensor_bytes(gpu_draft_tokens) <
                 (uint64_t)n_tokens * sizeof(uint32_t)) {
+#ifdef __APPLE__
+            laguna_bench_trace_abort(g, "token_input_invalid");
+#endif
             return false;
         }
         const uint32_t first_token = (uint32_t)tokens[0];
@@ -53305,6 +53556,9 @@ static bool laguna_graph_forward_batch(
         for (uint32_t i = 0; i < n_tokens; i++) {
             if (tokens[i] < 0 || tokens[i] >= (int)DS4_N_VOCAB) {
                 free(token_ids);
+#ifdef __APPLE__
+                laguna_bench_trace_abort(g, "token_input_invalid");
+#endif
                 return false;
             }
             token_ids[i] = (uint32_t)tokens[i];
@@ -53316,7 +53570,12 @@ static bool laguna_graph_forward_batch(
                  (uint64_t)n_tokens * sizeof(*token_ids)) != 0;
         free(token_ids);
     }
-    if (!ok) return false;
+    if (!ok) {
+#ifdef __APPLE__
+        laguna_bench_trace_abort(g, "token_input_write_failed");
+#endif
+        return false;
+    }
 
     laguna_graph_report_prefill_display_progress(display_progress,
                                                   display_progress_ud,
@@ -53531,6 +53790,9 @@ static bool laguna_graph_forward_batch(
                         beta_slow,
                         DS4_RMS_EPS) != 0;
             }
+#ifdef __APPLE__
+            if (ok) laguna_bench_trace_note_ordinary_qk(g);
+#endif
         }
         if (ok) {
             failed_stage = "causal attention";
@@ -53606,6 +53868,11 @@ static bool laguna_graph_forward_batch(
                         DS4_N_FF_DENSE,
                         g->ffn_norm,
                         n_tokens) != 0;
+                if (ok) {
+#ifdef __APPLE__
+                    laguna_bench_trace_note_dense(g, false, true);
+#endif
+                }
 #else
                 /* The batch preflight only enables the route on Metal, so
                  * this arm is unreachable elsewhere; keep the link clean. */
@@ -53648,6 +53915,12 @@ static bool laguna_graph_forward_batch(
                                                      g->ffn_mid,
                                                      n_tokens,
                                                      exact_q8_rows);
+                if (ok && dense_q8_prefill_route !=
+                               DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED) {
+#ifdef __APPLE__
+                    laguna_bench_trace_note_dense(g, false, false);
+#endif
+                }
             }
             if (ok) {
                 failed_stage = "dense FFN residual";
@@ -53707,6 +53980,11 @@ static bool laguna_graph_forward_batch(
                         DS4_EXPERT_WEIGHT_SCALE,
                         n_tokens) != 0;
             }
+#ifdef __APPLE__
+            if (ok && !fused_router_batch) {
+                laguna_bench_trace_note_router_stock(g);
+            }
+#endif
 
             const uint64_t gate_row_bytes =
                 routed_expert_row_bytes(l->ffn_gate_exps);
@@ -54070,6 +54348,8 @@ static bool laguna_graph_forward_batch(
         laguna_metal_router_simd_topk_trace_report(
             "Laguna prefill/speculative batch");
     }
+    if (ok) laguna_bench_trace_report_waited(g);
+    else laguna_bench_trace_abort(g, "graph_failed");
 #endif
     if (!ok) laguna_dense_q8_gate_up_swiglu_pending_clear(g);
     return ok;
@@ -64087,6 +64367,42 @@ static int ds4_engine_open_internal(ds4_engine **out,
                                     const ds4_engine_options *opt,
                                     const ds4_gpu_config *gpu_cfg);
 
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+/* Metal is the sole authority for the process-frozen selector on Apple.  In
+ * particular, engine admission must consult the same epoch as raw GPU init;
+ * a second C-side cache would allow the two lifecycles to diverge. */
+static int ds4_laguna_bench_trace_lifecycle_mode(void) {
+    return ds4_gpu_laguna_bench_trace_lifecycle_mode();
+}
+#else
+static int g_ds4_laguna_bench_trace_frozen_mode = -2;
+
+static int ds4_laguna_bench_trace_lifecycle_mode(void) {
+    const char *value = getenv("DS4_LAGUNA_BENCH_TRACE");
+    const int parsed =
+        !value || value[0] == '\0' ||
+        (value[0] == '0' && value[1] == '\0') ? 0 :
+        (value[0] == '1' && value[1] == '\0') ? 1 : -1;
+    if (parsed < 0) {
+        fprintf(stderr,
+                "ds4: invalid DS4_LAGUNA_BENCH_TRACE='%s'; "
+                "expected unset, empty, 0, or literal 1\n",
+                value ? value : "");
+        return -1;
+    }
+    if (g_ds4_laguna_bench_trace_frozen_mode < 0) {
+        g_ds4_laguna_bench_trace_frozen_mode = parsed;
+    } else if (g_ds4_laguna_bench_trace_frozen_mode != parsed) {
+        fprintf(stderr,
+                "ds4: DS4_LAGUNA_BENCH_TRACE is frozen at %d; "
+                "restart is required before changing it\n",
+                g_ds4_laguna_bench_trace_frozen_mode);
+        return -1;
+    }
+    return g_ds4_laguna_bench_trace_frozen_mode;
+}
+#endif
+
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     return ds4_engine_open_internal(out, opt, NULL);
 }
@@ -64100,6 +64416,10 @@ int ds4_engine_create_with_gpu_config(ds4_engine **out,
 static int ds4_engine_open_internal(ds4_engine **out,
                                      const ds4_engine_options *opt,
                                      const ds4_gpu_config *gpu_cfg) {
+    if (ds4_laguna_bench_trace_lifecycle_mode() < 0) {
+        if (out) *out = NULL;
+        return 1;
+    }
     ds4_engine *e = xcalloc(1, sizeof(*e));
     e->model.fd = -1;
     e->mtp_model.fd = -1;
@@ -64334,6 +64654,15 @@ static int ds4_engine_open_internal(ds4_engine **out,
                     "signal-weight layout; the legacy F16/Q4_K/Q6_K recipe "
                     "is Metal-only\n",
                     ds4_backend_name(e->backend));
+            ds4_engine_close(e);
+            *out = NULL;
+            return 1;
+        }
+        if (opt->dflash_path && opt->dflash_path[0] &&
+            ds4_laguna_bench_trace_lifecycle_mode() == 1) {
+            fprintf(stderr,
+                    "ds4: DS4_LAGUNA_BENCH_TRACE does not support "
+                    "adaptive DFlash; omit the trace or run without --dflash\n");
             ds4_engine_close(e);
             *out = NULL;
             return 1;

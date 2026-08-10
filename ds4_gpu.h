@@ -4,6 +4,174 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* One frozen diagnostic switch for the M5 Laguna matrix.  Keep this parser
+ * deliberately narrower than the older broad boolean helpers: an absent,
+ * empty, or literal-0 value is disabled; only the literal 1 enables the
+ * trace; every other spelling is a configuration error.  Callers snapshot
+ * the result before creating a graph/session and never re-read the
+ * environment in a timed route. */
+static inline int ds4_gpu_laguna_bench_trace_env_mode(
+        const char *value) {
+    if (!value || value[0] == '\0' ||
+        (value[0] == '0' && value[1] == '\0')) return 0;
+    if (value[0] == '1' && value[1] == '\0') return 1;
+    return -1;
+}
+
+/* Actual single-token attention kernel precedence.  Staged SWA is a
+ * multi-row verifier route; on the one-token decode entry point it suppresses
+ * grouped GQA selection but the ordinary flash decoder still runs. */
+static inline int ds4_gpu_laguna_bench_attention_route_kind(
+        uint32_t cache_cap,
+        uint32_t key_start,
+        uint32_t key_count,
+        uint32_t n_head,
+        uint32_t n_head_kv,
+        int      gqa9_selected,
+        int      gqa3_selected,
+        int      staged_swa_active) {
+    const bool exact_swa =
+        cache_cap == 512u && key_count == 512u &&
+        n_head == 72u && n_head_kv == 8u;
+    if (exact_swa && staged_swa_active) return 0;
+    if (exact_swa && gqa9_selected) return 2;
+    if (exact_swa && gqa3_selected && !gqa9_selected) return 1;
+    if (cache_cap > 512u && key_start == 0u &&
+        n_head % 3u == 0u &&
+        n_head_kv != 0u && ((n_head / n_head_kv) % 3u) == 0u &&
+        ((key_count >= 512u && key_count < cache_cap) ||
+         (key_count >= 1024u && key_count % 32u == 0u))) return 4;
+    return 0;
+}
+
+/* Stable field order for the machine-readable DS4_LAGUNA_BENCH_TRACE
+ * summary.  Values are planned/encoded route counts published only after
+ * the owning command buffer has completed successfully.  `moe_grouped_rows`
+ * and `moe_stock_rows` accumulate the n_tokens argument of each completed
+ * MoE call; `moe_tokens` and `moe_chunk` retain the most recent call's values.
+ * They are all zero when no MoE route was applicable.  The existing
+ * DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE=1 companion remains the source of
+ * SIMD-top-k row/dispatch evidence; it is intentionally not folded into
+ * router_fused or router_stock.  Adaptive DFlash support is rejected when
+ * this trace is enabled because its pre-encoded support/target overlap does
+ * not belong to one graph transaction; run the ordinary session/raw graph
+ * path for this frozen interface. `expected_generation` is 1 when the graph
+ * planned a fresh atlas generation and 0 when it reused the target; `reuse`
+ * is the corresponding 1/0 reuse decision. Staged-SWA/DFlash cells are
+ * outside this ordinary decode/prefill contract. */
+typedef struct ds4_gpu_laguna_bench_trace_stats {
+    uint64_t router_fused;
+    uint64_t router_stock;
+    uint64_t dense_decode_fused;
+    uint64_t dense_decode_stock;
+    uint64_t dense_prefill_fused;
+    uint64_t dense_prefill_stock;
+    uint64_t direct_kv;
+    uint64_t staged_kv;
+    uint64_t moe_grouped;
+    uint64_t moe_stock;
+    uint64_t moe_grouped_rows;
+    uint64_t moe_stock_rows;
+    uint32_t moe_tokens;
+    uint32_t moe_chunk;
+    uint64_t ordinary;
+    uint64_t gqa3;
+    uint64_t gqa9;
+    uint64_t global_grouped;
+    uint64_t simd32;
+    uint64_t ordinary_qk;
+    uint64_t generated;
+    uint64_t consumers;
+    uint64_t family0;
+    uint64_t family1;
+    uint64_t expected_generation;
+    uint64_t reuse;
+} ds4_gpu_laguna_bench_trace_stats;
+
+/* Compute the completion-scoped part of one graph delta.  The Metal side
+ * uses these fields as cumulative counters; graph-local planned fields are
+ * intentionally left untouched for the caller to merge before publication.
+ * Returning zero on a counter regression is the fail-closed path for a
+ * flushed or mismatched command sequence. */
+static inline int ds4_gpu_laguna_bench_trace_stats_delta(
+        const ds4_gpu_laguna_bench_trace_stats *before,
+        const ds4_gpu_laguna_bench_trace_stats *after,
+        ds4_gpu_laguna_bench_trace_stats       *delta) {
+    if (!before || !after || !delta) return 0;
+    *delta = (ds4_gpu_laguna_bench_trace_stats){0};
+#define DS4_BENCH_DELTA(field) \
+    if (after->field < before->field) return 0; \
+    delta->field = after->field - before->field
+    DS4_BENCH_DELTA(router_fused);
+    DS4_BENCH_DELTA(direct_kv);
+    DS4_BENCH_DELTA(staged_kv);
+    DS4_BENCH_DELTA(moe_grouped);
+    DS4_BENCH_DELTA(moe_stock);
+    DS4_BENCH_DELTA(moe_grouped_rows);
+    DS4_BENCH_DELTA(moe_stock_rows);
+    DS4_BENCH_DELTA(ordinary);
+    DS4_BENCH_DELTA(gqa3);
+    DS4_BENCH_DELTA(gqa9);
+    DS4_BENCH_DELTA(global_grouped);
+    DS4_BENCH_DELTA(simd32);
+    DS4_BENCH_DELTA(ordinary_qk);
+    DS4_BENCH_DELTA(generated);
+    DS4_BENCH_DELTA(consumers);
+    DS4_BENCH_DELTA(family0);
+    DS4_BENCH_DELTA(family1);
+#undef DS4_BENCH_DELTA
+    if (delta->moe_grouped != 0u || delta->moe_stock != 0u) {
+        delta->moe_tokens = after->moe_tokens;
+        delta->moe_chunk = after->moe_chunk;
+    }
+    return 1;
+}
+
+#ifdef DS4_TEST_HOOKS
+/* Model-less seam for the graph transaction contract.  Production route
+ * notes are supplied in `planned`; only a successful waited completion may
+ * merge them with cumulative backend evidence.  Failure/discard leaves the
+ * caller's published value untouched. */
+static inline int ds4_gpu_laguna_bench_trace_test_commit(
+        int                                  enabled,
+        int                                  success,
+        int                                  waited,
+        const ds4_gpu_laguna_bench_trace_stats *before,
+        const ds4_gpu_laguna_bench_trace_stats *after,
+        const ds4_gpu_laguna_bench_trace_stats *planned,
+        ds4_gpu_laguna_bench_trace_stats       *published) {
+    if (!enabled || !success || !waited || !before || !after || !planned ||
+        !published) return 0;
+    ds4_gpu_laguna_bench_trace_stats delta;
+    if (!ds4_gpu_laguna_bench_trace_stats_delta(before, after, &delta)) {
+        return 0;
+    }
+    *published = *planned;
+    published->router_fused += delta.router_fused;
+    published->direct_kv += delta.direct_kv;
+    published->staged_kv += delta.staged_kv;
+    published->moe_grouped += delta.moe_grouped;
+    published->moe_stock += delta.moe_stock;
+    published->moe_grouped_rows += delta.moe_grouped_rows;
+    published->moe_stock_rows += delta.moe_stock_rows;
+    if (delta.moe_grouped != 0u || delta.moe_stock != 0u) {
+        published->moe_tokens = delta.moe_tokens;
+        published->moe_chunk = delta.moe_chunk;
+    }
+    published->ordinary += delta.ordinary;
+    published->gqa3 += delta.gqa3;
+    published->gqa9 += delta.gqa9;
+    published->global_grouped += delta.global_grouped;
+    published->simd32 += delta.simd32;
+    published->ordinary_qk += delta.ordinary_qk;
+    published->generated += delta.generated;
+    published->consumers += delta.consumers;
+    published->family0 += delta.family0;
+    published->family1 += delta.family1;
+    return 1;
+}
+#endif
+
 /* Strict lifecycle configuration parsers shared by production selectors and
  * focused tests.  They intentionally accept only decimal integers with
  * optional surrounding ASCII whitespace; malformed, empty, and overflowing
@@ -200,6 +368,23 @@ int ds4_gpu_init(void);
 void ds4_gpu_cleanup(void);
 
 #ifdef __APPLE__
+/* Frozen process-lifecycle diagnostic selector and cumulative completion
+ * evidence used by the Laguna benchmark matrix.  Snapshot reads are purely
+ * host-side counters; they never read a Metal buffer and are called only
+ * after the owning graph wait. */
+int ds4_gpu_laguna_bench_trace_enabled(void);
+/* Returns the process-frozen selector mode, or -1 after an invalid value or
+ * an attempted mid-lifecycle mutation.  Engine admission calls this before
+ * creating session state so the C and Metal snapshots cannot diverge. */
+int ds4_gpu_laguna_bench_trace_lifecycle_mode(void);
+int ds4_gpu_laguna_bench_trace_snapshot(
+        ds4_gpu_laguna_bench_trace_stats *out);
+#ifdef DS4_TEST_HOOKS
+/* Focused model-less tests may reset the lifecycle snapshot only while no
+ * command batch is active.  Production code has no reset path. */
+int ds4_gpu_laguna_bench_trace_plan_reset_for_test(void);
+#endif
+
 /* Process-lifecycle snapshot for the Q8 decode dispatch selectors.  The
  * graph admission code and every Metal TP-world descriptor consume this same
  * snapshot.  The snapshot is intentionally immutable for the lifetime of a
