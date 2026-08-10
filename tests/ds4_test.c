@@ -123,6 +123,15 @@ static void test_restore_env(const char *name, char *saved) {
     }
 }
 
+#ifdef __APPLE__
+/* SWA route selectors are captured at ds4_gpu_init.  Focused A/B legs must
+ * therefore restart the Metal lifecycle after changing the environment. */
+static bool test_restart_metal_lifecycle(void) {
+    ds4_gpu_cleanup();
+    return ds4_gpu_init() != 0;
+}
+#endif
+
 typedef struct {
     char *cold_decode;
     char *batch_selected_addr;
@@ -5208,6 +5217,7 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
     };
     const char *env_name = "DS4_METAL_LAGUNA_SWA_GQA3";
     const char *staged_env_name = "DS4_METAL_LAGUNA_STAGED_SWA";
+    const char *gqa9_env_name = "DS4_METAL_LAGUNA_SWA_GQA9";
     const uint32_t head_dim = 128u;
     const uint32_t n_head = 72u;
     const uint32_t n_head_kv = 8u;
@@ -5251,6 +5261,7 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
     float *stale_reference = malloc((size_t)heads_bytes);
     char *saved_env = test_save_env(env_name);
     char *saved_staged_env = test_save_env(staged_env_name);
+    char *saved_gqa9_env = test_save_env(gqa9_env_name);
 
     TEST_ASSERT(heads && key_cache && value_cache && q && k && v && gate &&
                 initial_key && initial_value && expected_key &&
@@ -5271,6 +5282,7 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
      * experiment.  Isolate it from an externally exported staged-SWA flag;
      * the staged precedence contract is covered separately below. */
     TEST_ASSERT(unsetenv(staged_env_name) == 0);
+    TEST_ASSERT(unsetenv(gqa9_env_name) == 0);
 
     float max_ab_abs = 0.0f;
     float max_ab_rms = 0.0f;
@@ -5353,6 +5365,8 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
         TEST_ASSERT(ds4_gpu_tensor_write(
                         value_cache, 0, poisoned_value, cache_bytes) != 0);
         TEST_ASSERT(setenv(env_name, "0", 1) == 0);
+        TEST_ASSERT(test_restart_metal_lifecycle());
+        ds4_gpu_test_laguna_route_counters_reset();
         TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                         heads, key_cache, value_cache, q, k, v, gate,
                         pos, cache_cap, key_start, key_count,
@@ -5363,6 +5377,18 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
                         key_cache, 0, off_key, cache_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_read(
                         value_cache, 0, off_value, cache_bytes) != 0);
+        {
+            uint64_t ordinary = 0;
+            uint64_t gqa3 = 0;
+            uint64_t gqa9 = 0;
+            uint64_t staged = 0;
+            uint64_t global_grouped = 0;
+            TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                            &ordinary, &gqa3, &gqa9, &staged,
+                            &global_grouped) != 0);
+            TEST_ASSERT(ordinary == 1u && gqa3 == 0u && gqa9 == 0u &&
+                        staged == 0u && global_grouped == 0u);
+        }
 
         /* Flag on: the grouped pipeline is mandatory for this leg. */
         TEST_ASSERT(ds4_gpu_tensor_write(
@@ -5372,6 +5398,8 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
         TEST_ASSERT(ds4_gpu_tensor_write(
                         value_cache, 0, poisoned_value, cache_bytes) != 0);
         TEST_ASSERT(setenv(env_name, "1", 1) == 0);
+        TEST_ASSERT(test_restart_metal_lifecycle());
+        ds4_gpu_test_laguna_route_counters_reset();
         TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                         heads, key_cache, value_cache, q, k, v, gate,
                         pos, cache_cap, key_start, key_count,
@@ -5382,6 +5410,18 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
                         key_cache, 0, on_key, cache_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_read(
                         value_cache, 0, on_value, cache_bytes) != 0);
+        {
+            uint64_t ordinary = 0;
+            uint64_t gqa3 = 0;
+            uint64_t gqa9 = 0;
+            uint64_t staged = 0;
+            uint64_t global_grouped = 0;
+            TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                            &ordinary, &gqa3, &gqa9, &staged,
+                            &global_grouped) != 0);
+            TEST_ASSERT(ordinary == 0u && gqa3 == 1u && gqa9 == 0u &&
+                        staged == 0u && global_grouped == 0u);
+        }
 
         const test_float_compare_stats off_cpu =
             test_compare_float_bits(reference, off_heads, head_values);
@@ -5485,7 +5525,12 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
                     key_cache, 0, poisoned_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, poisoned_value, cache_bytes) != 0);
-    TEST_ASSERT(setenv(env_name, "0", 1) == 0);
+    /* Exercise staged > GQA3 with both selectors enabled in the first leg;
+     * the second leg disables GQA3 while retaining staged, so the selected
+     * staged route and output must remain identical. */
+    TEST_ASSERT(setenv(env_name, "1", 1) == 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     combined_pos, cache_cap, combined_key_start, key_count,
@@ -5496,6 +5541,18 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
                     key_cache, 0, off_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(
                     value_cache, 0, off_value, cache_bytes) != 0);
+    {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 1u && global_grouped == 0u);
+    }
 
     TEST_ASSERT(ds4_gpu_tensor_write(
                     heads, 0, heads_seed, heads_bytes) != 0);
@@ -5503,7 +5560,9 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
                     key_cache, 0, poisoned_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, poisoned_value, cache_bytes) != 0);
-    TEST_ASSERT(setenv(env_name, "1", 1) == 0);
+    TEST_ASSERT(setenv(env_name, "0", 1) == 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     combined_pos, cache_cap, combined_key_start, key_count,
@@ -5514,6 +5573,18 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
                     key_cache, 0, on_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(
                     value_cache, 0, on_value, cache_bytes) != 0);
+    {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 1u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 0u && global_grouped == 0u);
+    }
     const test_float_compare_stats combined_stats =
         test_compare_float_bits(off_heads, on_heads, head_values);
     fprintf(stderr,
@@ -5530,6 +5601,7 @@ static void test_metal_laguna_swa_gqa3_numeric_ab(void) {
     TEST_ASSERT(memcmp(off_value, on_value, (size_t)cache_bytes) == 0);
 
 cleanup:
+    test_restore_env(gqa9_env_name, saved_gqa9_env);
     test_restore_env(staged_env_name, saved_staged_env);
     test_restore_env(env_name, saved_env);
     free(stale_reference);
@@ -5641,6 +5713,15 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
      * are covered separately below. */
     TEST_ASSERT(unsetenv(staged_env_name) == 0);
     TEST_ASSERT(unsetenv(gqa3_env_name) == 0);
+    TEST_ASSERT(setenv(env_name, "1", 1) == 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    if (ds4_gpu_laguna_swa_gqa9_preflight(
+            cache_cap, key_count, n_head, n_head_kv, head_dim) < 0) {
+        fprintf(stderr,
+                "ds4-test: Laguna SWA GQA9 A/B skipped; "
+                "source does not provide the optional GQA9 route\n");
+        goto cleanup;
+    }
 
     float max_ab_abs = 0.0f;
     float max_ab_rms = 0.0f;
@@ -5719,6 +5800,8 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
         TEST_ASSERT(ds4_gpu_tensor_write(
                         value_cache, 0, poisoned_value, cache_bytes) != 0);
         TEST_ASSERT(setenv(env_name, "0", 1) == 0);
+        TEST_ASSERT(test_restart_metal_lifecycle());
+        ds4_gpu_test_laguna_route_counters_reset();
         TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                         heads, key_cache, value_cache, q, k, v, gate,
                         pos, cache_cap, key_start, key_count,
@@ -5729,6 +5812,18 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
                         key_cache, 0, off_key, cache_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_read(
                         value_cache, 0, off_value, cache_bytes) != 0);
+        {
+            uint64_t ordinary = 0;
+            uint64_t gqa3 = 0;
+            uint64_t gqa9 = 0;
+            uint64_t staged = 0;
+            uint64_t global_grouped = 0;
+            TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                            &ordinary, &gqa3, &gqa9, &staged,
+                            &global_grouped) != 0);
+            TEST_ASSERT(ordinary == 1u && gqa3 == 0u && gqa9 == 0u &&
+                        staged == 0u && global_grouped == 0u);
+        }
 
         /* Flag on: the GQA9 grouped pipeline is mandatory for this leg. */
         TEST_ASSERT(ds4_gpu_tensor_write(
@@ -5738,6 +5833,8 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
         TEST_ASSERT(ds4_gpu_tensor_write(
                         value_cache, 0, poisoned_value, cache_bytes) != 0);
         TEST_ASSERT(setenv(env_name, "1", 1) == 0);
+        TEST_ASSERT(test_restart_metal_lifecycle());
+        ds4_gpu_test_laguna_route_counters_reset();
         TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                         heads, key_cache, value_cache, q, k, v, gate,
                         pos, cache_cap, key_start, key_count,
@@ -5748,6 +5845,18 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
                         key_cache, 0, on_key, cache_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_read(
                         value_cache, 0, on_value, cache_bytes) != 0);
+        {
+            uint64_t ordinary = 0;
+            uint64_t gqa3 = 0;
+            uint64_t gqa9 = 0;
+            uint64_t staged = 0;
+            uint64_t global_grouped = 0;
+            TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                            &ordinary, &gqa3, &gqa9, &staged,
+                            &global_grouped) != 0);
+            TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 1u &&
+                        staged == 0u && global_grouped == 0u);
+        }
 
         const test_float_compare_stats off_cpu =
             test_compare_float_bits(reference, off_heads, head_values);
@@ -5847,6 +5956,8 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
                     key_cache, 0, poisoned_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, poisoned_value, cache_bytes) != 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     combined_pos, cache_cap, combined_key_start, key_count,
@@ -5865,6 +5976,8 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
                     key_cache, 0, poisoned_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, poisoned_value, cache_bytes) != 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     combined_pos, cache_cap, combined_key_start, key_count,
@@ -5890,18 +6003,35 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
         TEST_ASSERT(memcmp(off_key, on_key, (size_t)cache_bytes) == 0);
         TEST_ASSERT(memcmp(off_value, on_value, (size_t)cache_bytes) == 0);
     }
+    {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 1u &&
+                    staged == 0u && global_grouped == 0u);
+    }
 
     /* Precedence 2 — staged SWA suppresses GQA9: exporting both must be
      * bit-exact with staged SWA alone (GQA9 off), proving the grouped knob
-     * is ignored for the staged reduction. */
+     * is ignored for the staged reduction.  Keep GQA3 enabled in both
+     * winning legs so the staged counter records a real precedence decision
+     * rather than relabeling an ordinary single-token decode. */
     TEST_ASSERT(setenv(staged_env_name, "1", 1) == 0);
     TEST_ASSERT(setenv(env_name, "1", 1) == 0);
+    TEST_ASSERT(setenv(gqa3_env_name, "1", 1) == 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     heads, 0, heads_seed, heads_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     key_cache, 0, poisoned_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, poisoned_value, cache_bytes) != 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     combined_pos, cache_cap, combined_key_start, key_count,
@@ -5920,6 +6050,8 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
                     key_cache, 0, poisoned_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, poisoned_value, cache_bytes) != 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     combined_pos, cache_cap, combined_key_start, key_count,
@@ -5944,6 +6076,18 @@ static void test_metal_laguna_swa_gqa9_numeric_ab(void) {
         TEST_ASSERT(s.mismatch_count == 0u);
         TEST_ASSERT(memcmp(off_key, on_key, (size_t)cache_bytes) == 0);
         TEST_ASSERT(memcmp(off_value, on_value, (size_t)cache_bytes) == 0);
+    }
+    {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 1u && global_grouped == 0u);
     }
 
 cleanup:
@@ -5976,6 +6120,245 @@ cleanup:
     ds4_gpu_tensor_free(value_cache);
     ds4_gpu_tensor_free(key_cache);
     ds4_gpu_tensor_free(heads);
+    ds4_gpu_cleanup();
+}
+
+/* The GQA9 selector is a lifecycle contract, not a per-dispatch hint.  This
+ * test covers strict parsing, restart-only changes, exact shape boundaries,
+ * and the old-source failure that previously stored KV before discovering the
+ * missing GQA9 PSO.  The latter deliberately leaves an already-open command
+ * batch around both end and discard so neither terminal path can commit a
+ * feature mutation. */
+static void test_metal_laguna_swa_gqa9_preflight_lifecycle(void) {
+    const char *gqa9_env = "DS4_METAL_LAGUNA_SWA_GQA9";
+    const char *gqa3_env = "DS4_METAL_LAGUNA_SWA_GQA3";
+    const char *staged_env = "DS4_METAL_LAGUNA_STAGED_SWA";
+    char *saved_gqa9 = test_save_env(gqa9_env);
+    char *saved_gqa3 = test_save_env(gqa3_env);
+    char *saved_staged = test_save_env(staged_env);
+    ds4_gpu_tensor *heads = NULL;
+    ds4_gpu_tensor *key_cache = NULL;
+    ds4_gpu_tensor *value_cache = NULL;
+    ds4_gpu_tensor *q = NULL;
+    ds4_gpu_tensor *k = NULL;
+    ds4_gpu_tensor *v = NULL;
+    ds4_gpu_tensor *gate = NULL;
+    uint16_t *key_before = NULL;
+    uint16_t *value_before = NULL;
+    uint16_t *key_after = NULL;
+    uint16_t *value_after = NULL;
+    float *heads_before = NULL;
+    float *heads_after = NULL;
+    const uint32_t cache_cap = 512u;
+    const uint32_t key_count = 512u;
+    const uint32_t n_head = 72u;
+    const uint32_t n_head_kv = 8u;
+    const uint32_t head_dim = 128u;
+    const uint32_t cache_width = n_head_kv * head_dim;
+    const uint64_t cache_values = (uint64_t)cache_cap * cache_width;
+    const uint64_t head_values = (uint64_t)n_head * head_dim;
+    const uint64_t cache_bytes = cache_values * sizeof(uint16_t);
+    const uint64_t head_bytes = head_values * sizeof(float);
+    const uint64_t kv_bytes = (uint64_t)cache_width * sizeof(float);
+    const uint64_t gate_bytes = (uint64_t)n_head * sizeof(float);
+    const float scale = 1.0f / sqrtf((float)head_dim);
+
+    TEST_ASSERT(unsetenv(gqa3_env) == 0);
+    TEST_ASSERT(unsetenv(staged_env) == 0);
+
+    /* Only unset/empty/0 are off; every other value is malformed. */
+    TEST_ASSERT(setenv(gqa9_env, "", 1) == 0);
+    ds4_gpu_cleanup();
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    512u, 512u, 72u, 8u, 128u) == 0);
+    TEST_ASSERT(unsetenv(gqa9_env) == 0);
+    ds4_gpu_cleanup();
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    512u, 512u, 72u, 8u, 128u) == 0);
+    TEST_ASSERT(setenv(gqa9_env, "true", 1) == 0);
+    ds4_gpu_cleanup();
+    TEST_ASSERT(ds4_gpu_init() == 0);
+    TEST_ASSERT(setenv(gqa9_env, "0", 1) == 0);
+    TEST_ASSERT(ds4_gpu_init() != 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    cache_cap, key_count, n_head, n_head_kv, head_dim) == 0);
+
+    /* A mid-lifecycle edit cannot hot-switch the selector. */
+    TEST_ASSERT(setenv(gqa9_env, "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    cache_cap, key_count, n_head, n_head_kv, head_dim) == 0);
+
+    /* A clean restart snapshots the opt-in and probes the current/override
+     * source.  The old source branch below is the poisoned-cache regression. */
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    const int enabled = ds4_gpu_laguna_swa_gqa9_preflight(
+        cache_cap, key_count, n_head, n_head_kv, head_dim);
+    TEST_ASSERT(enabled != 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    cache_cap, 511u, n_head, n_head_kv, head_dim) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    cache_cap, 513u, n_head, n_head_kv, head_dim) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    513u, key_count, n_head, n_head_kv, head_dim) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    cache_cap, key_count, 48u, 8u, head_dim) < 0);
+    TEST_ASSERT(ds4_gpu_laguna_swa_gqa9_preflight(
+                    cache_cap, key_count, 72u, 6u, head_dim) < 0);
+
+    heads = ds4_gpu_tensor_alloc(head_bytes);
+    key_cache = ds4_gpu_tensor_alloc(cache_bytes);
+    value_cache = ds4_gpu_tensor_alloc(cache_bytes);
+    q = ds4_gpu_tensor_alloc(head_bytes);
+    k = ds4_gpu_tensor_alloc(kv_bytes);
+    v = ds4_gpu_tensor_alloc(kv_bytes);
+    gate = ds4_gpu_tensor_alloc(gate_bytes);
+    key_before = malloc((size_t)cache_bytes);
+    value_before = malloc((size_t)cache_bytes);
+    key_after = malloc((size_t)cache_bytes);
+    value_after = malloc((size_t)cache_bytes);
+    heads_before = malloc((size_t)head_bytes);
+    heads_after = malloc((size_t)head_bytes);
+    TEST_ASSERT(heads && key_cache && value_cache && q && k && v && gate &&
+                key_before && value_before && key_after && value_after &&
+                heads_before && heads_after);
+    if (!heads || !key_cache || !value_cache || !q || !k || !v || !gate ||
+        !key_before || !value_before || !key_after || !value_after ||
+        !heads_before || !heads_after) {
+        goto cleanup;
+    }
+    for (uint64_t i = 0; i < cache_values; i++) {
+        key_before[i] = (uint16_t)(0x2400u + (i % 0x300u));
+        value_before[i] = (uint16_t)(0x5000u + (i % 0x300u));
+    }
+    for (uint64_t i = 0; i < head_values; i++) {
+        heads_before[i] = 17.0f + (float)(i % 31u) * 0.03125f;
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    heads, 0, heads_before, head_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    key_cache, 0, key_before, cache_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(
+                    value_cache, 0, value_before, cache_bytes) != 0);
+    float *zeros_q = calloc((size_t)head_values, sizeof(float));
+    float *zeros_kv = calloc((size_t)cache_width, sizeof(float));
+    float *zeros_gate = calloc((size_t)n_head, sizeof(float));
+    TEST_ASSERT(zeros_q && zeros_kv && zeros_gate);
+    if (!zeros_q || !zeros_kv || !zeros_gate) {
+        free(zeros_gate);
+        free(zeros_kv);
+        free(zeros_q);
+        goto cleanup;
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(q, 0, zeros_q, head_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(k, 0, zeros_kv, kv_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(v, 0, zeros_kv, kv_bytes) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_write(gate, 0, zeros_gate, gate_bytes) != 0);
+    free(zeros_gate);
+    free(zeros_kv);
+    free(zeros_q);
+
+    ds4_gpu_test_laguna_route_counters_reset();
+    if (enabled < 0) {
+        TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+        TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
+                        heads, key_cache, value_cache, q, k, v, gate,
+                        511u, cache_cap, 0u, key_count,
+                        n_head, n_head_kv, head_dim, scale) == 0);
+        TEST_ASSERT(ds4_gpu_commands_active());
+        TEST_ASSERT(ds4_gpu_end_commands() != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        heads, 0, heads_after, head_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        key_cache, 0, key_after, cache_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        value_cache, 0, value_after, cache_bytes) != 0);
+        TEST_ASSERT(memcmp(heads_after, heads_before, (size_t)head_bytes) == 0);
+        TEST_ASSERT(memcmp(key_after, key_before, (size_t)cache_bytes) == 0);
+        TEST_ASSERT(memcmp(value_after, value_before, (size_t)cache_bytes) == 0);
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 0u && global_grouped == 0u);
+
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        heads, 0, heads_before, head_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        key_cache, 0, key_before, cache_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        value_cache, 0, value_before, cache_bytes) != 0);
+        ds4_gpu_test_laguna_route_counters_reset();
+        TEST_ASSERT(ds4_gpu_begin_commands() != 0);
+        TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
+                        heads, key_cache, value_cache, q, k, v, gate,
+                        511u, cache_cap, 0u, key_count,
+                        n_head, n_head_kv, head_dim, scale) == 0);
+        TEST_ASSERT(ds4_gpu_discard_commands() != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        heads, 0, heads_after, head_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        key_cache, 0, key_after, cache_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        value_cache, 0, value_after, cache_bytes) != 0);
+        TEST_ASSERT(memcmp(heads_after, heads_before, (size_t)head_bytes) == 0);
+        TEST_ASSERT(memcmp(key_after, key_before, (size_t)cache_bytes) == 0);
+        TEST_ASSERT(memcmp(value_after, value_before, (size_t)cache_bytes) == 0);
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 0u && global_grouped == 0u);
+        fprintf(stderr,
+                "ds4-test: Laguna GQA9 old-source rollback exact "
+                "end/discard cache/head/counters\n");
+    } else {
+        TEST_ASSERT(enabled > 0);
+        ds4_gpu_test_laguna_route_counters_reset();
+        TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
+                        heads, key_cache, value_cache, q, k, v, gate,
+                        511u, cache_cap, 0u, key_count,
+                        n_head, n_head_kv, head_dim, scale) != 0);
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 1u &&
+                    staged == 0u && global_grouped == 0u);
+        fprintf(stderr,
+                "ds4-test: Laguna GQA9 current-source preflight/decode "
+                "available=1 route=gqa9 completion=waited\n");
+    }
+
+cleanup:
+    if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
+    ds4_gpu_tensor_free(gate);
+    ds4_gpu_tensor_free(v);
+    ds4_gpu_tensor_free(k);
+    ds4_gpu_tensor_free(q);
+    ds4_gpu_tensor_free(value_cache);
+    ds4_gpu_tensor_free(key_cache);
+    ds4_gpu_tensor_free(heads);
+    ds4_gpu_cleanup();
+    free(heads_after);
+    free(heads_before);
+    free(value_after);
+    free(key_after);
+    free(value_before);
+    free(key_before);
+    test_restore_env(gqa9_env, saved_gqa9);
+    test_restore_env(gqa3_env, saved_gqa3);
+    test_restore_env(staged_env, saved_staged);
 }
 
 /* A 512-slot case can be either just short of a full production SWA ring or
@@ -5987,6 +6370,7 @@ static void test_metal_laguna_swa_gqa3_scope_case(
         uint32_t pos,
         uint32_t key_count) {
     const char *env_name = "DS4_METAL_LAGUNA_SWA_GQA3";
+    const char *gqa9_env_name = "DS4_METAL_LAGUNA_SWA_GQA9";
     const uint32_t head_dim = 128u;
     const uint32_t cache_cap = 512u;
     const uint32_t key_start = pos + 1u >= key_count
@@ -6022,11 +6406,13 @@ static void test_metal_laguna_swa_gqa3_scope_case(
     float *off_heads = malloc((size_t)heads_bytes);
     float *on_heads = malloc((size_t)heads_bytes);
     char *saved_env = test_save_env(env_name);
+    char *saved_gqa9_env = test_save_env(gqa9_env_name);
 
     TEST_ASSERT(heads && key_cache && value_cache && q && k && v && gate &&
                 initial_key && initial_value && off_key && off_value &&
                 on_key && on_value && q_host && k_host && v_host &&
                 gate_host && seed && off_heads && on_heads);
+    TEST_ASSERT(unsetenv(gqa9_env_name) == 0);
     if (!heads || !key_cache || !value_cache || !q || !k || !v || !gate ||
         !initial_key || !initial_value || !off_key || !off_value || !on_key ||
         !on_value || !q_host || !k_host || !v_host || !gate_host || !seed ||
@@ -6066,6 +6452,8 @@ static void test_metal_laguna_swa_gqa3_scope_case(
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, initial_value, cache_bytes) != 0);
     TEST_ASSERT(setenv(env_name, "0", 1) == 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     pos, cache_cap, key_start, key_count,
@@ -6076,6 +6464,18 @@ static void test_metal_laguna_swa_gqa3_scope_case(
                     key_cache, 0, off_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(
                     value_cache, 0, off_value, cache_bytes) != 0);
+    {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 1u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 0u && global_grouped == 0u);
+    }
 
     TEST_ASSERT(ds4_gpu_tensor_write(heads, 0, seed, heads_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
@@ -6083,6 +6483,8 @@ static void test_metal_laguna_swa_gqa3_scope_case(
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, initial_value, cache_bytes) != 0);
     TEST_ASSERT(setenv(env_name, "1", 1) == 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     pos, cache_cap, key_start, key_count,
@@ -6093,6 +6495,18 @@ static void test_metal_laguna_swa_gqa3_scope_case(
                     key_cache, 0, on_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(
                     value_cache, 0, on_value, cache_bytes) != 0);
+    {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 1u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 0u && global_grouped == 0u);
+    }
 
     const test_float_compare_stats stats =
         test_compare_float_bits(off_heads, on_heads, head_values);
@@ -6110,6 +6524,7 @@ static void test_metal_laguna_swa_gqa3_scope_case(
     TEST_ASSERT(memcmp(off_value, on_value, (size_t)cache_bytes) == 0);
 
 cleanup:
+    test_restore_env(gqa9_env_name, saved_gqa9_env);
     test_restore_env(env_name, saved_env);
     free(on_heads);
     free(off_heads);
@@ -6150,13 +6565,14 @@ static void test_metal_laguna_swa_gqa3_scope(void) {
  * kernel strides keys and reads exactly key_count rows).  This case checks
  * the default grouped path against a double-precision reference and keeps a
  * stale-cache guard so an attention-before-store regression cannot hide. */
-static void test_laguna_global_grouped_decode_numeric_case(uint32_t key_count) {
+static void test_laguna_global_grouped_decode_numeric_case(
+        uint32_t cache_cap,
+        uint32_t key_start,
+        uint32_t key_count,
+        uint32_t n_head,
+        uint32_t n_head_kv) {
     const uint32_t head_dim = 128u;
-    const uint32_t n_head = 72u;
-    const uint32_t n_head_kv = 8u;
-    const uint32_t cache_cap = 2048u;
-    const uint32_t key_start = 0u;
-    const uint32_t pos = key_count - 1u;
+    const uint32_t pos = key_start + key_count - 1u;
     const uint32_t cache_width = n_head_kv * head_dim;
     const uint64_t head_values = (uint64_t)n_head * head_dim;
     const uint64_t cache_values = (uint64_t)cache_cap * cache_width;
@@ -6188,6 +6604,9 @@ static void test_laguna_global_grouped_decode_numeric_case(uint32_t key_count) {
     float *reference = malloc((size_t)heads_bytes);
     float *stale_reference = malloc((size_t)heads_bytes);
 
+    TEST_ASSERT(cache_cap > 512u && key_count > 0u &&
+                key_count <= cache_cap &&
+                key_start <= cache_cap - key_count);
     TEST_ASSERT(heads && key_cache && value_cache && q && k && v && gate &&
                 poisoned_key && poisoned_value && expected_key &&
                 expected_value && got_key && got_value && q_host && k_host &&
@@ -6261,7 +6680,10 @@ static void test_laguna_global_grouped_decode_numeric_case(uint32_t key_count) {
     TEST_ASSERT(ds4_gpu_tensor_write(
                     value_cache, 0, poisoned_value, cache_bytes) != 0);
     /* Default path: no experiment flag.  Grouped-eligible global shapes with
-     * key_count in [512, cache_cap) take the grouped flash decode kernel. */
+     * key_count in [512, cache_cap), plus aligned full-cap histories, take
+     * the grouped flash decode kernel.  A nonzero key_start and an unaligned
+     * full-cap history remain on the ordinary path. */
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_laguna_store_attention_tensor(
                     heads, key_cache, value_cache, q, k, v, gate,
                     pos, cache_cap, key_start, key_count,
@@ -6269,6 +6691,25 @@ static void test_laguna_global_grouped_decode_numeric_case(uint32_t key_count) {
     TEST_ASSERT(ds4_gpu_tensor_read(heads, 0, actual, heads_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(key_cache, 0, got_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(value_cache, 0, got_value, cache_bytes) != 0);
+    {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        const bool grouped =
+            key_start == 0u &&
+            (n_head % 3u) == 0u &&
+            ((n_head / n_head_kv) % 3u) == 0u &&
+            ((key_count >= 512u && key_count < cache_cap) ||
+             (key_count >= 1024u && key_count % 32u == 0u));
+        TEST_ASSERT(ordinary == (grouped ? 0u : 1u) &&
+                    gqa3 == 0u && gqa9 == 0u && staged == 0u &&
+                    global_grouped == (grouped ? 1u : 0u));
+    }
 
     const test_float_compare_stats cpu =
         test_compare_float_bits(reference, actual, head_values);
@@ -6494,13 +6935,21 @@ static void test_laguna_gqa3_decode_numeric(void) {
     ds4_gpu_tensor_free(value_cache);
     ds4_gpu_tensor_free(key_cache);
     ds4_gpu_tensor_free(heads);
-    /* Close the global 513-1023 gap: odd key counts in that range now take
-     * the default grouped flash decode path (no env flag), exercised against
-     * the double-precision reference at the production 72/8 global ratio. */
-    test_laguna_global_grouped_decode_numeric_case(513u);
-    test_laguna_global_grouped_decode_numeric_case(600u);
-    test_laguna_global_grouped_decode_numeric_case(777u);
-    test_laguna_global_grouped_decode_numeric_case(1023u);
+    /* The host-side admission floor is >=512: prove the exact 511/512/513
+     * boundary against both the route counter and the numeric reference.
+     * Keep the production 72/8 global ratio and the production 48/8 (GQA6)
+     * ratio covered, then exercise the key-start and full-cap geometry gates.
+     */
+    test_laguna_global_grouped_decode_numeric_case(2048u, 0u, 511u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(2048u, 0u, 512u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(2048u, 0u, 513u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(2048u, 0u, 600u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(2048u, 0u, 777u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(2048u, 0u, 1023u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(2048u, 0u, 513u, 48u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(2048u, 1u, 512u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(1024u, 0u, 1024u, 72u, 8u);
+    test_laguna_global_grouped_decode_numeric_case(1025u, 0u, 1025u, 72u, 8u);
     test_laguna_prefill_attention_numeric_case(48u, 8u);
     test_laguna_prefill_attention_numeric_case(72u, 8u);
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
@@ -7706,12 +8155,15 @@ static void test_metal_laguna_staged_swa_case(
     char *saved_staged_env = NULL;
     char *saved_require_env = NULL;
     char *saved_gqa3_env = NULL;
+    char *saved_gqa9_env = NULL;
     bool staged_env_saved = false;
     bool require_env_saved = false;
     bool gqa3_env_saved = false;
+    bool gqa9_env_saved = false;
     const char *staged_env_name = "DS4_METAL_LAGUNA_STAGED_SWA";
     const char *require_env_name = "DS4_METAL_LAGUNA_REQUIRE_STAGED_SWA";
     const char *gqa3_env_name = "DS4_METAL_LAGUNA_SWA_GQA3";
+    const char *gqa9_env_name = "DS4_METAL_LAGUNA_SWA_GQA9";
     TEST_ASSERT(heads && key_cache && value_cache && staged_key &&
                 staged_value && q && k && v && gate && initial_key &&
                 initial_value && baseline_key && baseline_value &&
@@ -7793,12 +8245,16 @@ static void test_metal_laguna_staged_swa_case(
     require_env_saved = true;
     saved_gqa3_env = test_save_env(gqa3_env_name);
     gqa3_env_saved = true;
+    saved_gqa9_env = test_save_env(gqa9_env_name);
+    gqa9_env_saved = true;
     TEST_ASSERT(unsetenv(staged_env_name) == 0);
     TEST_ASSERT(unsetenv(require_env_name) == 0);
     /* The ordinary-vs-staged exactness leg is independent of an exported
      * grouped-GQA3 flag.  The production-sized numeric test separately covers
      * the single-token precedence contract with both flags enabled. */
     TEST_ASSERT(unsetenv(gqa3_env_name) == 0);
+    TEST_ASSERT(unsetenv(gqa9_env_name) == 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
     TEST_ASSERT(ds4_gpu_tensor_write(
                     heads, 0, baseline_heads_seed, heads_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
@@ -7829,6 +8285,8 @@ static void test_metal_laguna_staged_swa_case(
     } else {
         TEST_ASSERT(setenv(require_env_name, "1", 1) == 0);
     }
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_tensor_write(
                     key_cache, 0, initial_key, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
@@ -7850,6 +8308,19 @@ static void test_metal_laguna_staged_swa_case(
                     key_cache, 0, staged_key_out, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(
                     value_cache, 0, staged_value_out, cache_bytes) != 0);
+
+    if (!allow_staged_fallback) {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 1u && global_grouped == 0u);
+    }
 
     TEST_ASSERT(memcmp(baseline_heads, staged_heads, (size_t)heads_bytes) == 0);
     TEST_ASSERT(memcmp(baseline_key, staged_key_out, (size_t)cache_bytes) == 0);
@@ -7886,6 +8357,8 @@ static void test_metal_laguna_staged_swa_case(
      * baseline; this catches regressions where an externally enabled grouped
      * flag changes the reference leg or leaks into staged execution. */
     TEST_ASSERT(setenv(gqa3_env_name, "1", 1) == 0);
+    TEST_ASSERT(test_restart_metal_lifecycle());
+    ds4_gpu_test_laguna_route_counters_reset();
     TEST_ASSERT(ds4_gpu_tensor_write(
                     heads, 0, staged_heads_seed, heads_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_write(
@@ -7907,6 +8380,18 @@ static void test_metal_laguna_staged_swa_case(
                     key_cache, 0, staged_key_out, cache_bytes) != 0);
     TEST_ASSERT(ds4_gpu_tensor_read(
                     value_cache, 0, staged_value_out, cache_bytes) != 0);
+    if (!allow_staged_fallback) {
+        uint64_t ordinary = 0;
+        uint64_t gqa3 = 0;
+        uint64_t gqa9 = 0;
+        uint64_t staged = 0;
+        uint64_t global_grouped = 0;
+        TEST_ASSERT(ds4_gpu_test_laguna_decode_route_counters(
+                        &ordinary, &gqa3, &gqa9, &staged,
+                        &global_grouped) != 0);
+        TEST_ASSERT(ordinary == 0u && gqa3 == 0u && gqa9 == 0u &&
+                    staged == 1u && global_grouped == 0u);
+    }
     TEST_ASSERT(memcmp(baseline_heads, staged_heads, (size_t)heads_bytes) == 0);
     TEST_ASSERT(memcmp(baseline_key, staged_key_out, (size_t)cache_bytes) == 0);
     TEST_ASSERT(memcmp(baseline_value, staged_value_out,
@@ -7935,6 +8420,11 @@ static void test_metal_laguna_staged_swa_case(
         saved_gqa3_env = NULL;
         gqa3_env_saved = false;
     }
+    if (gqa9_env_saved) {
+        test_restore_env(gqa9_env_name, saved_gqa9_env);
+        saved_gqa9_env = NULL;
+        gqa9_env_saved = false;
+    }
 
 cleanup:
     if (require_env_saved) {
@@ -7951,6 +8441,11 @@ cleanup:
         test_restore_env(gqa3_env_name, saved_gqa3_env);
         saved_gqa3_env = NULL;
         gqa3_env_saved = false;
+    }
+    if (gqa9_env_saved) {
+        test_restore_env(gqa9_env_name, saved_gqa9_env);
+        saved_gqa9_env = NULL;
+        gqa9_env_saved = false;
     }
     free(staged_heads);
     free(baseline_heads);
@@ -11261,6 +11756,7 @@ static void test_metal_kernel_group(void) {
     test_metal_zero_prefix_prefill_mask_cache_exact();
     test_metal_laguna_swa_gqa3_numeric_ab();
     test_metal_laguna_swa_gqa9_numeric_ab();
+    test_metal_laguna_swa_gqa9_preflight_lifecycle();
     test_metal_laguna_swa_gqa3_scope();
     test_laguna_gqa3_decode_numeric();
     test_metal_laguna_qk_norm_rope_pair_exact();

@@ -1110,6 +1110,14 @@ int ds4_gpu_test_laguna_route_counters(uint64_t *direct_kv,
                                        uint64_t *wrap_kv,
                                        uint64_t *fused_q8,
                                        uint64_t *stock_q8);
+/* Completion-scoped decode route evidence: ordinary, GQA3, GQA9, staged,
+ * and the default global grouped floor route.  A count is visible only after
+ * its owning command buffer completed successfully. */
+int ds4_gpu_test_laguna_decode_route_counters(uint64_t *ordinary,
+                                              uint64_t *gqa3,
+                                              uint64_t *gqa9,
+                                              uint64_t *staged,
+                                              uint64_t *global_grouped);
 int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
                                         uint64_t *bco_true);
 /* Test-only view of the real Q8 descriptor geometry for each TP world. */
@@ -2914,6 +2922,20 @@ int ds4_gpu_laguna_router_simd_topk_preflight(
         uint32_t n_expert,
         uint32_t n_expert_used,
         float    expert_weight_scale);
+
+/* Laguna S2.1 SWA GQA9 decode preflight.  Returns 0 when the explicit
+ * GQA9 selector is off (or is suppressed by the higher-precedence staged-SWA
+ * route), 1 when the exact 512/512/72/8/128 route has an available PSO with
+ * the required thread execution width/threadgroup resources, and -1 for a
+ * malformed selector, incompatible shape, or unavailable/old Metal source.
+ * A requested route is checked before any command batch, attention/KV store,
+ * graph allocation/capture, or cache mutation. */
+int ds4_gpu_laguna_swa_gqa9_preflight(
+        uint32_t cache_cap,
+        uint32_t key_count,
+        uint32_t n_head,
+        uint32_t n_head_kv,
+        uint32_t head_dim);
 
 /* Laguna S2.1 decode-router SIMD top-k diagnostics.  These are diagnostics
  * only: reset before a completed graph/dispatch, then use the *_after_wait
