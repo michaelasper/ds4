@@ -4652,30 +4652,29 @@ kernel void kernel_glm_router_select_one(
 // takes the exact stock bitonic body below, without CPU readback or a partial
 // selected/weight write.  Keeping the stock body in this kernel also makes the
 // opt-in safe for unusual test inputs and future model variants.
-kernel void kernel_glm_router_select_one_simd(
-        constant ds4_metal_args_glm_router_select_one & args,
-        device const float *logits,
+// Shared body of kernel_glm_router_select_one_simd, templated on the logits
+// row address space so the fused decode router below can stage the logits in
+// threadgroup memory instead of a device round trip.
+template<typename logits_ptr_t>
+static void glm_router_select_one_simd_body(
+        const uint n_expert_arg,
+        const uint n_expert_used,
+        const float expert_weight_scale,
+        const uint stats_enabled,
+        logits_ptr_t token_logits,
         device const float *bias,
-        device int32_t *selected,
-        device float *weights,
-        device float *probs,
+        device int32_t *token_selected,
+        device float *token_weights,
+        device float *token_probs,
         device atomic_uint *stats,
-        threadgroup float *scratch [[threadgroup(0)]],
-        uint token [[threadgroup_position_in_grid]],
-        uint tid [[thread_position_in_threadgroup]]) {
+        threadgroup float *scratch,
+        uint tid) {
     threadgroup float *sel_scores = scratch;
     threadgroup int32_t *idx = (threadgroup int32_t *)(scratch + 256);
     threadgroup uint *valid = (threadgroup uint *)(scratch + 512);
 
-    const uint n_expert = min(args.n_expert, 256u);
+    const uint n_expert = min(n_expert_arg, 256u);
     const bool active = tid < n_expert;
-    device const float *token_logits = logits + (uint64_t)token * args.n_expert;
-    device int32_t *token_selected =
-        selected + (uint64_t)token * args.n_expert_used;
-    device float *token_weights =
-        weights + (uint64_t)token * args.n_expert_used;
-    device float *token_probs =
-        probs + (uint64_t)token * args.n_expert;
 
     const float p = active ? ds4_glm_router_sigmoid(token_logits[tid]) : 0.0f;
     const float score = active ? p + bias[tid] : -INFINITY;
@@ -4696,10 +4695,10 @@ kernel void kernel_glm_router_select_one_simd(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    const uint k_used = min(args.n_expert_used, n_expert);
+    const uint k_used = min(n_expert_used, n_expert);
     const bool fallback = valid[0] != 0u ||
-        n_expert != 256u || args.n_expert_used != 10u;
-    if (args.stats_enabled != 0u && tid == 0u) {
+        n_expert != 256u || n_expert_used != 10u;
+    if (stats_enabled != 0u && tid == 0u) {
         atomic_fetch_add_explicit(stats + (fallback ? 1u : 0u),
                                   1u, memory_order_relaxed);
     }
@@ -4734,7 +4733,7 @@ kernel void kernel_glm_router_select_one_simd(
             sum = max(sum, 6.103515625e-5f);
             token_weights[tid] =
                 token_probs[(uint)token_selected[tid]] / sum *
-                args.expert_weight_scale;
+                expert_weight_scale;
         }
         return;
     }
@@ -4791,8 +4790,119 @@ kernel void kernel_glm_router_select_one_simd(
         }
         sum = max(sum, 6.103515625e-5f);
         token_weights[tid] =
-            token_probs[(uint)chosen[tid]] / sum * args.expert_weight_scale;
+            token_probs[(uint)chosen[tid]] / sum * expert_weight_scale;
     }
+}
+
+kernel void kernel_glm_router_select_one_simd(
+        constant ds4_metal_args_glm_router_select_one & args,
+        device const float *logits,
+        device const float *bias,
+        device int32_t *selected,
+        device float *weights,
+        device float *probs,
+        device atomic_uint *stats,
+        threadgroup float *scratch [[threadgroup(0)]],
+        uint token [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]]) {
+    glm_router_select_one_simd_body(
+        args.n_expert,
+        args.n_expert_used,
+        args.expert_weight_scale,
+        args.stats_enabled,
+        logits + (uint64_t)token * args.n_expert,
+        bias,
+        selected + (uint64_t)token * args.n_expert_used,
+        weights + (uint64_t)token * args.n_expert_used,
+        probs + (uint64_t)token * args.n_expert,
+        stats, scratch, tid);
+}
+
+struct ds4_metal_args_laguna_router_fused {
+    uint32_t in_dim;
+    uint32_t n_expert;
+    uint32_t n_expert_used;
+    float    expert_weight_scale;
+    uint32_t stats_enabled;
+};
+
+// Opt-in fused Laguna decode router for one token: computes the 256 router
+// logits in threadgroup memory and runs the SIMD top-k selection in the same
+// dispatch, removing the logits round trip.  The matvec stage replicates
+// kernel_mul_mv_f32_f32_4's NSG=8 reduction tree row by row (per-lane
+// partial, simd_sum, 8-partial cross-group simd_sum over zero-padded lanes),
+// so the staged logits are bit-identical to the two-dispatch path and the
+// shared selection body sees exactly the same inputs.  The device logits row
+// is still written for downstream debug dumps.
+kernel void kernel_laguna_router_decode_fused(
+        constant ds4_metal_args_laguna_router_fused & args,
+        device const float *weight,
+        device const float *x,
+        device const float *bias,
+        device float *logits,
+        device int32_t *selected,
+        device float *weights,
+        device float *probs,
+        device atomic_uint *stats,
+        threadgroup float *shmem [[threadgroup(0)]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd_group [[simdgroup_index_in_threadgroup]]) {
+    constexpr short NW = N_SIMDWIDTH;
+    constexpr short NB = 32;
+    constexpr short NF = 16;
+    constexpr short NF4 = NF / 4;
+    constexpr short NSG = 8;
+
+    threadgroup float *sg_part = shmem;                  // NSG * n_expert
+    threadgroup float *tg_logits = sg_part + NSG * 256;  // n_expert
+    threadgroup float *select_scratch = tg_logits + 256; // select scratch
+
+    const int n_blocks = (int)args.in_dim / NB;
+    const short ix = lane / (NW / NF);
+    const short il = lane % (NW / NF);
+    const int block0 = simd_group * NF + ix;
+    device const float4 *x4 = (device const float4 *)x;
+
+    for (uint r = 0; r < args.n_expert; r++) {
+        device const float4 *w4 =
+            (device const float4 *)(weight + (uint64_t)r * args.in_dim);
+        device const float4 *yb = x4 + (block0 * NB + il * NF) / 4;
+        float sumf = 0.0f;
+        for (int block = block0; block < n_blocks; block += NSG * NF) {
+            device const float4 *wb = w4 + (block * NB + il * NF) / 4;
+            float part = 0.0f;
+            FOR_UNROLL (short i = 0; i < NF4; i++) {
+                part += dot(wb[i], yb[i]);
+            }
+            sumf += part;
+            yb += NSG * NF * NW / 4;
+        }
+        const float tot = simd_sum(sumf);
+        if (lane == 0) sg_part[simd_group * args.n_expert + r] = tot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint rows_per_group = args.n_expert / NSG;
+    for (uint rr = 0; rr < rows_per_group; rr++) {
+        const uint r = simd_group * rows_per_group + rr;
+        const float v =
+            lane < NSG ? sg_part[(uint)lane * args.n_expert + r] : 0.0f;
+        const float tot = simd_sum(v);
+        if (lane == 0) {
+            tg_logits[r] = tot;
+            logits[r] = tot;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    glm_router_select_one_simd_body(
+        args.n_expert,
+        args.n_expert_used,
+        args.expert_weight_scale,
+        args.stats_enabled,
+        (threadgroup const float *)tg_logits,
+        bias, selected, weights, probs, stats, select_scratch,
+        simd_group * NW + lane);
 }
 
 // Batched Flash-router weight finalization after selection is already known.

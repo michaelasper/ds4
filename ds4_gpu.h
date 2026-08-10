@@ -76,6 +76,14 @@ static inline int ds4_gpu_laguna_direct_kv_prefill_env_mode(
     return -1;
 }
 
+static inline int ds4_gpu_laguna_output_head_norm_fuse_env_mode(
+        const char *value) {
+    if (!value || value[0] == '\0' ||
+        (value[0] == '0' && value[1] == '\0')) return 0;
+    if (value[0] == '1' && value[1] == '\0') return 1;
+    return -1;
+}
+
 /* Strict parser shared by the Laguna production selector and focused tests.
  * It is backend-independent so malformed requests can be rejected before a
  * graph is allocated even in a non-Metal build. */
@@ -190,6 +198,23 @@ typedef struct {
 
 int ds4_gpu_init(void);
 void ds4_gpu_cleanup(void);
+
+#ifdef __APPLE__
+/* Process-lifecycle snapshot for the Q8 decode dispatch selectors.  The
+ * graph admission code and every Metal TP-world descriptor consume this same
+ * snapshot.  The snapshot is intentionally immutable for the lifetime of a
+ * process; changing the environment after the first GPU lifecycle probe does
+ * not change an in-flight or subsequently-created graph.  A fresh process is
+ * the reset boundary. */
+typedef struct ds4_gpu_q8_decode_config {
+    int32_t q8_mv_nsg_override; /* -1 malformed, 0 default, 1..8 override */
+    int32_t q8_mv_rows;         /* -1 malformed, otherwise 2 or 4 */
+} ds4_gpu_q8_decode_config;
+
+/* Returns 1 for a valid snapshot and -1 for a malformed explicit selector.
+ * `out` may be NULL when only validation is required. */
+int ds4_gpu_q8_decode_config_snapshot(ds4_gpu_q8_decode_config *out);
+#endif
 
 ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes);
@@ -1087,6 +1112,8 @@ int ds4_gpu_test_laguna_route_counters(uint64_t *direct_kv,
                                        uint64_t *stock_q8);
 int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
                                         uint64_t *bco_true);
+/* Test-only view of the real Q8 descriptor geometry for each TP world. */
+int ds4_gpu_test_q8_decode_nsg_for_world(int world);
 /* Test-only malformed lifecycle injection for fail-before-mutation coverage. */
 void ds4_gpu_test_laguna_set_direct_kv_mode(int mode);
 #endif
@@ -1142,6 +1169,27 @@ int ds4_gpu_matmul_f16_tensor(
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
         uint64_t                n_tok);
+
+/* Opt-in fused decode path: plain RMS norm of x folded into the F16 matvec
+ * (single token).  Bit-identical to ds4_gpu_rms_norm_plain_tensor followed
+ * by ds4_gpu_matmul_f16_tensor on the supported shape class; fails closed
+ * (returns 0) outside it. */
+int ds4_gpu_matmul_f16_rms_norm_mv_tensor(
+        ds4_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint32_t              in_dim,
+        uint32_t              out_dim,
+        const ds4_gpu_tensor *x,
+        float                 eps);
+
+/* Admission-only check for the fused output head.  It validates the literal
+ * selector's requested source/PSO and the exact TEW/shape certificate without
+ * opening a command buffer or mutating activation/KV state. */
+int ds4_gpu_matmul_f16_rms_norm_mv_preflight(
+        uint32_t in_dim,
+        uint32_t out_dim);
 
 /* CUDA batch path: fold an input RMS normalization into the FP16 activation
  * conversion used by the following projection. Returns 0 without touching
@@ -2818,6 +2866,43 @@ int ds4_gpu_glm_router_select_batch_tensor(
         uint32_t                n_expert_used,
         float                   expert_weight_scale,
         uint32_t                n_tokens);
+
+/* Opt-in fused decode router: F32 router-logit matvec + SIMD top-k select
+ * in one dispatch (single token).  Bit-identical to
+ * ds4_gpu_matmul_f32_decode_rows_exact_tensor followed by
+ * ds4_gpu_glm_router_select_batch_tensor on the supported shape class;
+ * fails closed (returns 0) outside it. */
+int ds4_gpu_laguna_router_decode_fused_tensor(
+        ds4_gpu_tensor       *selected,
+        ds4_gpu_tensor       *weights,
+        ds4_gpu_tensor       *probs,
+        ds4_gpu_tensor       *logits,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint64_t              bias_offset,
+        const ds4_gpu_tensor *x,
+        uint32_t              in_dim,
+        uint32_t              n_expert,
+        uint32_t              n_expert_used,
+        float                 expert_weight_scale);
+
+/* Admission-only certificate for the normal one-token Laguna router.  The
+ * check validates shape, source-provided PSO, TEW, and threadgroup capacity
+ * without opening a command buffer or touching router/KV tensors. */
+int ds4_gpu_laguna_router_decode_fused_preflight(
+        uint32_t in_dim,
+        uint32_t n_expert,
+        uint32_t n_expert_used,
+        float    expert_weight_scale);
+
+#ifdef DS4_TEST_HOOKS
+/* Completion-scoped diagnostics for focused production-graph tests. */
+void ds4_gpu_laguna_router_decode_fused_stats_reset(void);
+int ds4_gpu_laguna_router_decode_fused_stats(
+        uint64_t *encoded_dispatches,
+        uint64_t *completed_dispatches);
+#endif
 
 /* Laguna S2.1 decode-router SIMD top-k graph preflight.  Returns 0 when the
  * public opt-in is off, 1 when the exact 256/10/2.5 path is available, and
