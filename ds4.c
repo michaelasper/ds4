@@ -18538,10 +18538,31 @@ static void metal_graph_stream_readahead_spans(
         const ds4_model              *model,
         const ds4_model_map_span_vec *spans) {
     if (!spans) return;
+    /* Spans arrive sorted but big routed-expert tensors stay split into
+     * isolate runs for Metal buffer aliasing. Readahead hints carry no
+     * aliasing semantics, so coalesce adjacent/overlapping runs first: the
+     * kernel sees one F_RDADVISE/madvise range per run instead of one syscall
+     * pair per tensor span. */
+    uint64_t run_off = 0;
+    uint64_t run_end = 0;
     for (uint32_t i = 0; i < spans->len; i++) {
-        metal_graph_stream_readahead_range(model,
-                                           spans->v[i].off,
-                                           spans->v[i].end - spans->v[i].off);
+        const uint64_t off = spans->v[i].off;
+        const uint64_t end = spans->v[i].end;
+        if (end <= off) continue;
+        if (run_end == 0 || off > run_end) {
+            if (run_end != 0) {
+                metal_graph_stream_readahead_range(model,
+                                                   run_off,
+                                                   run_end - run_off);
+            }
+            run_off = off;
+            run_end = end;
+        } else if (end > run_end) {
+            run_end = end;
+        }
+    }
+    if (run_end != 0) {
+        metal_graph_stream_readahead_range(model, run_off, run_end - run_off);
     }
 }
 
