@@ -3545,6 +3545,9 @@ static void test_metal_compressor_ratio4_direct_pool_exact(void) {
 }
 
 static void test_metal_inplace_rope_pair_exact(void) {
+    /* Generic rope-tail primitive coverage only.  These deliberately include
+     * non-Laguna shapes; the production Laguna Q/K matrix is below and uses
+     * the exact 48/8 global and 72/8 SWA geometry. */
     typedef struct {
         uint32_t head_dim;
         uint32_t n_rot;
@@ -8503,23 +8506,35 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
         float ext_factor;
     } qk_case;
     static const qk_case cases[] = {
-        /* SWA RoPE, including a batch that crosses the 512-token window. */
-        { 1,  48, 8,    37, 128, 0.0f },
+        /* Production SWA geometry: 72 Q / 8 K, head_dim=128, n_rot=128,
+         * freq_base=10000, scale=1, and the full Laguna context (ext=0). */
+        { 1, 72, 8,    37, 128, 0.0f },
         { 17, 72, 8,   510, 128, 0.0f },
-        { 32, 48, 8,  1024, 128, 0.0f },
-        /* Global YaRN RoPE, including larger batches and odd head counts. */
-        { 1,  72, 8, 65533,  64, 1.0f },
+        { 32, 72, 8,  1024, 128, 0.0f },
+        /* Production global YaRN geometry: 48 Q / 8 K, head_dim=128,
+         * n_rot=64, freq_base=500000, scale=1/32, original ctx=8192,
+         * and beta_fast/beta_slow=32/1 (ext=1). */
+        { 1,  48, 8, 65533,  64, 1.0f },
+        /* Deliberately malformed geometry: proves env-on rejects a shape
+         * outside either production layer family. */
         { 3,   7, 3,  2047,  64, 1.0f },
-        { 64, 72, 8,  8191,  64, 1.0f },
+        { 64, 48, 8,  8191,  64, 1.0f },
     };
     const uint32_t head_dim = 128;
+    const char *simd32_env_name =
+        "DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32";
+    char *saved_simd32_env = test_save_env(simd32_env_name);
+    TEST_ASSERT(unsetenv(simd32_env_name) == 0);
     const uint64_t page = (uint64_t)getpagesize();
     const uint64_t k_weight_offset = page;
     const uint64_t model_size = 2u * page;
     void *model_raw = NULL;
     TEST_ASSERT(posix_memalign(
                     &model_raw, (size_t)page, (size_t)model_size) == 0);
-    if (!model_raw) return;
+    if (!model_raw) {
+        test_restore_env(simd32_env_name, saved_simd32_env);
+        return;
+    }
     memset(model_raw, 0, (size_t)model_size);
 
     float *q_weight = model_raw;
@@ -8532,9 +8547,51 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
 
     size_t q_mismatches = 0;
     size_t k_mismatches = 0;
+    size_t simd_q_mismatches = 0;
+    size_t simd_k_mismatches = 0;
+    size_t malformed_mismatches = 0;
+    size_t rejected_mismatches = 0;
     uint32_t max_ulp = 0;
+    uint64_t simd_encoded_dispatches_before =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+    const char *laguna_source_override = getenv("DS4_METAL_LAGUNA_SOURCE");
+    const bool laguna_source_override_active =
+        laguna_source_override && laguna_source_override[0];
+    size_t exact_cases = 0;
+    bool simd32_available = false;
+    bool simd32_capability_known = false;
+    TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode() == 0);
+    TEST_ASSERT(setenv(simd32_env_name, "", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode() == 0);
+    TEST_ASSERT(setenv(simd32_env_name, "0", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode() == 0);
+    TEST_ASSERT(setenv(simd32_env_name, "1", 1) == 0);
+    TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode() == 1);
+    static const char *const malformed_env_values[] = {
+        "true", "yes", "on", " 1", "01", "0 ", "-1",
+    };
+    for (size_t mi = 0;
+         mi < sizeof(malformed_env_values) / sizeof(malformed_env_values[0]);
+         mi++) {
+        TEST_ASSERT(setenv(simd32_env_name, malformed_env_values[mi], 1) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode() < 0);
+    }
+    TEST_ASSERT(unsetenv(simd32_env_name) == 0);
+    ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+    static const float adversarial_values[] = {
+        0.0f, -0.0f,
+        1.40129846e-45f, -1.40129846e-45f,
+        1.17549435e-38f, -1.17549435e-38f,
+        65504.0f, -65504.0f,
+        1.0e18f, -1.0e18f,
+    };
     for (size_t ci = 0; ci < sizeof(cases) / sizeof(cases[0]); ci++) {
         const qk_case *c = &cases[ci];
+        const bool exact_geometry =
+            (c->n_q_head == 48u || c->n_q_head == 72u) &&
+            c->n_k_head == 8u && c->n_rot <= head_dim &&
+            (c->n_rot == 64u || c->n_rot == 128u);
+        if (exact_geometry) exact_cases++;
         const uint64_t q_values =
             (uint64_t)c->n_tokens * c->n_q_head * head_dim;
         const uint64_t k_values =
@@ -8545,18 +8602,26 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
         ds4_gpu_tensor *ref_k = ds4_gpu_tensor_alloc(k_bytes);
         ds4_gpu_tensor *pair_q = ds4_gpu_tensor_alloc(q_bytes);
         ds4_gpu_tensor *pair_k = ds4_gpu_tensor_alloc(k_bytes);
+        ds4_gpu_tensor *simd_q = ds4_gpu_tensor_alloc(q_bytes);
+        ds4_gpu_tensor *simd_k = ds4_gpu_tensor_alloc(k_bytes);
         float *q_input = malloc((size_t)q_bytes);
         float *k_input = malloc((size_t)k_bytes);
         float *ref_q_host = malloc((size_t)q_bytes);
         float *ref_k_host = malloc((size_t)k_bytes);
         float *pair_q_host = malloc((size_t)q_bytes);
         float *pair_k_host = malloc((size_t)k_bytes);
+        float *simd_q_host = malloc((size_t)q_bytes);
+        float *simd_k_host = malloc((size_t)k_bytes);
         TEST_ASSERT(ref_q && ref_k && pair_q && pair_k &&
-                    q_input && k_input && ref_q_host && ref_k_host &&
-                    pair_q_host && pair_k_host);
+                    simd_q && simd_k && q_input && k_input &&
+                    ref_q_host && ref_k_host && pair_q_host && pair_k_host &&
+                    simd_q_host && simd_k_host);
         if (!ref_q || !ref_k || !pair_q || !pair_k ||
-            !q_input || !k_input || !ref_q_host || !ref_k_host ||
-            !pair_q_host || !pair_k_host) {
+            !simd_q || !simd_k || !q_input || !k_input ||
+            !ref_q_host || !ref_k_host || !pair_q_host || !pair_k_host ||
+            !simd_q_host || !simd_k_host) {
+            free(simd_k_host);
+            free(simd_q_host);
             free(pair_k_host);
             free(pair_q_host);
             free(ref_k_host);
@@ -8567,46 +8632,64 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
             ds4_gpu_tensor_free(pair_q);
             ds4_gpu_tensor_free(ref_k);
             ds4_gpu_tensor_free(ref_q);
+            ds4_gpu_tensor_free(simd_k);
+            ds4_gpu_tensor_free(simd_q);
             continue;
         }
 
         for (uint64_t i = 0; i < q_values; i++) {
-            const int v = (int)((i * 37u + (i >> 3u) * 11u +
-                                 ci * 13u + 7u) % 211u) - 105;
-            q_input[i] = (float)v / 137.0f;
+            if (ci + 1u == sizeof(cases) / sizeof(cases[0])) {
+                q_input[i] = adversarial_values[
+                    (i * 7u + (i >> 4u)) %
+                    (sizeof(adversarial_values) / sizeof(adversarial_values[0]))];
+            } else {
+                const int v = (int)((i * 37u + (i >> 3u) * 11u +
+                                     ci * 13u + 7u) % 211u) - 105;
+                q_input[i] = (float)v / 137.0f;
+            }
         }
         for (uint64_t i = 0; i < k_values; i++) {
-            const int v = (int)((i * 41u + (i >> 2u) * 17u +
-                                 ci * 23u + 5u) % 199u) - 99;
-            k_input[i] = (float)v / 149.0f;
+            if (ci + 1u == sizeof(cases) / sizeof(cases[0])) {
+                k_input[i] = adversarial_values[
+                    (i * 11u + (i >> 3u) + 3u) %
+                    (sizeof(adversarial_values) / sizeof(adversarial_values[0]))];
+            } else {
+                const int v = (int)((i * 41u + (i >> 2u) * 17u +
+                                     ci * 23u + 5u) % 199u) - 99;
+                k_input[i] = (float)v / 149.0f;
+            }
         }
         TEST_ASSERT(ds4_gpu_tensor_write(ref_q, 0, q_input, q_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_write(pair_q, 0, q_input, q_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_write(ref_k, 0, k_input, k_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_write(pair_k, 0, k_input, k_bytes) != 0);
 
-        const float freq_base = c->ext_factor != 0.0f ? 160000.0f : 10000.0f;
-        const float freq_scale = c->ext_factor != 0.0f ? 1.0f / 16.0f : 1.0f;
-        const uint32_t n_ctx_orig = c->ext_factor != 0.0f ? 65536u : 0u;
-        const float attn_factor = c->ext_factor != 0.0f
-            ? 1.0f / (1.0f + 0.1f * logf(1.0f / freq_scale))
-            : 1.0f;
+        const bool global_rope = c->ext_factor != 0.0f;
+        const float freq_base = global_rope ? 500000.0f : 10000.0f;
+        const float freq_scale = global_rope ? 1.0f / 32.0f : 1.0f;
+        const uint32_t n_ctx_orig = global_rope ? 8192u : 262144u;
+        const float attn_factor = 1.0f;
+        const float beta_fast = global_rope ? 32.0f : 0.0f;
+        const float beta_slow = global_rope ? 1.0f : 0.0f;
         TEST_ASSERT(ds4_gpu_laguna_head_rms_norm_rope_tensor(
                         ref_q, model_raw, model_size, 0,
                         c->n_tokens, c->n_q_head, head_dim, c->n_rot,
                         c->pos0, n_ctx_orig, freq_base, freq_scale,
-                        c->ext_factor, attn_factor, 32.0f, 1.0f, 1e-6f) != 0);
+                        c->ext_factor, attn_factor, beta_fast, beta_slow,
+                        1e-6f) != 0);
         TEST_ASSERT(ds4_gpu_laguna_head_rms_norm_rope_tensor(
                         ref_k, model_raw, model_size, k_weight_offset,
                         c->n_tokens, c->n_k_head, head_dim, c->n_rot,
                         c->pos0, n_ctx_orig, freq_base, freq_scale,
-                        c->ext_factor, attn_factor, 32.0f, 1.0f, 1e-6f) != 0);
+                        c->ext_factor, attn_factor, beta_fast, beta_slow,
+                        1e-6f) != 0);
         TEST_ASSERT(ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
                         pair_q, pair_k, model_raw, model_size,
                         0, k_weight_offset, c->n_tokens,
                         c->n_q_head, c->n_k_head, head_dim, c->n_rot,
                         c->pos0, n_ctx_orig, freq_base, freq_scale,
-                        c->ext_factor, attn_factor, 32.0f, 1.0f, 1e-6f) != 0);
+                        c->ext_factor, attn_factor, beta_fast, beta_slow,
+                        1e-6f) != 0);
         TEST_ASSERT(ds4_gpu_tensor_read(
                         ref_q, 0, ref_q_host, q_bytes) != 0);
         TEST_ASSERT(ds4_gpu_tensor_read(
@@ -8616,6 +8699,58 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
         TEST_ASSERT(ds4_gpu_tensor_read(
                         pair_k, 0, pair_k_host, k_bytes) != 0);
 
+        TEST_ASSERT(ds4_gpu_tensor_write(simd_q, 0, q_input, q_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(simd_k, 0, k_input, k_bytes) != 0);
+        TEST_ASSERT(setenv(simd32_env_name, "1", 1) == 0);
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+        TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                        c->n_q_head, c->n_k_head, head_dim, c->n_rot) == 1 ||
+                    !exact_geometry);
+        const uint64_t dispatch_before_case =
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+        const int simd_ok = ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+            simd_q, simd_k, model_raw, model_size,
+            0, k_weight_offset, c->n_tokens,
+            c->n_q_head, c->n_k_head, head_dim, c->n_rot,
+            c->pos0, n_ctx_orig, freq_base, freq_scale,
+            c->ext_factor, attn_factor, beta_fast, beta_slow, 1e-6f);
+        if (exact_geometry) {
+            if (!simd32_capability_known) {
+                simd32_capability_known = true;
+                simd32_available = simd_ok != 0;
+            }
+            TEST_ASSERT((simd_ok != 0) == simd32_available);
+        }
+        if (exact_geometry && simd32_available) {
+            if (ds4_gpu_commands_active()) {
+                TEST_ASSERT(ds4_gpu_end_commands() != 0);
+            }
+            TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                        dispatch_before_case + 1u);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            simd_q, 0, simd_q_host, q_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            simd_k, 0, simd_k_host, k_bytes) != 0);
+        } else if (!exact_geometry || !simd32_available) {
+            /* Invalid geometry or an unavailable source pipeline are hard
+             * failures under env-on; neither may silently execute stock PSOs. */
+            if (!exact_geometry) TEST_ASSERT(simd_ok == 0);
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                        dispatch_before_case);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            simd_q, 0, simd_q_host, q_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            simd_k, 0, simd_k_host, k_bytes) != 0);
+            rejected_mismatches +=
+                test_compare_float_bits(q_input, simd_q_host,
+                                        (size_t)q_values).mismatch_count +
+                test_compare_float_bits(k_input, simd_k_host,
+                                        (size_t)k_values).mismatch_count;
+        }
+        TEST_ASSERT(unsetenv(simd32_env_name) == 0);
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+
         const test_float_compare_stats q_stats =
             test_compare_float_bits(ref_q_host, pair_q_host, (size_t)q_values);
         const test_float_compare_stats k_stats =
@@ -8624,27 +8759,234 @@ static void test_metal_laguna_qk_norm_rope_pair_exact(void) {
         k_mismatches += k_stats.mismatch_count;
         if (q_stats.max_ulp > max_ulp) max_ulp = q_stats.max_ulp;
         if (k_stats.max_ulp > max_ulp) max_ulp = k_stats.max_ulp;
+        if (exact_geometry && simd32_available) {
+            const test_float_compare_stats simd_q_stats =
+                test_compare_float_bits(pair_q_host, simd_q_host,
+                                        (size_t)q_values);
+            const test_float_compare_stats simd_k_stats =
+                test_compare_float_bits(pair_k_host, simd_k_host,
+                                        (size_t)k_values);
+            simd_q_mismatches += simd_q_stats.mismatch_count;
+            simd_k_mismatches += simd_k_stats.mismatch_count;
+        }
+
+        /* A malformed selector is fatal, not a safety fallback.  Re-run one
+         * exact case from clean input and prove that no command or output
+         * mutation occurred. */
+        if (ci == 0u) {
+            const uint64_t malformed_dispatches =
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+            TEST_ASSERT(setenv(simd32_env_name, "definitely-not-a-bool", 1) == 0);
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            simd_q, 0, q_input, q_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            simd_k, 0, k_input, k_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+                            simd_q, simd_k, model_raw, model_size,
+                            0, k_weight_offset, c->n_tokens,
+                            c->n_q_head, c->n_k_head, head_dim, c->n_rot,
+                            c->pos0, n_ctx_orig, freq_base, freq_scale,
+                            c->ext_factor, attn_factor, beta_fast, beta_slow,
+                            1e-6f) == 0);
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                        malformed_dispatches);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            simd_q, 0, simd_q_host, q_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_read(
+                            simd_k, 0, simd_k_host, k_bytes) != 0);
+            const test_float_compare_stats malformed_q_stats =
+                test_compare_float_bits(q_input, simd_q_host,
+                                        (size_t)q_values);
+            const test_float_compare_stats malformed_k_stats =
+                test_compare_float_bits(k_input, simd_k_host,
+                                        (size_t)k_values);
+            malformed_mismatches += malformed_q_stats.mismatch_count +
+                malformed_k_stats.mismatch_count;
+            TEST_ASSERT(unsetenv(simd32_env_name) == 0);
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+        }
 
         free(pair_k_host);
         free(pair_q_host);
         free(ref_k_host);
         free(ref_q_host);
+        free(simd_k_host);
+        free(simd_q_host);
         free(k_input);
         free(q_input);
         ds4_gpu_tensor_free(pair_k);
         ds4_gpu_tensor_free(pair_q);
         ds4_gpu_tensor_free(ref_k);
         ds4_gpu_tensor_free(ref_q);
+        ds4_gpu_tensor_free(simd_k);
+        ds4_gpu_tensor_free(simd_q);
     }
 
     fprintf(stderr,
             "ds4-test: Laguna paired Q/K norm/RoPE exact "
-            "q_mismatches=%zu k_mismatches=%zu max_ulp=%u\n",
-            q_mismatches, k_mismatches, max_ulp);
+            "q_mismatches=%zu k_mismatches=%zu simd_q_mismatches=%zu "
+            "simd_k_mismatches=%zu malformed_mismatches=%zu "
+            "rejected_mismatches=%zu encoded_dispatches=%llu max_ulp=%u\n",
+            q_mismatches, k_mismatches, simd_q_mismatches,
+            simd_k_mismatches, malformed_mismatches, rejected_mismatches,
+            (unsigned long long)(
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() -
+                simd_encoded_dispatches_before),
+            max_ulp);
+
+    /* The selector is shape-gated as well as opt-in.  A head_dim=64 call
+     * must fail under env-on and leave the output/counter untouched rather
+     * than silently measuring the ordinary PSO. */
+    const uint32_t fallback_head_dim = 64u;
+    const uint64_t fallback_bytes =
+        (uint64_t)fallback_head_dim * sizeof(float);
+    ds4_gpu_tensor *fallback_simd_q = ds4_gpu_tensor_alloc(fallback_bytes);
+    ds4_gpu_tensor *fallback_simd_k = ds4_gpu_tensor_alloc(fallback_bytes);
+    float fallback_q_input[64];
+    float fallback_k_input[64];
+    float fallback_simd_q_host[64];
+    float fallback_simd_k_host[64];
+    TEST_ASSERT(fallback_simd_q && fallback_simd_k);
+    size_t shape_fallback_mismatches = 0;
+    if (fallback_simd_q && fallback_simd_k) {
+        for (uint32_t i = 0; i < fallback_head_dim; i++) {
+            fallback_q_input[i] = (float)((int)(i * 17u % 101u) - 50) / 64.0f;
+            fallback_k_input[i] = (float)((int)(i * 23u % 97u) - 48) / 72.0f;
+        }
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        fallback_simd_q, 0, fallback_q_input, fallback_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        fallback_simd_k, 0, fallback_k_input, fallback_bytes) != 0);
+        TEST_ASSERT(setenv(simd32_env_name, "1", 1) == 0);
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+        const uint64_t shape_dispatches =
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+        TEST_ASSERT(ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+                        fallback_simd_q, fallback_simd_k, model_raw, model_size,
+                        0, k_weight_offset, 1, 1, 1, fallback_head_dim, 64,
+                        9, 0, 10000.0f, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f,
+                        1e-6f) == 0);
+        TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                    shape_dispatches);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fallback_simd_q, 0, fallback_simd_q_host, fallback_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fallback_simd_k, 0, fallback_simd_k_host, fallback_bytes) != 0);
+        shape_fallback_mismatches =
+            test_compare_float_bits(fallback_q_input, fallback_simd_q_host,
+                                    fallback_head_dim).mismatch_count +
+            test_compare_float_bits(fallback_k_input, fallback_simd_k_host,
+                                    fallback_head_dim).mismatch_count;
+        TEST_ASSERT(shape_fallback_mismatches == 0);
+        TEST_ASSERT(unsetenv(simd32_env_name) == 0);
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+    }
+    ds4_gpu_tensor_free(fallback_simd_k);
+    ds4_gpu_tensor_free(fallback_simd_q);
+
     TEST_ASSERT(q_mismatches == 0);
     TEST_ASSERT(k_mismatches == 0);
+    TEST_ASSERT(simd_q_mismatches == 0);
+    TEST_ASSERT(simd_k_mismatches == 0);
+    TEST_ASSERT(malformed_mismatches == 0);
+    TEST_ASSERT(rejected_mismatches == 0);
+    TEST_ASSERT(shape_fallback_mismatches == 0);
+    TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                simd_encoded_dispatches_before +
+                (simd32_available ? exact_cases : 0u));
+    TEST_ASSERT(simd32_capability_known);
+    if (!laguna_source_override_active) {
+        TEST_ASSERT(simd32_available);
+        TEST_ASSERT(exact_cases != 0u);
+    }
     TEST_ASSERT(max_ulp == 0);
+
+    /* False-pass guard for graph evidence: a support graph may have advanced
+     * the low-level encoded counter before the target call.  A proof that
+     * snapshots only after support would see two dispatches and could mistake
+     * that movement for one target dispatch; the target-scoped delta below is
+     * exactly one after the target batch is ended/waited. */
+    uint64_t scoped_support_dispatches = 0;
+    if (simd32_available) {
+        const uint64_t q_bytes = (uint64_t)48u * head_dim * sizeof(float);
+        const uint64_t k_bytes = (uint64_t)8u * head_dim * sizeof(float);
+        ds4_gpu_tensor *support_q = ds4_gpu_tensor_alloc(q_bytes);
+        ds4_gpu_tensor *support_k = ds4_gpu_tensor_alloc(k_bytes);
+        float *support_q_host = calloc(1, (size_t)q_bytes);
+        float *support_k_host = calloc(1, (size_t)k_bytes);
+        TEST_ASSERT(support_q && support_k && support_q_host && support_k_host);
+        if (support_q && support_k && support_q_host && support_k_host) {
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            support_q, 0, support_q_host, q_bytes) != 0);
+            TEST_ASSERT(ds4_gpu_tensor_write(
+                            support_k, 0, support_k_host, k_bytes) != 0);
+            TEST_ASSERT(setenv(simd32_env_name, "1", 1) == 0);
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+            const uint64_t support_route_before =
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+            TEST_ASSERT(ds4_gpu_laguna_head_rms_norm_rope_tensor(
+                            support_k, model_raw, model_size,
+                            k_weight_offset, 1, 8, head_dim, 128,
+                            37, 262144u, 10000.0f, 1.0f,
+                            0.0f, 1.0f, 0.0f, 0.0f, 1e-6f) == 0);
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                        support_route_before);
+            TEST_ASSERT(setenv(simd32_env_name, "not-a-selector", 1) == 0);
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+            TEST_ASSERT(ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+                            support_k, model_raw, model_size,
+                            k_weight_offset, 1, 8, head_dim, 128,
+                            37, 262144u, 10000.0f, 1.0f,
+                            0.0f, 1.0f, 0.0f, 0.0f, 1e-6f) == 0);
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                        support_route_before);
+            TEST_ASSERT(setenv(simd32_env_name, "1", 1) == 0);
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+            TEST_ASSERT(ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+                            support_k, model_raw, model_size,
+                            k_weight_offset, 1, 8, head_dim, 128,
+                            37, 262144u, 10000.0f, 1.0f,
+                            0.0f, 1.0f, 0.0f, 0.0f, 1e-6f) != 0);
+            TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                        support_route_before);
+            const uint64_t support_before =
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+                            support_q, support_k, model_raw, model_size,
+                            0, k_weight_offset, 1, 48, 8, head_dim, 64,
+                            65533, 8192u, 500000.0f, 1.0f / 32.0f,
+                            1.0f, 1.0f, 32.0f, 1.0f, 1e-6f) != 0);
+            TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
+            const uint64_t target_before =
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+            TEST_ASSERT(ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+                            support_q, support_k, model_raw, model_size,
+                            0, k_weight_offset, 1, 48, 8, head_dim, 64,
+                            65533, 8192u, 500000.0f, 1.0f / 32.0f,
+                            1.0f, 1.0f, 32.0f, 1.0f, 1e-6f) != 0);
+            TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
+            const uint64_t after_target =
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+            TEST_ASSERT(target_before > support_before);
+            TEST_ASSERT(after_target - support_before == 2u);
+            TEST_ASSERT(after_target - target_before == 1u);
+            scoped_support_dispatches = 2u;
+            TEST_ASSERT(unsetenv(simd32_env_name) == 0);
+        }
+        free(support_k_host);
+        free(support_q_host);
+        ds4_gpu_tensor_free(support_k);
+        ds4_gpu_tensor_free(support_q);
+    }
+    TEST_ASSERT(ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() ==
+                simd_encoded_dispatches_before +
+                (simd32_available ? exact_cases : 0u) +
+                scoped_support_dispatches);
     free(model_raw);
+    test_restore_env(simd32_env_name, saved_simd32_env);
+    ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
 }
 #endif
 
@@ -13714,6 +14056,7 @@ static void test_print_help(const char *prog) {
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK=1  Enable exact finite-domain Laguna router top-k SIMD selector.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE=1  Collect optimized/fallback selector row counters.");
     puts("  DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED=1  Enable the strict opt-in normal one-token Laguna fused router.");
+    puts("  DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32=1  Require exact Laguna Q/K norm+RoPE SIMD32 (only literal 1 enables; invalid values fail).");
     puts("  DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED=1  Enable ordinary Laguna prefill paired Q/K norm/RoPE.");
     puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU=1  Enable opt-in Laguna leading-dense Q8 fused gate/up+SwiGLU.");
     puts("  DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE=1  Report each fused/stock route once after a waited graph.");

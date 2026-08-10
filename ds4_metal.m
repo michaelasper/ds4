@@ -295,6 +295,18 @@ static id<MTLComputePipelineState> g_laguna_routed_shared_q4_down_pipeline;
 static id<MTLComputePipelineState> g_laguna_routed_shared_q6_down_pipeline;
 static id<MTLComputePipelineState> g_laguna_head_norm_rope_pipeline;
 static id<MTLComputePipelineState> g_laguna_qk_head_norm_rope_pipeline;
+/* The 32-lane Laguna Q/K retile is deliberately lazy.  Keeping it out of
+ * init-time required PSOs preserves env-off compatibility with older
+ * DS4_METAL_LAGUNA_SOURCE overrides; an env-on preflight fails clearly if the
+ * override predates this contract. */
+static id<MTLComputePipelineState> g_laguna_qk_head_norm_rope_simd32_pipeline;
+static int g_laguna_qk_head_norm_rope_simd32_pipeline_checked;
+static int g_laguna_qk_head_norm_rope_simd32_invalid_env_reported;
+static uint64_t g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count;
+/* -2 means the graph has not selected a Q/K plan yet.  Once selected,
+ * consumers never consult getenv for the selector or its trace flag. */
+static int g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
+static int g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
 static id<MTLComputePipelineState> g_laguna_store_kv_pipeline;
 static id<MTLComputePipelineState> g_laguna_attention_pipeline;
 static id<MTLComputePipelineState> g_laguna_stage_kv_pipeline;
@@ -2375,6 +2387,37 @@ ds4_gpu_laguna_add3_rms_norm_pipeline(void) {
 }
 
 static id<MTLComputePipelineState>
+ds4_gpu_laguna_qk_head_norm_rope_simd32_pipeline(void) {
+    if (!g_laguna_qk_head_norm_rope_simd32_pipeline_checked) {
+        g_laguna_qk_head_norm_rope_simd32_pipeline_checked = 1;
+        g_laguna_qk_head_norm_rope_simd32_pipeline =
+            ds4_gpu_get_pipeline(
+                "kernel_laguna_qk_head_rms_norm_rope_neox_simd32");
+    }
+    return g_laguna_qk_head_norm_rope_simd32_pipeline;
+}
+
+static int ds4_gpu_laguna_qk_head_norm_rope_simd32_usable(
+        id<MTLComputePipelineState> pipeline) {
+    if (!pipeline) return 0;
+    if (pipeline.threadExecutionWidth != 32u) {
+        fprintf(stderr,
+                "ds4: Laguna Q/K norm/RoPE SIMD32 pipeline has execution "
+                "width %lu, requires 32; requested configuration fails\n",
+                (unsigned long)pipeline.threadExecutionWidth);
+        return 0;
+    }
+    if (pipeline.maxTotalThreadsPerThreadgroup < 32u) {
+        fprintf(stderr,
+                "ds4: Laguna Q/K norm/RoPE SIMD32 pipeline supports %lu "
+                "threads, needs at least 32; requested configuration fails\n",
+                (unsigned long)pipeline.maxTotalThreadsPerThreadgroup);
+        return 0;
+    }
+    return 1;
+}
+
+static id<MTLComputePipelineState>
 ds4_gpu_mul_mv_f16_rms_norm_pipeline(void) {
     if (!g_mul_mv_f16_rms_norm_pipeline_checked) {
         g_mul_mv_f16_rms_norm_pipeline_checked = 1;
@@ -2507,6 +2550,99 @@ static int ds4_gpu_env_bool(const char *name) {
     return 1;
 }
 
+/* This experiment is intentionally stricter than the legacy presence-based
+ * toggles: a typo must fail before graph work, never silently change the
+ * reduction topology or select the ordinary 128-thread kernel. */
+static int ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode_impl(void) {
+    const char *v = getenv("DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32");
+    if (!v || !v[0] || strcmp(v, "0") == 0) return 0;
+    if (strcmp(v, "1") == 0) return 1;
+    if (!g_laguna_qk_head_norm_rope_simd32_invalid_env_reported) {
+        fprintf(stderr,
+                "ds4: invalid DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32=%s; "
+                "requested configuration is fatal (use unset, empty, 0, or 1)\n",
+                v);
+        g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 1;
+    }
+    return -1;
+}
+
+static int ds4_gpu_laguna_qk_head_norm_rope_simd32_geometry_ok(
+        uint32_t n_q_head,
+        uint32_t n_k_head,
+        uint32_t head_dim,
+        uint32_t n_rot) {
+    return (n_q_head == 48u || n_q_head == 72u) &&
+           n_k_head == 8u && head_dim == 128u &&
+           (n_rot == 64u || n_rot == 128u);
+}
+
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode(void) {
+    return ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode_impl();
+}
+
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached(void) {
+    return g_laguna_qk_head_norm_rope_simd32_plan_mode;
+}
+
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled(void) {
+    return g_laguna_qk_head_norm_rope_simd32_trace_mode == 1;
+}
+
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test(void) {
+    if (g_batch_cb || (g_pending_cbs && [g_pending_cbs count] != 0)) return 0;
+    g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
+    g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
+    g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
+    return 1;
+}
+
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+        uint32_t n_q_head,
+        uint32_t n_k_head,
+        uint32_t head_dim,
+        uint32_t n_rot) {
+    if (g_laguna_qk_head_norm_rope_simd32_plan_mode == -2) {
+        g_laguna_qk_head_norm_rope_simd32_plan_mode =
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode_impl();
+        const char *trace =
+            getenv("DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32_TRACE");
+        g_laguna_qk_head_norm_rope_simd32_trace_mode =
+            trace && strcmp(trace, "1") == 0 ? 1 : 0;
+    }
+    const int mode = g_laguna_qk_head_norm_rope_simd32_plan_mode;
+    if (mode <= 0) return mode;
+    if (!ds4_gpu_laguna_qk_head_norm_rope_simd32_geometry_ok(
+                n_q_head, n_k_head, head_dim, n_rot)) {
+        fprintf(stderr,
+                "ds4: Laguna Q/K norm/RoPE SIMD32 requested but geometry "
+                "is unsupported (q_heads=%u k_heads=%u head_dim=%u n_rot=%u); "
+                "refusing stock fallback\n",
+                n_q_head, n_k_head, head_dim, n_rot);
+        g_laguna_qk_head_norm_rope_simd32_plan_mode = -1;
+        return -1;
+    }
+    if (!g_initialized && !ds4_gpu_init()) {
+        fprintf(stderr,
+                "ds4: Laguna Q/K norm/RoPE SIMD32 requested but Metal "
+                "initialization failed\n");
+        g_laguna_qk_head_norm_rope_simd32_plan_mode = -1;
+        return -1;
+    }
+    id<MTLComputePipelineState> pipeline =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_pipeline();
+    if (!ds4_gpu_laguna_qk_head_norm_rope_simd32_usable(pipeline)) {
+        if (!pipeline) {
+            fprintf(stderr,
+                    "ds4: Laguna Q/K norm/RoPE SIMD32 requested but its "
+                    "pipeline is unavailable; refusing stock fallback\n");
+        }
+        g_laguna_qk_head_norm_rope_simd32_plan_mode = -1;
+        return -1;
+    }
+    return 1;
+}
+
 /* Q8 decode dispatch configuration is a process-lifecycle snapshot.  Keep
  * this parser next to the Metal environment helpers so graph admission and
  * every TP-world descriptor cannot accidentally grow separate getenv caches.
@@ -2522,6 +2658,8 @@ static int ds4_gpu_q8_parse_decimal_selector(
         int         max_value,
         int         zero_is_default,
         int        *value_out) {
+    /* q8 selector parser body follows the merged SIMD32 selector block. */
+
     const char *v = getenv(name);
     if (!v || v[0] == '\0') {
         *value_out = default_value;
@@ -11233,6 +11371,12 @@ void ds4_gpu_cleanup(void) {
         g_laguna_add3_rms_norm_pipeline_checked = 0;
         g_mul_mv_f16_rms_norm_pipeline = nil;
         g_mul_mv_f16_rms_norm_pipeline_checked = 0;
+        g_laguna_qk_head_norm_rope_simd32_pipeline = nil;
+        g_laguna_qk_head_norm_rope_simd32_pipeline_checked = 0;
+        g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
+        g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count = 0;
+        g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
+        g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
         g_rms_norm_scale_pipeline = nil;
         g_dsv4_qkv_rms_norm_pipeline = nil;
         g_dsv4_head_rms_norm_rope_tail_pipeline = nil;
@@ -11405,6 +11549,12 @@ void ds4_gpu_cleanup(void) {
         g_laguna_routed_shared_q6_down_pipeline = nil;
         g_laguna_head_norm_rope_pipeline = nil;
         g_laguna_qk_head_norm_rope_pipeline = nil;
+        g_laguna_qk_head_norm_rope_simd32_pipeline = nil;
+        g_laguna_qk_head_norm_rope_simd32_pipeline_checked = 0;
+        g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
+        g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count = 0;
+        g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
+        g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
         g_laguna_store_kv_pipeline = nil;
         g_laguna_attention_pipeline = nil;
         g_laguna_stage_kv_pipeline = nil;
@@ -36253,6 +36403,15 @@ int ds4_gpu_laguna_qkvg_f16_tensor(
         uint32_t              kv_dim,
         uint32_t              gate_dim,
         const ds4_gpu_tensor *x) {
+    int qk_plan_mode =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    if (qk_plan_mode == -2) {
+        if (ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                    48u, 8u, 128u, 64u) < 0) return 0;
+        qk_plan_mode =
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    }
+    if (qk_plan_mode < 0) return 0;
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (!q || !k || !v || !gate || !model_map || !x || in_dim == 0u ||
         q_dim == 0u || kv_dim == 0u || gate_dim == 0u ||
@@ -36424,7 +36583,10 @@ int ds4_gpu_laguna_attn_output_residual_f16_tensor(
     return 1;
 }
 
-int ds4_gpu_laguna_head_rms_norm_rope_tensor(
+/* Internal single-tensor implementation.  Target callers are rejected while
+ * the explicit paired selector is on; only the named DFlash support wrapper
+ * below may pass allow_selector=true. */
+static int ds4_gpu_laguna_head_rms_norm_rope_tensor_impl(
         ds4_gpu_tensor *x,
         const void     *model_map,
         uint64_t        model_size,
@@ -36441,7 +36603,19 @@ int ds4_gpu_laguna_head_rms_norm_rope_tensor(
         float           attn_factor,
         float           beta_fast,
         float           beta_slow,
-        float           eps) {
+        float           eps,
+        bool            allow_selector) {
+    int selector_mode =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    if (selector_mode == -2) {
+        if (ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                    48u, 8u, 128u, 64u) < 0) return 0;
+        selector_mode =
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    }
+    if (selector_mode < 0 || (selector_mode > 0 && !allow_selector)) {
+        return 0;
+    }
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (!x || !model_map || n_tokens == 0 || n_head == 0 ||
         head_dim == 0 || head_dim > 128u || n_rot == 0 ||
@@ -36509,6 +36683,58 @@ int ds4_gpu_laguna_head_rms_norm_rope_tensor(
     return 1;
 }
 
+int ds4_gpu_laguna_head_rms_norm_rope_tensor(
+        ds4_gpu_tensor *x,
+        const void     *model_map,
+        uint64_t        model_size,
+        uint64_t        weight_offset,
+        uint32_t        n_tokens,
+        uint32_t        n_head,
+        uint32_t        head_dim,
+        uint32_t        n_rot,
+        uint32_t        pos0,
+        uint32_t        n_ctx_orig,
+        float           freq_base,
+        float           freq_scale,
+        float           ext_factor,
+        float           attn_factor,
+        float           beta_fast,
+        float           beta_slow,
+        float           eps) {
+    return ds4_gpu_laguna_head_rms_norm_rope_tensor_impl(
+        x, model_map, model_size, weight_offset, n_tokens, n_head,
+        head_dim, n_rot, pos0, n_ctx_orig, freq_base, freq_scale,
+        ext_factor, attn_factor, beta_fast, beta_slow, eps, false);
+}
+
+/* Explicit DFlash support route.  This is intentionally the stock single-K
+ * PSO even when DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32=1: the selector is a
+ * contract for target Laguna Q/K calls, while support K staging has no Q
+ * operand and must not increment the paired-target evidence counter. */
+int ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+        ds4_gpu_tensor *x,
+        const void     *model_map,
+        uint64_t        model_size,
+        uint64_t        weight_offset,
+        uint32_t        n_tokens,
+        uint32_t        n_head,
+        uint32_t        head_dim,
+        uint32_t        n_rot,
+        uint32_t        pos0,
+        uint32_t        n_ctx_orig,
+        float           freq_base,
+        float           freq_scale,
+        float           ext_factor,
+        float           attn_factor,
+        float           beta_fast,
+        float           beta_slow,
+        float           eps) {
+    return ds4_gpu_laguna_head_rms_norm_rope_tensor_impl(
+        x, model_map, model_size, weight_offset, n_tokens, n_head,
+        head_dim, n_rot, pos0, n_ctx_orig, freq_base, freq_scale,
+        ext_factor, attn_factor, beta_fast, beta_slow, eps, true);
+}
+
 int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         ds4_gpu_tensor *q,
         ds4_gpu_tensor *k,
@@ -36530,12 +36756,26 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         float           beta_fast,
         float           beta_slow,
         float           eps) {
+    int simd32_mode =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    if (simd32_mode == -2) {
+        if (ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                    n_q_head, n_k_head, head_dim, n_rot) < 0) return 0;
+        simd32_mode =
+            ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    }
+    if (simd32_mode < 0) return 0;
+    if (simd32_mode > 0 &&
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                n_q_head, n_k_head, head_dim, n_rot) != 1) {
+        return 0;
+    }
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (!q || !k || !model_map || n_tokens == 0 || n_q_head == 0 ||
         n_k_head == 0 || n_q_head > UINT32_MAX - n_k_head ||
         head_dim == 0 || head_dim > 128u || n_rot == 0 ||
         n_rot > head_dim || (n_rot & 1u) != 0u ||
-        pos0 > UINT32_MAX - n_tokens ||
+        pos0 > UINT32_MAX - (n_tokens - 1u) ||
         !isfinite(freq_base) || freq_base <= 0.0f ||
         !isfinite(freq_scale) || freq_scale <= 0.0f ||
         !isfinite(ext_factor) || !isfinite(attn_factor) ||
@@ -36568,9 +36808,21 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         id<MTLBuffer> k_weightbuf = ds4_gpu_wrap_model_range(
             model_map, model_size, k_weight_offset, weight_bytes,
             &k_weight_inner);
-        id<MTLComputePipelineState> pipeline = ds4_gpu_hot_pipeline(
-            g_laguna_qk_head_norm_rope_pipeline,
-            "kernel_laguna_qk_head_rms_norm_rope_neox");
+        const bool use_simd32 = simd32_mode > 0;
+        id<MTLComputePipelineState> pipeline = nil;
+        const char *pipeline_name =
+            "kernel_laguna_qk_head_rms_norm_rope_neox";
+        if (use_simd32) {
+            id<MTLComputePipelineState> simd32_pipeline =
+                ds4_gpu_laguna_qk_head_norm_rope_simd32_pipeline();
+            pipeline = simd32_pipeline;
+            pipeline_name =
+                "kernel_laguna_qk_head_rms_norm_rope_neox_simd32";
+        } else {
+            pipeline = ds4_gpu_hot_pipeline(
+                g_laguna_qk_head_norm_rope_pipeline,
+                "kernel_laguna_qk_head_rms_norm_rope_neox");
+        }
         if (!qbuf || !kbuf || !q_weightbuf || !k_weightbuf || !pipeline) {
             return 0;
         }
@@ -36594,6 +36846,13 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
         id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        if (!enc) {
+            if (owned) {
+                (void)ds4_gpu_finish_command_buffer(
+                    cb, owned, "Laguna Q/K head norm/RoPE encoder unavailable");
+            }
+            return 0;
+        }
         [enc setComputePipelineState:pipeline];
         [enc setBytes:&args length:sizeof(args) atIndex:0];
         [enc setBuffer:qbuf offset:ds4_gpu_tensor_offset(q) atIndex:1];
@@ -36603,14 +36862,38 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         [enc setBytes:&n_q_head length:sizeof(n_q_head) atIndex:5];
         [enc setThreadgroupMemoryLength:128u * sizeof(float) atIndex:0];
         [enc dispatchThreadgroups:MTLSizeMake(n_q_head + n_k_head, n_tokens, 1)
-             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+             threadsPerThreadgroup:MTLSizeMake(use_simd32 ? 32u : 128u,
+                                               1, 1)];
+        if (use_simd32) {
+            /* This is encoded-dispatch evidence, not completion accounting:
+             * graph callers may keep the command batch open. */
+            g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count++;
+        }
         ds4_gpu_end_compute_encoder(cb, enc);
         if (!ds4_gpu_finish_command_buffer(
-                cb, owned, "Laguna Q/K head norm/RoPE")) {
+                cb, owned, use_simd32
+                    ? "Laguna Q/K head norm/RoPE SIMD32"
+                    : "Laguna Q/K head norm/RoPE")) {
             return 0;
+        }
+        if (use_simd32) {
+            if (ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) {
+                fprintf(stderr,
+                        "ds4: Laguna Q/K norm/RoPE SIMD32 encoded kernel=%s "
+                        "tew=%lu max_threads=%lu tokens=%u q_heads=%u "
+                        "k_heads=%u\n",
+                        pipeline_name,
+                        (unsigned long)pipeline.threadExecutionWidth,
+                        (unsigned long)pipeline.maxTotalThreadsPerThreadgroup,
+                        n_tokens, n_q_head, n_k_head);
+            }
         }
     }
     return 1;
+}
+
+uint64_t ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count(void) {
+    return g_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count;
 }
 
 static int ds4_gpu_encode_laguna_flash_attention_decode(

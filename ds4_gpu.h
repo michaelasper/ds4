@@ -1578,6 +1578,8 @@ int ds4_gpu_glm_rope_tail_tensor(
         float           beta_fast,
         float           beta_slow);
 
+/* Target graph single-tensor form: rejects the paired selector when it is
+ * requested, so target callers cannot silently split Q/K. */
 int ds4_gpu_laguna_head_rms_norm_rope_tensor(
         ds4_gpu_tensor *x,
         const void     *model_map,
@@ -1596,6 +1598,29 @@ int ds4_gpu_laguna_head_rms_norm_rope_tensor(
         float           beta_fast,
         float           beta_slow,
         float           eps);
+
+#ifdef __APPLE__
+/* DFlash support-only K staging.  This remains the stock single-tensor PSO
+ * under the target Q/K SIMD32 selector and is not target-path evidence. */
+int ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+        ds4_gpu_tensor *x,
+        const void     *model_map,
+        uint64_t        model_size,
+        uint64_t        weight_offset,
+        uint32_t        n_tokens,
+        uint32_t        n_head,
+        uint32_t        head_dim,
+        uint32_t        n_rot,
+        uint32_t        pos0,
+        uint32_t        n_ctx_orig,
+        float           freq_base,
+        float           freq_scale,
+        float           ext_factor,
+        float           attn_factor,
+        float           beta_fast,
+        float           beta_slow,
+        float           eps);
+#endif
 
 int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         ds4_gpu_tensor *q,
@@ -1618,6 +1643,30 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         float           beta_fast,
         float           beta_slow,
         float           eps);
+
+#ifdef __APPLE__
+/* Strict opt-in state: -1 is a malformed value, 0 is unset/empty/0, and 1 is
+ * the literal requested value.  These diagnostics do not encode graph work. */
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode(void);
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+        uint32_t n_q_head,
+        uint32_t n_k_head,
+        uint32_t head_dim,
+        uint32_t n_rot);
+/* Frozen graph-plan state: -2 is unplanned, -1 malformed/unavailable, 0 is
+ * disabled, and 1 is the literal opt-in.  Production routes use these
+ * cached values instead of reparsing the environment per layer. */
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached(void);
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled(void);
+/* Returns 1 when the frozen plan was reset, 0 when active/pending work made
+ * reset unsafe.  Production never calls this test-only hook. */
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test(void);
+
+/* Encoded-dispatch evidence for the distinct SIMD32 PSO.  This is not a
+ * completion counter: callers must end/wait their command batch before using
+ * it as path evidence. */
+uint64_t ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count(void);
+#endif
 
 int ds4_gpu_laguna_qkvg_f16_tensor(
         ds4_gpu_tensor       *q,

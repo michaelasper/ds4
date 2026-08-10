@@ -50147,6 +50147,16 @@ typedef struct {
     /* Evidence is attached to this graph/command-buffer owner.  It is
      * promoted to the process report only after the owning work is waited. */
     laguna_dense_q8_gate_up_swiglu_counters dense_q8_pending;
+#ifdef __APPLE__
+    /* A deferred DFlash verifier keeps the target command buffer open while
+     * support features are appended.  Retain only the target's encoded-count
+     * snapshot until that command is actually completed. */
+    uint64_t qk_simd32_target_encoded_before;
+    uint32_t qk_simd32_target_n_tokens;
+    bool qk_simd32_target_capture;
+    bool qk_simd32_target_verifier;
+    bool qk_simd32_target_evidence_pending;
+#endif
 } ds4_laguna_gpu_graph;
 
 #ifdef __APPLE__
@@ -51560,7 +51570,13 @@ static bool dflash_graph_encode_inject(
                                      g->norm, n_rows);
         }
         if (ok) {
+#ifdef __APPLE__
+            /* Support K staging is deliberately stock and does not certify
+             * the paired target route when the selector is enabled. */
+            ok = ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+#else
             ok = ds4_gpu_laguna_head_rms_norm_rope_tensor(
+#endif
                      g->k,
                      weight_map,
                      weight_map_size,
@@ -51604,6 +51620,19 @@ static bool dflash_graph_encode_inject(
     }
     return ok;
 }
+
+#ifdef __APPLE__
+static bool laguna_metal_qk_norm_rope_simd32_preflight(void);
+static void laguna_metal_qk_norm_rope_simd32_trace_route(
+        const char *route,
+        uint32_t    n_tokens,
+        bool        capture,
+        bool        verifier);
+static void laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
+        ds4_laguna_gpu_graph *g);
+static bool laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
+        ds4_laguna_gpu_graph *g);
+#endif
 
 static bool dflash_graph_draft_block(
         ds4_dflash_gpu_graph *g,
@@ -51841,6 +51870,124 @@ static bool dflash_graph_draft_block(
 }
 
 #ifdef __APPLE__
+/* The explicit Q/K SIMD32 selector is a graph contract, not a kernel hint.
+ * Validate it before any graph scratch, command buffer, or KV mutation.  The
+ * Laguna S 2.1 model alternates 48- and 72-query-head layers, with 8 KV heads
+ * and 64/128 rotary dimensions for global/SWA layers respectively. */
+static bool laguna_metal_qk_norm_rope_simd32_preflight(void) {
+    int mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    if (mode == -2) {
+        mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                48u, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, 64u);
+        mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    }
+    if (mode < 0) return false;
+    if (mode == 0) return true;
+    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) {
+        fprintf(stderr,
+                "ds4: Laguna Q/K norm/RoPE SIMD32 requested outside the "
+                "Laguna S 2.1 graph\n");
+        return false;
+    }
+    static const uint32_t q_heads[] = { 48u, 72u };
+    static const uint32_t n_rots[] = { 64u, 128u };
+    for (size_t hi = 0; hi < sizeof(q_heads) / sizeof(q_heads[0]); hi++) {
+        for (size_t ri = 0; ri < sizeof(n_rots) / sizeof(n_rots[0]); ri++) {
+            if (ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                        q_heads[hi], DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
+                        n_rots[ri]) != 1) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static void laguna_metal_qk_norm_rope_simd32_trace_route(
+        const char *route,
+        uint32_t    n_tokens,
+        bool        capture,
+        bool        verifier) {
+    if (!ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) return;
+    fprintf(stderr,
+            "ds4: Laguna Q/K norm/RoPE SIMD32 route=%s tokens=%u "
+            "capture=%d verifier=%d\n",
+            route ? route : "unknown", n_tokens, capture ? 1 : 0,
+            verifier ? 1 : 0);
+}
+
+/* The low-level count is intentionally only an encoded-dispatch counter.
+ * Target proof must take its own snapshot immediately before the target graph
+ * call and consume the delta only after that call's command buffer completes.
+ * This excludes support work encoded before the target; dflash's post-target
+ * support injector is K-only and does not increment this Q/K counter. */
+static bool laguna_metal_qk_norm_rope_simd32_target_evidence(
+        uint64_t    encoded_before,
+        uint32_t    n_tokens,
+        bool        capture,
+        bool        verifier,
+        const char *route,
+        bool        command_waited) {
+    if (!command_waited) return false;
+    const uint64_t encoded_after =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+    const uint64_t encoded_delta = encoded_after >= encoded_before ?
+        encoded_after - encoded_before : UINT64_MAX;
+    const bool exact = encoded_delta == 48u;
+    if (ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) {
+        fprintf(stderr,
+                "ds4: Laguna Q/K norm/RoPE SIMD32 target_evidence "
+                "route=%s tokens=%u capture=%d verifier=%d "
+                "expected_target_dispatches=48 actual=%llu "
+                "completion=waited status=%s\n",
+                route ? route : "unknown",
+                n_tokens,
+                capture ? 1 : 0,
+                verifier ? 1 : 0,
+                (unsigned long long)encoded_delta,
+                exact ? "ok" : "mismatch");
+    }
+    if (!exact) {
+        if (encoded_delta == UINT64_MAX) {
+            fprintf(stderr,
+                    "ds4: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
+                    "counter moved backwards after waited %s\n",
+                    route ? route : "target");
+        } else {
+            fprintf(stderr,
+                    "ds4: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
+                    "expected 48 layer dispatches after waited %s, actual=%llu\n",
+                    route ? route : "target",
+                    (unsigned long long)encoded_delta);
+        }
+    }
+    return exact;
+}
+
+static void laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
+        ds4_laguna_gpu_graph *g) {
+    if (!g) return;
+    g->qk_simd32_target_encoded_before = 0;
+    g->qk_simd32_target_n_tokens = 0;
+    g->qk_simd32_target_capture = false;
+    g->qk_simd32_target_verifier = false;
+    g->qk_simd32_target_evidence_pending = false;
+}
+
+static bool laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
+        ds4_laguna_gpu_graph *g) {
+    if (!g || !g->qk_simd32_target_evidence_pending) return true;
+    const bool ok = laguna_metal_qk_norm_rope_simd32_target_evidence(
+        g->qk_simd32_target_encoded_before,
+        g->qk_simd32_target_n_tokens,
+        g->qk_simd32_target_capture,
+        g->qk_simd32_target_verifier,
+        g->qk_simd32_target_verifier ? "speculative-verifier" : "prefill",
+        true);
+    laguna_metal_qk_norm_rope_simd32_target_evidence_discard(g);
+    return ok;
+}
+
 static int laguna_metal_decode_residual_norm_mode(void);
 static bool laguna_metal_decode_residual_norm_preflight(void);
 static bool laguna_metal_router_decode_fused_preflight(
@@ -51902,11 +52049,24 @@ static bool laguna_graph_forward_token(
     const int dense_q8_route =
         ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
             dense_q8_gate_up_fusion ? 1 : 0, 1, 0);
+#ifdef __APPLE__
+    if (!laguna_metal_qk_norm_rope_simd32_preflight()) return false;
+    const bool qk_simd32_target_evidence =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached() > 0;
+    const uint64_t qk_simd32_target_encoded_before =
+        qk_simd32_target_evidence ?
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
+    if (qk_simd32_target_evidence) {
+        laguna_metal_qk_norm_rope_simd32_trace_route(
+            "decode", 1u, capture != NULL, false);
+    }
+#endif
 
 #ifdef __APPLE__
     const bool router_simd_topk_trace =
         laguna_metal_router_simd_topk_trace_enabled();
     bool decode_residual_norm_completion_waited = false;
+    bool qk_simd32_target_command_waited = false;
     const int decode_residual_norm_mode =
         laguna_metal_decode_residual_norm_mode();
     if (decode_residual_norm_mode < 0) return false;
@@ -52534,6 +52694,7 @@ static bool laguna_graph_forward_token(
                 ok = false;
             } else {
                 decode_residual_norm_completion_waited = true;
+                qk_simd32_target_command_waited = true;
                 laguna_dense_q8_gate_up_swiglu_report_waited(g);
             }
         } else {
@@ -52544,6 +52705,15 @@ static bool laguna_graph_forward_token(
             if (ds4_gpu_discard_commands() == 0) ok = false;
             laguna_dense_q8_gate_up_swiglu_pending_clear(g);
         }
+    }
+    if (ok && qk_simd32_target_evidence) {
+        ok = laguna_metal_qk_norm_rope_simd32_target_evidence(
+            qk_simd32_target_encoded_before,
+            1u,
+            capture != NULL,
+            false,
+            "decode",
+            qk_simd32_target_command_waited);
     }
     if (ok && decode_residual_fusion &&
         decode_residual_norm_completion_waited &&
@@ -52797,6 +52967,12 @@ static bool laguna_graph_forward_batch(
     laguna_dense_q8_gate_up_swiglu_pending_clear(g);
 #ifdef __APPLE__
     laguna_metal_router_simd_topk_trace_reset();
+    if (!laguna_metal_qk_norm_rope_simd32_preflight()) return false;
+    const bool qk_simd32_target_evidence =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached() > 0;
+    const uint64_t qk_simd32_target_encoded_before =
+        qk_simd32_target_evidence ?
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
 #endif
     if (row_argmax_out &&
         (n_tokens > DS4_DFLASH_BLOCK_SIZE ||
@@ -52874,6 +53050,9 @@ static bool laguna_graph_forward_batch(
      * lower-overhead single-command path. */
     const bool live_progress = display_progress != NULL && n_tokens >= 32u;
     const bool exact_q8_rows = row_argmax_out != NULL;
+#ifdef __APPLE__
+    bool qk_simd32_target_command_waited = false;
+#endif
     const int dense_q8_route =
         ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
             dense_q8_gate_up_fusion ? 1 : 0,
@@ -52893,9 +53072,23 @@ static bool laguna_graph_forward_batch(
     /* DFlash feature capture and GPU draft-token verification have their own
      * cache/injection sequencing. Keep them on the established split path;
      * only an ordinary, host-token prefill may opt into the paired dispatch. */
+#ifdef __APPLE__
+    const int simd32_plan_mode =
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+#else
+    const int simd32_plan_mode = 0;
+#endif
     const bool paired_qk_norm_rope =
-        !exact_q8_rows && !gpu_draft_tokens && !capture &&
-        laguna_graph_prefill_qk_norm_rope_paired_requested();
+        simd32_plan_mode > 0 ||
+        (!exact_q8_rows && !gpu_draft_tokens && !capture &&
+         laguna_graph_prefill_qk_norm_rope_paired_requested());
+#ifdef __APPLE__
+    if (simd32_plan_mode > 0) {
+        laguna_metal_qk_norm_rope_simd32_trace_route(
+                row_argmax_out ? "speculative-verifier" : "prefill",
+                n_tokens, capture != NULL, row_argmax_out != NULL);
+    }
+#endif
     if (gpu_draft_tokens) {
         ok = gpu_draft_pipeline_ready;
     } else {
@@ -53334,6 +53527,9 @@ static bool laguna_graph_forward_batch(
         }
         if (ok && live_progress) {
             ok = ds4_gpu_end_commands() != 0;
+#ifdef __APPLE__
+            if (ok) qk_simd32_target_command_waited = true;
+#endif
             if (ok) {
                 const bool layer_is_all_work =
                     completed_layers == (uint32_t)DS4_N_LAYER &&
@@ -53484,6 +53680,27 @@ static bool laguna_graph_forward_batch(
     if (ok && dense_q8_completion_waited) {
         laguna_dense_q8_gate_up_swiglu_report_waited(g);
     }
+#ifdef __APPLE__
+    if (ok && qk_simd32_target_evidence && !defer_completion) {
+        ok = laguna_metal_qk_norm_rope_simd32_target_evidence(
+            qk_simd32_target_encoded_before,
+            n_tokens,
+            capture != NULL,
+            row_argmax_out != NULL,
+            row_argmax_out != NULL ? "speculative-verifier" : "prefill",
+            qk_simd32_target_command_waited);
+    }
+    if (ok && qk_simd32_target_evidence && defer_completion) {
+        g->qk_simd32_target_encoded_before =
+            qk_simd32_target_encoded_before;
+        g->qk_simd32_target_n_tokens = n_tokens;
+        g->qk_simd32_target_capture = capture != NULL;
+        g->qk_simd32_target_verifier = row_argmax_out != NULL;
+        g->qk_simd32_target_evidence_pending = true;
+    } else if (!ok && qk_simd32_target_evidence) {
+        laguna_metal_qk_norm_rope_simd32_target_evidence_discard(g);
+    }
+#endif
     ds4_gpu_tensor_free(last);
     if (ok && g->gpu_argmax_enabled && !defer_completion) {
         ok = ds4_gpu_tensor_read(g->argmax,
@@ -53921,6 +54138,7 @@ static int generate_laguna_metal_argmax(
     if (!laguna_metal_router_decode_fused_preflight(model, weights)) return 1;
     if (laguna_metal_q8_lmhead_screen_v2_mode() < 0) return 1;
     if (!laguna_metal_decode_residual_norm_preflight()) return 1;
+    if (!laguna_metal_qk_norm_rope_simd32_preflight()) return 1;
     const bool gpu_argmax_requested = laguna_metal_gpu_argmax_requested();
     const bool lmhead_screen_requested =
         laguna_metal_q8_lmhead_screen_requested();
@@ -65171,6 +65389,13 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
             free(s);
             return 1;
         }
+        /* The explicit Q/K SIMD32 request is a session-wide graph contract.
+         * Validate its exact geometry and PSO before laguna_graph_alloc can
+         * allocate scratch/KV or write shared graph state. */
+        if (!laguna_metal_qk_norm_rope_simd32_preflight()) {
+            free(s);
+            return 1;
+        }
 #endif
         if (!laguna_graph_alloc(&s->laguna_graph, (uint32_t)ctx_size)) {
             free(s);
@@ -65694,6 +65919,16 @@ static bool ds4_session_dflash_finish_capture(
         s->dflash_synced = false;
         return false;
     }
+#ifdef __APPLE__
+    /* dflash_graph_encode_inject closes and waits the active target command
+     * after appending its K-only support feature.  Only now may the deferred
+     * target snapshot be used as path evidence. */
+    if (!laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
+            &s->laguna_graph)) {
+        s->dflash_synced = false;
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -66716,6 +66951,12 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         if (!laguna_metal_decode_residual_norm_preflight()) {
             snprintf(err, errlen,
                      "%s Laguna decode residual fusion preflight failed",
+                     backend_name);
+            return 1;
+        }
+        if (!laguna_metal_qk_norm_rope_simd32_preflight()) {
+            snprintf(err, errlen,
+                     "%s Laguna Q/K norm/RoPE SIMD32 preflight failed",
                      backend_name);
             return 1;
         }
@@ -68603,6 +68844,12 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
         if (!laguna_metal_decode_residual_norm_preflight()) {
             if (errlen) snprintf(err, errlen,
                                  "%s Laguna decode residual fusion preflight failed",
+                                 ds4_backend_name(e->backend));
+            return 1;
+        }
+        if (!laguna_metal_qk_norm_rope_simd32_preflight()) {
+            if (errlen) snprintf(err, errlen,
+                                 "%s Laguna Q/K norm/RoPE SIMD32 preflight failed",
                                  ds4_backend_name(e->backend));
             return 1;
         }
@@ -73165,6 +73412,15 @@ static int ds4_session_eval_dflash_speculative_argmax(
         char        *err,
         size_t       errlen) {
     ds4_engine *e = s->engine;
+#ifdef __APPLE__
+    /* Do this before snapshotting target KV or touching the support graph so
+     * an explicit SIMD32 request can never degrade into a split verifier. */
+    if (!laguna_metal_qk_norm_rope_simd32_preflight()) {
+        if (errlen) snprintf(err, errlen,
+                             "Laguna Q/K norm/RoPE SIMD32 preflight failed");
+        return -1;
+    }
+#endif
     if (!ds4_session_dflash_enabled(s) || !s->dflash_synced ||
         e->dflash_draft_tokens <= 0 || first_token == eos_token ||
         max_tokens <= 1 || accepted_cap <= 1) {
@@ -73343,6 +73599,12 @@ static int ds4_session_eval_dflash_speculative_argmax(
         }
         if (target_preencoded && n_draft != generated_draft) {
             draft_read_ok = ds4_gpu_discard_commands() != 0;
+#ifdef __APPLE__
+            /* The speculative target was discarded before completion; never
+             * let its pre-encode snapshot certify the replacement target. */
+            laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
+                &s->laguna_graph);
+#endif
             target_preencoded = false;
         }
         if (!draft_read_ok ||
@@ -73395,6 +73657,10 @@ static int ds4_session_eval_dflash_speculative_argmax(
         }
     }
     if (!verify_ok || !inject_ok || !target_read_ok || !draft_read_ok) {
+#ifdef __APPLE__
+        laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
+            &s->laguna_graph);
+#endif
         (void)laguna_graph_spec_restore(
             &s->laguna_graph, pos0, 0, n_rows);
         s->dflash_synced = false;

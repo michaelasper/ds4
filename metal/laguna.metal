@@ -594,6 +594,122 @@ static inline void laguna_head_rms_norm_rope_neox(
     row[tid + half_rot] = x0 * sin_theta + x1 * cos_theta;
 }
 
+/* A head_dim=128 specialization for Apple GPUs whose execution width is 32.
+ *
+ * The ordinary kernel uses one lane per element and therefore reduces the
+ * 128 squares as
+ *
+ *   (s[i] + s[i+64]) + (s[i+32] + s[i+96])
+ *
+ * before its 16,8,4,2,1 stages.  Keep that association explicitly here while
+ * retaining four independent element lanes per SIMD lane.  The old kernel's
+ * reduction order is observable for cancellation-heavy inputs, so using a
+ * generic simd_sum here would turn this from an exact A/B experiment into a
+ * numerically different kernel.
+ */
+static inline void laguna_head_rms_norm_rope_neox_simd32(
+        constant ds4_metal_args_laguna_norm_rope &args,
+        device float       *row,
+        device const float *weight,
+        threadgroup float  *scratch,
+        ushort lane,
+        uint token) {
+    const uint i0 = (uint)lane;
+    const uint i1 = i0 + 32u;
+    const uint i2 = i0 + 64u;
+    const uint i3 = i0 + 96u;
+
+    /* Do not fold this into a vector dot product: each multiply and the
+     * threadgroup store intentionally mirror the old scalar kernel. */
+    float ss0 = 0.0f;
+    const float v0 = row[i0];
+    ss0 += v0 * v0;
+    scratch[i0] = ss0;
+    float ss1 = 0.0f;
+    const float v1 = row[i1];
+    ss1 += v1 * v1;
+    scratch[i1] = ss1;
+    float ss2 = 0.0f;
+    const float v2 = row[i2];
+    ss2 += v2 * v2;
+    scratch[i2] = ss2;
+    float ss3 = 0.0f;
+    const float v3 = row[i3];
+    ss3 += v3 * v3;
+    scratch[i3] = ss3;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    /* Reproduce old steps 64 and 32 verbatim: pair lane with lane+64,
+     * lane+32 with lane+96, then combine the two partials. */
+    scratch[i0] = scratch[i0] + scratch[i2];
+    scratch[i1] = scratch[i1] + scratch[i3];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    scratch[i0] = scratch[i0] + scratch[i1];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    /* Use the requested 32-lane SIMD stages, but materialize every result
+     * before the next stage.  A register-only shuffle reduction changes a few
+     * low bits relative to the legacy threadgroup tree on current Apple
+     * Metal; these stores/barriers preserve the old rounding points while
+     * retaining SIMD partner exchange. */
+    for (uint step = 16u; step != 0u; step >>= 1u) {
+        const float current = scratch[i0];
+        const float partner = simd_shuffle_down(current, (ushort)step);
+        if ((uint)lane < step) {
+            scratch[i0] = current + partner;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float total = scratch[0];
+    const float inv = rsqrt(total / 128.0f + args.eps);
+
+    row[i0] = row[i0] * inv * weight[i0];
+    row[i1] = row[i1] * inv * weight[i1];
+    row[i2] = row[i2] * inv * weight[i2];
+    row[i3] = row[i3] * inv * weight[i3];
+    threadgroup_barrier(mem_flags::mem_device);
+
+    const uint half_rot = args.n_rot >> 1u;
+    const uint bases[2] = {i0, i1};
+    for (uint pair = 0u; pair < 2u; pair++) {
+        const uint base = bases[pair];
+        if (base >= half_rot) continue;
+
+        float corr_dims[2] = {0.0f, 0.0f};
+        if (args.ext_factor != 0.0f) {
+            rope_yarn_corr_dims((int)args.n_rot,
+                                (int)args.n_ctx_orig,
+                                args.freq_base,
+                                args.beta_fast,
+                                args.beta_slow,
+                                corr_dims);
+        }
+        const int rel_i0 = (int)(base * 2u);
+        const float inv_ndims = -1.0f / (float)args.n_rot;
+#ifdef DS4_METAL_ROPE_EXP2_LOG2
+        const float theta = (float)(args.pos0 + token) *
+            exp2(inv_ndims * (float)rel_i0 * log2(args.freq_base));
+#else
+        const float theta = (float)(args.pos0 + token) *
+            pow(args.freq_base, inv_ndims * (float)rel_i0);
+#endif
+        float cos_theta;
+        float sin_theta;
+        rope_yarn(theta,
+                  args.freq_scale,
+                  corr_dims,
+                  rel_i0,
+                  args.ext_factor,
+                  args.attn_factor,
+                  &cos_theta,
+                  &sin_theta);
+        const float x0 = row[base];
+        const float x1 = row[base + half_rot];
+        row[base] = x0 * cos_theta - x1 * sin_theta;
+        row[base + half_rot] = x0 * sin_theta + x1 * cos_theta;
+    }
+}
+
 // Laguna uses Qwen-style per-head RMSNorm and NeoX rotary pairs. Rotary
 // dimensions occupy the prefix of each head; any remaining dimensions are
 // normalized but left unrotated.
@@ -649,6 +765,38 @@ kernel void kernel_laguna_qk_head_rms_norm_rope_neox(
     device const float *weight = is_q ? q_weight : k_weight;
     laguna_head_rms_norm_rope_neox(
         args, row, weight, scratch, tid, ntg_u.x, token);
+}
+
+/* Q/K variant of the 32-lane head_dim=128 retile above.  This is a separate
+ * function (and therefore a separate PSO) so callers can prove that the
+ * experiment dispatched instead of merely observing output parity. */
+kernel void kernel_laguna_qk_head_rms_norm_rope_neox_simd32(
+        constant ds4_metal_args_laguna_norm_rope &args,
+        device float       *q,
+        device float       *k,
+        device const float *q_weight,
+        device const float *k_weight,
+        constant uint      &n_q_head,
+        threadgroup float  *scratch [[threadgroup(0)]],
+        ushort lane [[thread_index_in_simdgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    const uint combined_head = tgpig.x;
+    const uint token = tgpig.y;
+    if (combined_head >= args.n_head || token >= args.n_tokens ||
+        n_q_head == 0u || n_q_head >= args.n_head || args.head_dim != 128u ||
+        args.n_rot == 0u || args.n_rot > args.head_dim ||
+        (args.n_rot & 1u) != 0u) {
+        return;
+    }
+
+    const bool is_q = combined_head < n_q_head;
+    const uint tensor_head = is_q ? combined_head : combined_head - n_q_head;
+    const uint tensor_n_head = is_q ? n_q_head : args.n_head - n_q_head;
+    device float *row = (is_q ? q : k) +
+        ((uint64_t)token * tensor_n_head + tensor_head) * args.head_dim;
+    device const float *weight = is_q ? q_weight : k_weight;
+    laguna_head_rms_norm_rope_neox_simd32(
+        args, row, weight, scratch, lane, token);
 }
 
 struct ds4_metal_args_laguna_kv_store {
