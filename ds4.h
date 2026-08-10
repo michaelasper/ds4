@@ -132,6 +132,13 @@ typedef struct {
     uint64_t bytes;
 } ds4_session_payload_file;
 
+/* Engine/session lifetime contract: callers must externally serialize
+ * ds4_session_create(), ds4_session_free(), and ds4_engine_close() for the
+ * same engine.  The engine must outlive every session created from it.
+ * ds4_engine_close() refuses to destroy an engine while registered sessions
+ * remain; because the API is void, refusal leaves the engine alive so callers
+ * can free those sessions and retry the close.  These rules are an ownership
+ * contract, not internal cross-thread synchronization. */
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt);
 void ds4_engine_close(ds4_engine *e);
 void ds4_engine_summary(ds4_engine *e);

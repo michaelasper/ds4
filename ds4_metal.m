@@ -676,6 +676,26 @@ static NSUInteger g_moe_q4_up_slots_bytes;
 static NSUInteger g_moe_q4_down_slots_bytes;
 static NSUInteger g_attn_out_group_ids_bytes;
 static int g_initialized;
+#ifdef DS4_TEST_HOOKS
+typedef enum {
+    DS4_GPU_TEST_INIT_FAIL_NONE = 0,
+    DS4_GPU_TEST_INIT_FAIL_DEVICE,
+    DS4_GPU_TEST_INIT_FAIL_QUEUE,
+    DS4_GPU_TEST_INIT_FAIL_BOOKKEEPING,
+    DS4_GPU_TEST_INIT_FAIL_FIRST_PIPELINE,
+} ds4_gpu_test_init_failpoint;
+
+static ds4_gpu_test_init_failpoint g_test_init_failpoint;
+
+static int ds4_gpu_test_init_should_fail(
+        ds4_gpu_test_init_failpoint failpoint) {
+    if (g_test_init_failpoint != failpoint) return 0;
+    /* One-shot by construction so the cleanup path itself and the retry are
+     * never influenced by the injected failure. */
+    g_test_init_failpoint = DS4_GPU_TEST_INIT_FAIL_NONE;
+    return 1;
+}
+#endif
 static int g_quality_mode;
 static int g_tensor_matmul_suppressed;
 static int g_mpp_invalid_env_reported;
@@ -7902,8 +7922,12 @@ typedef struct {
 /* Compile the single in-repo Metal source and create the pipelines that every
  * session uses. Shape-dependent kernels with function constants are built
  * lazily by the small ds4_gpu_get_* caches, so startup stays predictable
- * while long-context prefill and decode can still pick specialized variants. */
-int ds4_gpu_init(void) {
+ * while long-context prefill and decode can still pick specialized variants.
+ *
+ * Keep this as an implementation function: the public wrapper below owns the
+ * one failure exit and therefore unwinds every one of the many shader/pipeline
+ * construction failures through the same idempotent cleanup path. */
+static int ds4_gpu_init_impl(void) {
     if (g_initialized) return 1;
 
     /* Freeze Q8 decode selectors before any Metal graph, command buffer, or
@@ -7945,6 +7969,11 @@ int ds4_gpu_init(void) {
             fprintf(stderr, "ds4: Metal device not available\n");
             return 0;
         }
+#ifdef DS4_TEST_HOOKS
+        if (ds4_gpu_test_init_should_fail(DS4_GPU_TEST_INIT_FAIL_DEVICE)) {
+            return 0;
+        }
+#endif
         ds4_gpu_print_device_summary();
         ds4_gpu_detect_metal4_features();
 
@@ -7954,6 +7983,11 @@ int ds4_gpu_init(void) {
             g_device = nil;
             return 0;
         }
+#ifdef DS4_TEST_HOOKS
+        if (ds4_gpu_test_init_should_fail(DS4_GPU_TEST_INIT_FAIL_QUEUE)) {
+            return 0;
+        }
+#endif
         g_model_buffer_cache = [NSMutableDictionary dictionary];
         g_model_buffer_cache_bytes = 0;
         g_model_buffer_cache_evictions = 0;
@@ -7984,6 +8018,12 @@ int ds4_gpu_init(void) {
             g_device = nil;
             return 0;
         }
+#ifdef DS4_TEST_HOOKS
+        if (ds4_gpu_test_init_should_fail(
+                DS4_GPU_TEST_INIT_FAIL_BOOKKEEPING)) {
+            return 0;
+        }
+#endif
 
         NSError *error = nil;
         NSString *source = ds4_gpu_full_source();
@@ -8066,6 +8106,12 @@ int ds4_gpu_init(void) {
             g_device = nil;
             return 0;
         }
+#ifdef DS4_TEST_HOOKS
+        if (ds4_gpu_test_init_should_fail(
+                DS4_GPU_TEST_INIT_FAIL_FIRST_PIPELINE)) {
+            return 0;
+        }
+#endif
 
         fn = [library newFunctionWithName:@"kernel_get_rows_f16"];
         if (!fn) {
@@ -10315,6 +10361,19 @@ int ds4_gpu_init(void) {
     return 1;
 }
 
+int ds4_gpu_init(void) {
+    if (g_initialized) return 1;
+
+    const int ok = ds4_gpu_init_impl();
+    if (!ok) {
+        /* This also clears selector snapshots captured before the first Metal
+         * allocation.  Callers can retry without inheriting any device,
+         * queue, library, pipeline, view, cache, or selector state. */
+        ds4_gpu_cleanup();
+    }
+    return ok;
+}
+
 int ds4_gpu_test_mxfp4_down_half_lut(uint16_t *legacy_bits,
                                      uint16_t *lut_bits) {
     if (!legacy_bits || !lut_bits) return 0;
@@ -11985,32 +12044,11 @@ int ds4_gpu_synchronize(void) {
 }
 
 void ds4_gpu_cleanup(void) {
-    if (!g_initialized) {
-        /* Cleanup is also the lifecycle boundary after a failed init.  Do
-         * not let a partially captured selector snapshot leak into the next
-         * raw/preflight call. */
-        g_laguna_swa_gqa9_mode = 0;
-        g_laguna_swa_gqa3_mode = 0;
-        g_laguna_staged_swa_mode = 0;
-        g_laguna_swa_selectors_snapshot_valid = 0;
-        /* Test/process setup may select a disabled or malformed plan before
-         * Metal is available.  Cleanup is still the lifecycle boundary for
-         * those frozen selectors; leave no stale trace or one-shot
-         * diagnostic state for the next initialization attempt. */
-        g_laguna_qk_head_norm_rope_simd32_plan_mode = -2;
-        g_laguna_qk_head_norm_rope_simd32_trace_mode = -1;
-        g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
-        g_laguna_rope_atlas_plan_mode = -2;
-        g_laguna_rope_atlas_trace_mode = -1;
-        g_laguna_rope_atlas_invalid_env_reported = 0;
-        g_laguna_rope_atlas_valid = 0;
-        g_laguna_rope_atlas_valid_completed = 0;
-        g_laguna_rope_support_atlas_valid = 0;
-        g_laguna_rope_support_atlas_valid_completed = 0;
-        return;
-    }
-
+    const int was_initialized = g_initialized;
     @autoreleasepool {
+        /* Partial initialization owns the same globals as a complete
+         * lifecycle.  Objective-C nil messaging and the idempotent helpers
+         * below make this one unwind safe before, during, and after init. */
         ds4_gpu_decode_pipeline_fast_cache_reset();
         g_pair_compressor_store_missing_count = 0;
         ds4_gpu_parallel_ffn_reset_state(YES);
@@ -12024,9 +12062,16 @@ void ds4_gpu_cleanup(void) {
             }
             g_stream_expert_cache_batch_seq = 0;
         }
+        g_batch_cb = nil;
+        g_batch_enc = nil;
+        g_batch_encoder_concurrent = NO;
+        g_batch_has_work = NO;
+        ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
+        ds4_gpu_laguna_atlas_evidence_zero(&g_owned_laguna_atlas_evidence);
         g_command_batch_epoch = 0;
         (void)ds4_gpu_wait_pending_command_buffers("cleanup");
-        if (ds4_gpu_stream_expert_timing_summary_enabled() &&
+        if (was_initialized &&
+            ds4_gpu_stream_expert_timing_summary_enabled() &&
             getenv("DS4_METAL_MEMORY_REPORT") == NULL) {
             ds4_gpu_print_memory_report("at cleanup");
         }
@@ -12282,14 +12327,19 @@ void ds4_gpu_cleanup(void) {
         g_glm_q4_k_pair_swiglu2_mapped_f32_pipeline = nil;
         g_glm_q4_k_pair_swiglu2_mapped_row_f32_pipeline = nil;
         g_glm_q2_k_pair_swiglu_f32_pipeline = nil;
+        g_glm_q2_k_pair_swiglu_r1_f32_pipeline = nil;
         g_glm_q3_k_pair_swiglu_f32_pipeline = nil;
+        g_glm_q3_k_pair_swiglu_r1_f32_pipeline = nil;
         g_glm_q2_k_addr_pair_swiglu2_f32_pipeline = nil;
         g_glm_q2_k_addr_pair_swiglu2_masked_f32_pipeline = nil;
         g_glm_q4_k_addr_pair_swiglu_f32_pipeline = nil;
         g_glm_q4_k_addr_pair_swiglu_masked_f32_pipeline = nil;
         g_glm_q2_k_down_f32_pipeline = nil;
+        g_glm_q2_k_down_r1_f32_pipeline = nil;
         g_glm_q3_k_down_f32_pipeline = nil;
+        g_glm_q3_k_down_r1_f32_pipeline = nil;
         g_glm_q4_k_down_f32_pipeline = nil;
+        g_glm_q4_k_down_r1_f32_pipeline = nil;
         g_glm_q2_k_addr_down_f32_pipeline = nil;
         g_glm_q4_k_addr_down_f32_pipeline = nil;
         g_glm_q5_k_pair_swiglu_f32_pipeline = nil;
@@ -12449,6 +12499,13 @@ void ds4_gpu_cleanup(void) {
         g_library = nil;
         g_queue = nil;
         g_device = nil;
+        g_metal4_runtime_available = 0;
+        g_metal4_family_supported = 0;
+        g_metal4_queue_supported = 0;
+        g_metal4_m5_neural_accelerators_hint = 0;
+        g_metal4_tensor_api_enabled = 0;
+        g_metal4_tensor_api_compile_supported = 0;
+        g_metal_device_name[0] = '\0';
         g_metal_math_safe = 0;
         g_q8_mv_ext_max_tokens = 16u;
         g_glm_grouped_moe_min_tokens = 96u;
@@ -13580,6 +13637,157 @@ static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_owned(
                                                inner_offset,
                                                DS4_GPU_EXACT_VIEW_OWNED);
 }
+
+#ifdef DS4_TEST_HOOKS
+static int ds4_gpu_test_cleanup_state_is_clean(void) {
+    pthread_mutex_lock(&g_tensor_mu);
+    const int tensors_clean =
+        g_tensor_live_slots == NULL && g_tensor_live_cap == 0 &&
+        g_tensor_live_count == 0 && g_tensor_live_tombs == 0 &&
+        g_tensor_alloc_live_bytes == 0 && g_tensor_alloc_peak_bytes == 0;
+    pthread_mutex_unlock(&g_tensor_mu);
+
+    return !g_initialized &&
+           !g_device && !g_queue && !g_library &&
+           !g_metal4_runtime_available && !g_metal4_family_supported &&
+           !g_metal4_queue_supported &&
+           !g_metal4_m5_neural_accelerators_hint &&
+           !g_metal4_tensor_api_enabled &&
+           !g_metal4_tensor_api_compile_supported &&
+           g_metal_device_name[0] == '\0' &&
+           !g_batch_cb && !g_batch_enc && !g_batch_encoder_concurrent &&
+           !g_batch_has_work && g_command_batch_epoch == 0 &&
+           !g_pending_cbs && !g_pending_laguna_atlas_evidence &&
+           !g_selected_readback_event &&
+           g_selected_readback_event_value == 0 &&
+           !g_model_buffer_cache && !g_q4_expert_table_cache &&
+           !g_q4_expert_layer_residency_cache && !g_pipeline_cache &&
+           !g_dsv4_completion_cache && !g_transient_buffers &&
+           g_model_buffer_cache_bytes == 0 &&
+           g_model_buffer_cache_over_limit == 0 &&
+           g_model_view_count == 0 && !g_model_residency_set &&
+           g_model_residency_count == 0 &&
+           g_model_residency_added_to_queue == 0 &&
+           g_model_fd == -1 && g_model_map_ptr == NULL &&
+           g_model_map_size == 0 && g_model_mapped_offset == 0 &&
+           g_model_mapped_size == 0 &&
+           g_model_mapped_max_tensor_bytes == 0 &&
+           g_stream_expert_cache_bytes == 0 &&
+           g_stream_expert_cache_entry_count == 0 &&
+           g_stream_expert_cache_slab_count == 0 &&
+           !g_get_rows_f32_pipeline &&
+           !g_glm_q2_k_pair_swiglu_r1_f32_pipeline &&
+           !g_glm_q3_k_pair_swiglu_r1_f32_pipeline &&
+           !g_glm_q2_k_down_r1_f32_pipeline &&
+           !g_glm_q3_k_down_r1_f32_pipeline &&
+           !g_glm_q4_k_down_r1_f32_pipeline &&
+           g_laguna_swa_gqa9_mode == 0 &&
+           g_laguna_swa_gqa3_mode == 0 &&
+           g_laguna_staged_swa_mode == 0 &&
+           g_direct_kv_prefill_mode == 0 &&
+           !g_laguna_swa_selectors_snapshot_valid &&
+           g_laguna_qk_head_norm_rope_simd32_plan_mode == -2 &&
+           g_laguna_qk_head_norm_rope_simd32_trace_mode == -1 &&
+           g_laguna_rope_atlas_plan_mode == -2 &&
+           g_laguna_rope_atlas_trace_mode == -1 &&
+           g_test_init_failpoint == DS4_GPU_TEST_INIT_FAIL_NONE &&
+           tensors_clean;
+}
+
+int ds4_gpu_test_lifecycle_cleanup(void) {
+    static const ds4_gpu_test_init_failpoint failpoints[] = {
+        DS4_GPU_TEST_INIT_FAIL_DEVICE,
+        DS4_GPU_TEST_INIT_FAIL_QUEUE,
+        DS4_GPU_TEST_INIT_FAIL_BOOKKEEPING,
+        DS4_GPU_TEST_INIT_FAIL_FIRST_PIPELINE,
+    };
+    int ok = 1;
+
+    ds4_gpu_cleanup();
+    if (!ds4_gpu_test_cleanup_state_is_clean()) {
+        fprintf(stderr, "ds4: Metal lifecycle test did not start clean\n");
+        return 0;
+    }
+
+    for (size_t i = 0; i < sizeof(failpoints) / sizeof(failpoints[0]); i++) {
+        g_test_init_failpoint = failpoints[i];
+        if (ds4_gpu_init() != 0 || !ds4_gpu_test_cleanup_state_is_clean()) {
+            fprintf(stderr,
+                    "ds4: Metal partial-init cleanup failed at failpoint %d\n",
+                    (int)failpoints[i]);
+            ds4_gpu_cleanup();
+            return 0;
+        }
+    }
+
+    if (!ds4_gpu_init()) {
+        fprintf(stderr, "ds4: Metal lifecycle retry did not initialize\n");
+        return 0;
+    }
+
+    const size_t page = (size_t)getpagesize();
+#if defined(MAP_ANONYMOUS)
+    const int anonymous = MAP_ANONYMOUS;
+#else
+    const int anonymous = MAP_ANON;
+#endif
+    void *model_map = mmap(NULL, page, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | anonymous, -1, 0);
+    if (model_map == MAP_FAILED) {
+        model_map = NULL;
+        ok = 0;
+    }
+
+    ds4_gpu_tensor *workspace_src = NULL;
+    ds4_gpu_tensor *workspace_dst = NULL;
+    if (ok) {
+        memset(model_map, 0x5a, page);
+        ok = ds4_gpu_set_model_map_range(model_map,
+                                         (uint64_t)page,
+                                         0,
+                                         (uint64_t)page,
+                                         (uint64_t)page) != 0;
+    }
+    if (ok) {
+        uint64_t inner_offset = UINT64_MAX;
+        id<MTLBuffer> cached = ds4_gpu_wrap_model_exact_range(
+            model_map, (uint64_t)page, 0, 64, &inner_offset);
+        ok = cached != nil && inner_offset == 0 &&
+             g_model_view_count != 0 &&
+             [g_model_buffer_cache count] != 0;
+        cached = nil;
+    }
+    if (ok) {
+        workspace_src = ds4_gpu_tensor_alloc(64);
+        workspace_dst = ds4_gpu_tensor_alloc(64);
+        ok = workspace_src != NULL && workspace_dst != NULL &&
+             ds4_gpu_begin_commands() != 0 &&
+             ds4_gpu_tensor_copy(workspace_dst, 0,
+                                 workspace_src, 0, 64) != 0;
+    }
+    if (ok) {
+        /* This is the engine-close sequence in miniature: drain actual Metal
+         * work, retire workspace handles while tracking is alive, then tear
+         * down the view/cache backend while the mmap remains valid. */
+        ok = ds4_gpu_synchronize() != 0;
+    }
+
+    if (workspace_dst) ds4_gpu_tensor_free(workspace_dst);
+    if (workspace_src) ds4_gpu_tensor_free(workspace_src);
+    ds4_gpu_cleanup();
+    if (model_map) munmap(model_map, page);
+
+    ok = ok && ds4_gpu_test_cleanup_state_is_clean();
+    /* A second cleanup proves the fully-clean state is also a safe input. */
+    ds4_gpu_cleanup();
+    ok = ok && ds4_gpu_test_cleanup_state_is_clean();
+    if (!ok) {
+        fprintf(stderr,
+                "ds4: Metal drain/workspace/view-cache lifecycle test failed\n");
+    }
+    return ok;
+}
+#endif
 
 uint32_t ds4_gpu_stream_expert_cache_configured_count(void) {
     uint32_t budget = ds4_gpu_stream_expert_cache_configured_budget();

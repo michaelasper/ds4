@@ -262,6 +262,9 @@ void ds4_gpu_parallel_ffn_abort(void);
  * cleanup without requiring a model-shaped concurrent FFN dispatch. */
 int ds4_gpu_parallel_ffn_test_arm_state(void);
 int ds4_gpu_parallel_ffn_test_state_is_clean(void);
+/* Exercise real Metal partial-init failure unwinds, successful retry, command
+ * drain, workspace tracking, and mmap-backed view/cache cleanup. */
+int ds4_gpu_test_lifecycle_cleanup(void);
 #endif
 int ds4_gpu_parallel_ffn_start(
         ds4_gpu_tensor       *gate,

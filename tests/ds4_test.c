@@ -14553,8 +14553,14 @@ static void test_server_unit_group(void) {
 }
 
 static void test_engine_lifecycle(void) {
+    /* The public contract requires serialized lifetime calls.  These hooks
+     * cover registration/refusal/retry semantics under that supported
+     * contract; they intentionally do not claim raw-pointer thread safety. */
     TEST_ASSERT(ds4_test_engine_session_lifecycle());
     TEST_ASSERT(ds4_test_engine_close_order());
+#ifndef DS4_NO_GPU
+    TEST_ASSERT(ds4_gpu_test_lifecycle_cleanup());
+#endif
 }
 
 typedef void (*test_fn)(void);
@@ -14575,7 +14581,7 @@ static const ds4_test_entry test_entries[] = {
      "strict Laguna selector and prefill-route parser boundaries",
      test_laguna_selector_parser, false},
     {"--engine-lifecycle", "engine-lifecycle",
-     "session ownership and model-map-safe engine shutdown ordering",
+     "serialized session ownership, structural close order, and Metal cleanup",
      test_engine_lifecycle, true},
 #ifndef DS4_NO_GPU
 #if defined(__APPLE__)

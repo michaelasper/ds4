@@ -60220,6 +60220,9 @@ bool ds4_test_engine_session_lifecycle(void) {
     ds4_session_free(unregistered);
     ok = ok && e->live_sessions == 1;
 
+    /* Supported lifetime calls are serialized: close must refuse while the
+     * registered session exists, then remain retryable after that session is
+     * freed.  No raw engine pointer is concurrently dereferenced here. */
     ds4_engine_close(e);
     ok = ok && !e->closing && e->live_sessions == 1 &&
          e->power_percent == 73;
@@ -60249,7 +60252,18 @@ bool ds4_test_engine_session_lifecycle(void) {
     ok = ok && e->live_sessions == SIZE_MAX;
     e->live_sessions = 0;
 
-    free(e);
+    ds4_test_engine_close_trace retry_trace = {
+        .engine = e,
+        .maps_live_through_gpu = true,
+    };
+    ds4_test_engine_close_trace *previous = g_ds4_test_engine_close_trace;
+    g_ds4_test_engine_close_trace = &retry_trace;
+    ds4_engine_close(e);
+    g_ds4_test_engine_close_trace = previous;
+    ok = ok && retry_trace.phase_count != 0 &&
+         retry_trace.phases[0] == DS4_ENGINE_CLOSE_BEGIN &&
+         retry_trace.phases[retry_trace.phase_count - 1] ==
+             DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING;
     return ok;
 }
 
