@@ -14044,7 +14044,7 @@ static void test_long_story_fact_recall(void) {
 static const char *test_tool_call_request_json(void) {
     return
         "{"
-        "\"model\":\"deepseek-v4-flash\","
+        "\"model\":\"laguna-s-2.1\","
         "\"messages\":[{\"role\":\"user\",\"content\":\""
             TEST_LIST_FILES_USER_PROMPT
         "\"}],"
@@ -14063,7 +14063,7 @@ static char *test_tool_result_request_json(const char *assistant_content,
 
     buf b = {0};
     buf_puts(&b,
-        "{\"model\":\"deepseek-v4-flash\",\"messages\":["
+        "{\"model\":\"laguna-s-2.1\",\"messages\":["
         "{\"role\":\"user\",\"content\":");
     json_escape(&b, TEST_LIST_FILES_USER_PROMPT);
     buf_puts(&b, "},{\"role\":\"assistant\",\"content\":");

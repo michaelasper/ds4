@@ -254,7 +254,7 @@ static void print_server_thinking(FILE *fp, const help_colors *c) {
     para(fp, c, "Chat requests default to high-effort thinking.");
     para(fp, c, "reasoning_effort=max or output_config.effort=max requests Think Max.");
     para(fp, c, "Think Max requires --ctx >= 393216; smaller contexts use high.");
-    para(fp, c, "thinking={type:disabled}, think=false, or model=deepseek-chat selects non-thinking mode.");
+    para(fp, c, "thinking={type:disabled}, think=false, or model=laguna-s-2.1-chat selects non-thinking mode.");
     para(fp, c, "In thinking mode, client sampling knobs are ignored like the official API.");
     fputc('\n', fp);
 }
