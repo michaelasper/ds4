@@ -2254,8 +2254,7 @@ int ds4_mmq_moe_vec_impl(
 // to the raw tensor byte order.  Per-pair integer math is bit-identical to
 // vec_dot_iq2_xxs_q8_1 (vecdotq.cuh); only the float accumulation order
 // differs (per-warp-row here vs per-mmvq-tile there).  Proven +12% over the
-// raw-layout vec path at the production decode shape
-// (cuda/mmq/test/proto_iq2_aligned.cu).
+// raw-layout vec path at the production decode shape.
 __global__ void iq2_xxs_aligned_moe_vec_kernel(
         float             *out,        // [n_tokens*n_expert_used, M]
         const uint2       *qs,         // 64B-aligned code pairs
@@ -2473,7 +2472,7 @@ __global__ void iq2_xxs_aligned_moe_gate_up_mid_kernel(
 }
 
 // v0.4 V6: expert-overlap dedup for the gate_up mid kernel at DSpark
-// verify widths (proto_gemm_gateup_iq2xxs_dedup).  A live census measured
+// verify widths.  A live census measured
 // a mean of 18.2 DISTINCT experts per 30 assignment slots at w5 (~40%
 // overlap across the verify tokens); the per-slot kernel above re-reads
 // every duplicate's weights from DRAM.  First-owner dedup keeps the grid
@@ -3662,14 +3661,14 @@ extern "C" int ds4_mmq_iq2_xxs_aligned_derepack(
 // Aligned-SoA Q8_0 dense decode matvec (megakernel program M1-Inc3).
 //
 // block_q8_0 is 34 bytes ([half d][int8 qs[32]]), so the raw code stream is
-// only 2-byte aligned — the same misalignment class proto_iq2_aligned proved
-// costly.  Artifact layout (weight server --repack-q8-aligned, derived kind
+// only 2-byte aligned — the same costly misalignment class measured in the
+// aligned IQ2 path.  Artifact layout (weight server --repack-q8-aligned, derived kind
 // DERIVED_Q8_0_ALIGNED_DENSE): [__half dq[nblk]][pad to 64B][int8 qs[nblk*32]]
 // with nblk = M * (K/32), block order equal to the raw tensor byte order.
 // Unlike the IQ2 expert repack, the raw spans stay SERVED (dense tensors are
 // ~6 GiB total, affordable to duplicate), so every other consumer is
-// unchanged.  proto_q8_aligned.cu A/B (GB10, L2-defeating rotation, double-ref
-// parity): attn_q_b 217->235, mid 2048x4096 172->218, out_a 8192x4096
+// unchanged.  A/B measurements (GB10, L2-defeating rotation, double-reference
+// parity) reached attn_q_b 217->235, mid 2048x4096 172->218, out_a 8192x4096
 // 199->230, head 224->243 GB/s; the warp-per-row accumulation is also ~1000x
 // closer to the double reference than the mmvq tile order at K>=4096.
 __global__ void q8_0_aligned_dense_vec_kernel(
@@ -3707,12 +3706,12 @@ __global__ void q8_0_aligned_dense_vec_kernel(
     if (lane == 0) out[row] = acc;
 }
 
-// Verify-width variant (v0.4 dense chase, proto_q8_aligned_nc): same aligned
+// Verify-width variant (v0.4 dense chase): same aligned
 // weight stream read ONCE per row, NC output columns accumulated per lane
 // against col-strided q8_1 activations (which L1/L2-broadcast across rows).
 // Bytes identical to the N=1 kernel, so it holds the aligned tier's rate at
 // the spec-verify widths where the raw-block mmvq fallback ran 90-200 GB/s
-// (proto: +17..+87% per shape, family within 4% of the weight-bytes floor).
+// (measured +17..+87% per shape, family within 4% of the weight-bytes floor).
 // out is column-major [NC][M], the engine's [n_tok, out_dim] flattening.
 template <int NC>
 __global__ void q8_0_aligned_dense_vec_nc_kernel(
@@ -3865,8 +3864,8 @@ extern "C" int ds4_mmq_q8_0_aligned_dense_vec(
 //
 // Lane mapping, scale-byte values, q8 side and the float accumulation order
 // are copied verbatim from mul_mat_vec_q_moe/vec_dot_q2_K_q8_1 -> outputs are
-// bit-identical to the raw path (proto_m2_q2k.cu: 240/240 parity + graph
-// capture/replay, and 214 GB/s vs 154 raw on the same rotating rig).
+// bit-identical to the raw path (240/240 parity + graph capture/replay, and
+// 214 GB/s vs 154 raw on the same rotating rig).
 // ---------------------------------------------------------------------------
 
 // Same float chain as vec_dot_q2_K_q8_1_impl_mmvq; the four scale bytes come
