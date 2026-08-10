@@ -35865,27 +35865,49 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     const uint32_t nwg = 32u;
     const uint32_t nsg = ds4_gpu_flash_attn_vec_nsg(key_count, nwg, ncpsg);
     const bool has_pad = (key_count % ncpsg) != 0u;
+    const bool swa_gqa9_requested =
+        cache_cap == 512u && key_count == 512u &&
+        n_head == 72u && n_head_kv == 8u &&
+        ds4_gpu_env_bool("DS4_METAL_LAGUNA_SWA_GQA9") > 0;
     const bool swa_gqa3_requested =
         cache_cap == 512u && key_count == 512u &&
         n_head == 72u && n_head_kv == 8u &&
         ds4_gpu_env_bool("DS4_METAL_LAGUNA_SWA_GQA3") > 0;
     const bool staged_swa_active =
-        swa_gqa3_requested &&
+        (swa_gqa9_requested || swa_gqa3_requested) &&
         ds4_gpu_env_bool("DS4_METAL_LAGUNA_STAGED_SWA") > 0;
-    /* Staged SWA currently reduces virtual-ring rows with the ordinary Flash
-     * arithmetic.  Do not silently compare or mix it with grouped GQA3 when
-     * both experiments are exported: staged SWA wins, and the grouped opt-in
-     * is ignored for this 512-slot production shape. */
-    static int staged_swa_gqa3_conflict_reported;
-    if (staged_swa_active && swa_gqa3_requested &&
-        !staged_swa_gqa3_conflict_reported) {
+    /* Precedence for the SWA full ring: staged SWA > GQA9 > GQA3.  Staged SWA
+     * reduces virtual-ring rows with the ordinary Flash arithmetic, so it must
+     * not be silently mixed with a grouped opt-in.  GQA9 groups all 9 heads of
+     * the production 72/8 ratio and strictly dominates GQA3 for that shape, so
+     * GQA3 is dropped when both are exported.  Each lower-precedence knob is
+     * ignored with a one-time stderr notice (benchmarked separately). */
+    static int staged_swa_gqa_conflict_reported;
+    if (staged_swa_active &&
+        (swa_gqa9_requested || swa_gqa3_requested) &&
+        !staged_swa_gqa_conflict_reported) {
         fprintf(stderr,
-                "ds4: Metal Laguna SWA GQA3 ignored while staged SWA is enabled; staged SWA takes precedence (benchmark these flags separately)\n");
-        staged_swa_gqa3_conflict_reported = 1;
+                "ds4: Metal Laguna SWA grouped decode (GQA9/GQA3) ignored "
+                "while staged SWA is enabled; staged SWA takes precedence "
+                "(benchmark these flags separately)\n");
+        staged_swa_gqa_conflict_reported = 1;
     }
+    static int gqa9_gqa3_conflict_reported;
+    if (swa_gqa9_requested && swa_gqa3_requested && !staged_swa_active &&
+        !gqa9_gqa3_conflict_reported) {
+        fprintf(stderr,
+                "ds4: Metal Laguna SWA GQA3 ignored while SWA GQA9 is enabled; "
+                "GQA9 takes precedence for the 72/8 ring (benchmark these flags "
+                "separately)\n");
+        gqa9_gqa3_conflict_reported = 1;
+    }
+    const bool use_gqa9 =
+        swa_gqa9_requested && !staged_swa_active &&
+        (n_head % 9u) == 0u &&
+        ((n_head / n_head_kv) % 9u) == 0u;
     const bool use_gqa3 =
         (cache_cap > 512u ||
-         (swa_gqa3_requested && !staged_swa_active)) &&
+         (swa_gqa3_requested && !staged_swa_active && !use_gqa9)) &&
         (n_head % 3u) == 0u &&
         ((n_head / n_head_kv) % 3u) == 0u;
     const NSUInteger head_bytes = (NSUInteger)head_dim * sizeof(uint16_t);
@@ -35906,7 +35928,8 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
                                        "ds4_laguna_flash_attn_tmp")) {
         return 0;
     }
-    if (!use_gqa3 &&
+    const bool use_grouped = use_gqa3 || use_gqa9;
+    if (!use_grouped &&
         (!ds4_gpu_ensure_zero_attention_mask(mask_bytes) ||
          !ds4_gpu_ensure_scratch_buffer(&g_flash_attn_pad_buffer,
                                          &g_flash_attn_pad_bytes,
@@ -35916,12 +35939,15 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     }
 
     id<MTLComputePipelineState> pad_pipeline = nil;
-    if (has_pad && !use_gqa3) {
+    if (has_pad && !use_grouped) {
         pad_pipeline = ds4_gpu_get_flash_attn_pad_pipeline(true, (int32_t)ncpsg);
         if (!pad_pipeline) return 0;
     }
-    id<MTLComputePipelineState> vec_pipeline = use_gqa3 ?
-        ds4_gpu_get_pipeline("kernel_laguna_attention_decode_gqa3_split_f16") :
+    id<MTLComputePipelineState> vec_pipeline =
+        use_gqa9 ? ds4_gpu_get_pipeline(
+                       "kernel_laguna_attention_decode_gqa9_split_f16") :
+        use_gqa3 ? ds4_gpu_get_pipeline(
+                       "kernel_laguna_attention_decode_gqa3_split_f16") :
         ds4_gpu_get_flash_attn_vec_pipeline(
             "kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128",
             true, false, false, false, has_pad, false,
@@ -35933,7 +35959,7 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     if (!vec_pipeline || !reduce_pipeline) return 0;
 
     id<MTLComputeCommandEncoder> enc = nil;
-    if (has_pad && !use_gqa3) {
+    if (has_pad && !use_grouped) {
         ds4_gpu_flash_attn_pad_args pad_args = {
             .ne11 = (int32_t)key_count,
             .ne_12_2 = (int32_t)n_head_kv,
@@ -36010,7 +36036,8 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     [enc setBuffer:qbuf offset:q_offset atIndex:1];
     [enc setBuffer:keybuf offset:key_offset atIndex:2];
     [enc setBuffer:valuebuf offset:value_offset atIndex:3];
-    if (use_gqa3) {
+    if (use_gqa3 || use_gqa9) {
+        const uint32_t group = use_gqa9 ? 9u : 3u;
         const ds4_gpu_laguna_gqa3_decode_args grouped_args = {
             .n_head = n_head,
             .n_head_kv = n_head_kv,
@@ -36022,11 +36049,11 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
             .scale = scale,
         };
         const NSUInteger grouped_shared_bytes =
-            3u * nsg * (2u + head_dim) * sizeof(float);
+            (NSUInteger)group * nsg * (2u + head_dim) * sizeof(float);
         [enc setBytes:&grouped_args length:sizeof(grouped_args) atIndex:0];
         [enc setBuffer:g_flash_attn_tmp_buffer offset:0 atIndex:4];
         [enc setThreadgroupMemoryLength:grouped_shared_bytes atIndex:0];
-        [enc dispatchThreadgroups:MTLSizeMake(n_head / 3u, 1, nwg)
+        [enc dispatchThreadgroups:MTLSizeMake(n_head / group, 1, nwg)
              threadsPerThreadgroup:MTLSizeMake(32, nsg, 1)];
     } else {
         [enc setBytes:&vec_args length:sizeof(vec_args) atIndex:0];
@@ -36134,13 +36161,30 @@ int ds4_gpu_laguna_store_attention_tensor(
          * A full sliding ring also contains exactly the active key set; its
          * physical rotation does not affect an unmasked softmax reduction.
          * An unaligned full global cache uses the old kernel so tail padding
-         * never reads beyond the interleaved KV allocation. */
+         * never reads beyond the interleaved KV allocation.
+         *
+         * Grouped-eligible shapes (the production 72/8 and 48/8 ratios, both
+         * GQA3-eligible) use a split-K kernel that strides keys and needs no
+         * tail padding, so they may enter the flash path below 1024 keys once
+         * the history is long enough to amortize the three-dispatch split-K
+         * cost.  Below this floor the ungrouped single/8-SIMD kernel remains
+         * cheaper.  This is a default-path change: the same grouped family is
+         * already the default at >=1024 keys, so extending it down to the 512
+         * boundary only removes the 3x redundant KV traffic the ungrouped
+         * kernel paid in the 513-1023 range while keeping the padding-clamped
+         * ungrouped gate intact for non-grouped-eligible shapes. */
+        const bool grouped_eligible =
+            (n_head % 3u) == 0u &&
+            ((n_head / n_head_kv) % 3u) == 0u;
         const bool full_sliding_ring =
             cache_cap == 512u && key_count == cache_cap;
         const bool use_flash_decode =
             full_sliding_ring ||
-            (cache_cap > 512u && key_start == 0u && key_count >= 1024u &&
-             (key_count < cache_cap || key_count % 32u == 0u));
+            (cache_cap > 512u && key_start == 0u &&
+             ((grouped_eligible && key_count >= 512u &&
+               key_count < cache_cap) ||
+              (key_count >= 1024u &&
+               (key_count < cache_cap || key_count % 32u == 0u))));
         if (use_flash_decode) {
             if (!ds4_gpu_encode_laguna_flash_attention_decode(
                     cb,
