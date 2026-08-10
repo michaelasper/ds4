@@ -14466,7 +14466,12 @@ static void test_dflash_verify_depth(void) {
     }
 
     ds4_engine *engine = test_open_dflash_engine(support);
-    if (!engine || !ds4_engine_has_dflash(engine)) {
+    if (!engine) {
+        return;
+    }
+    const bool has_dflash = ds4_engine_has_dflash(engine);
+    TEST_ASSERT(has_dflash);
+    if (!has_dflash) {
         ds4_engine_close(engine);
         return;
     }
