@@ -1,4 +1,4 @@
-# Laguna Metal-only Refactor
+# LagoonNebula Metal-only Refactor
 
 This file records the migration boundary for `refactor/laguna-metal-only`.
 It is an implementation guide, not a replacement for the frozen benchmark
@@ -7,9 +7,11 @@ benchmark data remain unchanged while this branch is cleaned up.
 
 ## Current boundary
 
-The intended product is one Laguna S2.1 GGUF model family, executed on Apple
-Metal with the whole model mmap-backed. The CLI and server remain supported;
-DFlash remains a Laguna-specific optional feature for now.
+The intended product is **LagoonNebula**: one Laguna S2.1 GGUF model family,
+executed on Apple Metal with the whole model mmap-backed. The repository will
+be renamed to **`lgn2`** after the cleanup boundary is stable. The CLI and
+server remain supported; DFlash remains a Laguna-specific optional feature for
+now.
 
 The following are explicitly outside the product boundary: CPU, CUDA, ROCm,
 SSD expert streaming, distributed inference, tensor parallelism, multi-GPU
@@ -69,9 +71,10 @@ transitional and must not be interpreted as supported behavior.
    tests. Rewrite or remove DeepSeek/GLM/CUDA/ROCm/SSD/distributed fixtures,
    quantisation notes, model download cases, and stale documentation. Extract
    any still-useful Laguna-only tooling before deleting umbrella tooling.
-9. **Rename last.** Rename binaries, files, symbols, environment variables,
-   cache paths, aliases, and payload identifiers only after the runtime and
-   test contract is stable.
+9. **Rename last.** Apply the fixed LagoonNebula product identity and rename
+   the repository to `lgn2`. Rename binaries, files, symbols, environment
+   variables, cache paths, aliases, and any intentionally migrated payload
+   identifiers only after the runtime and test contract is stable.
 
 ## Guardrails
 
@@ -120,6 +123,8 @@ retaining them would defeat the rename/break objective.
 
 The current public boundary records the following decisions:
 
+- the final product name is **LagoonNebula** and the repository name is
+  **`lgn2`**;
 - DFlash remains a public, optional support-model API for Laguna S2.1;
 - legacy MTP, GLM-MTP, and DSpark option fields and public aliases are
   intentionally absent; callers must use the DFlash fields and rebuild;
@@ -127,7 +132,8 @@ The current public boundary records the following decisions:
 
 ## Deferred ABI and rename decisions
 
-No decision has yet been made on:
+The product and repository names are fixed. No decision has yet been made on
+the exact migration spelling or compatibility policy for:
 
 - renaming `ds4_*`/`DS4_*` symbols and executable names;
 - changing `DS4_METAL_*` environment variables;
