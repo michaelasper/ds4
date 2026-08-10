@@ -5828,55 +5828,7 @@ static void weights_bind_laguna_layer(ds4_layer_weights *l, const ds4_model *m, 
 }
 
 static void weights_bind_layer(ds4_layer_weights *l, const ds4_model *m, uint32_t il) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        weights_bind_laguna_layer(l, m, il);
-        return;
-    }
-
-    const uint32_t compress_ratio = ds4_layer_compress_ratio(il);
-
-    l->hc_attn_fn      = required_tensorf(m, "blk.%u.hc_attn_fn.weight", il);
-    l->hc_attn_scale   = required_tensorf(m, "blk.%u.hc_attn_scale.weight", il);
-    l->hc_attn_base    = required_tensorf(m, "blk.%u.hc_attn_base.weight", il);
-    l->attn_norm       = required_tensorf(m, "blk.%u.attn_norm.weight", il);
-    l->attn_q_a        = required_tensorf(m, "blk.%u.attn_q_a.weight", il);
-    l->attn_q_a_norm   = required_tensorf(m, "blk.%u.attn_q_a_norm.weight", il);
-    l->attn_q_b        = required_tensorf(m, "blk.%u.attn_q_b.weight", il);
-    l->attn_kv         = required_tensorf(m, "blk.%u.attn_kv.weight", il);
-    l->attn_kv_a_norm  = required_tensorf(m, "blk.%u.attn_kv_a_norm.weight", il);
-    l->attn_sinks      = required_tensorf(m, "blk.%u.attn_sinks.weight", il);
-    l->attn_output_a   = required_tensorf(m, "blk.%u.attn_output_a.weight", il);
-    l->attn_output_b   = required_tensorf(m, "blk.%u.attn_output_b.weight", il);
-    if (compress_ratio != 0) {
-        l->attn_compressor_ape  = required_tensorf(m, "blk.%u.attn_compressor_ape.weight", il);
-        l->attn_compressor_kv   = required_tensorf(m, "blk.%u.attn_compressor_kv.weight", il);
-        l->attn_compressor_gate = required_tensorf(m, "blk.%u.attn_compressor_gate.weight", il);
-        l->attn_compressor_norm = required_tensorf(m, "blk.%u.attn_compressor_norm.weight", il);
-    }
-    if (compress_ratio == 4) {
-        l->indexer_attn_q_b = required_tensorf(m, "blk.%u.indexer.attn_q_b.weight", il);
-        l->indexer_proj     = required_tensorf(m, "blk.%u.indexer.proj.weight", il);
-        l->indexer_compressor_ape  = required_tensorf(m, "blk.%u.indexer_compressor_ape.weight", il);
-        l->indexer_compressor_kv   = required_tensorf(m, "blk.%u.indexer_compressor_kv.weight", il);
-        l->indexer_compressor_gate = required_tensorf(m, "blk.%u.indexer_compressor_gate.weight", il);
-        l->indexer_compressor_norm = required_tensorf(m, "blk.%u.indexer_compressor_norm.weight", il);
-    }
-    l->hc_ffn_fn       = required_tensorf(m, "blk.%u.hc_ffn_fn.weight", il);
-    l->hc_ffn_scale    = required_tensorf(m, "blk.%u.hc_ffn_scale.weight", il);
-    l->hc_ffn_base     = required_tensorf(m, "blk.%u.hc_ffn_base.weight", il);
-    l->ffn_norm        = required_tensorf(m, "blk.%u.ffn_norm.weight", il);
-    l->ffn_gate_inp    = required_tensorf(m, "blk.%u.ffn_gate_inp.weight", il);
-    l->ffn_exp_probs_b = tensor_by_namef(m, "blk.%u.exp_probs_b.bias", il);
-    l->ffn_gate_exps   = required_tensorf(m, "blk.%u.ffn_gate_exps.weight", il);
-    l->ffn_up_exps     = required_tensorf(m, "blk.%u.ffn_up_exps.weight", il);
-    l->ffn_down_exps   = required_tensorf(m, "blk.%u.ffn_down_exps.weight", il);
-    l->ffn_gate_shexp  = required_tensorf(m, "blk.%u.ffn_gate_shexp.weight", il);
-    l->ffn_up_shexp    = required_tensorf(m, "blk.%u.ffn_up_shexp.weight", il);
-    l->ffn_down_shexp  = required_tensorf(m, "blk.%u.ffn_down_shexp.weight", il);
-
-    if (il < DS4_N_HASH_LAYER) {
-        l->ffn_gate_tid2eid = required_tensorf(m, "blk.%u.ffn_gate_tid2eid.weight", il);
-    }
+    weights_bind_laguna_layer(l, m, il);
 }
 
 /* Bind tensor names once into the fixed DS4 layer layout.  This is the point
