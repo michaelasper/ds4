@@ -36243,12 +36243,92 @@ struct ds4_engine {
     bool mtp_ready;
     bool dflash_ready;
     bool share_session_prefill_workspace;
+    size_t live_sessions;
+    bool closing;
 #ifndef DS4_NO_GPU
     bool shared_prefill_workspace_ready;
     ds4_gpu_graph shared_prefill_workspace;
 #endif
 
 };
+
+#ifdef DS4_TEST_HOOKS
+typedef enum {
+    DS4_ENGINE_CLOSE_BEGIN,
+    DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN,
+    DS4_ENGINE_CLOSE_GPU_DRAINED,
+    DS4_ENGINE_CLOSE_SHARED_WORKSPACE_RELEASED,
+    DS4_ENGINE_CLOSE_GPU_CLEANUP_BEGIN,
+    DS4_ENGINE_CLOSE_GPU_CLEANED,
+    DS4_ENGINE_CLOSE_CPU_WORKERS_STOPPED,
+    DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED,
+    DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED,
+    DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED,
+    DS4_ENGINE_CLOSE_SSD_RELEASED,
+    DS4_ENGINE_CLOSE_LOCK_RELEASED,
+    DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING,
+} ds4_engine_close_phase;
+
+typedef struct {
+    ds4_engine *engine;
+    ds4_engine_close_phase phases[16];
+    size_t phase_count;
+    bool maps_live_through_gpu;
+    bool aliases_cleared_before_unmap;
+    bool dflash_shadow_unmapped_first;
+    bool model_maps_unmapped;
+} ds4_test_engine_close_trace;
+
+static ds4_test_engine_close_trace *g_ds4_test_engine_close_trace;
+
+static bool ds4_test_engine_bytes_zero(const void *ptr, size_t size) {
+    const unsigned char *bytes = ptr;
+    for (size_t i = 0; i < size; i++) {
+        if (bytes[i] != 0) return false;
+    }
+    return true;
+}
+
+static void ds4_engine_close_note(ds4_engine *e,
+                                  ds4_engine_close_phase phase) {
+    ds4_test_engine_close_trace *trace = g_ds4_test_engine_close_trace;
+    if (!trace || trace->engine != e) return;
+    if (trace->phase_count < sizeof(trace->phases) / sizeof(trace->phases[0])) {
+        trace->phases[trace->phase_count++] = phase;
+    }
+
+    if (phase >= DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN &&
+        phase <= DS4_ENGINE_CLOSE_GPU_CLEANED) {
+        trace->maps_live_through_gpu =
+            trace->maps_live_through_gpu &&
+            e->model.map != NULL && e->mtp_model.map != NULL &&
+            e->dflash_model.map != NULL && e->dflash_f16_map != NULL;
+    } else if (phase == DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED) {
+        trace->aliases_cleared_before_unmap =
+            e->model.map != NULL && e->mtp_model.map != NULL &&
+            e->dflash_model.map != NULL && e->dflash_f16_map != NULL &&
+            ds4_test_engine_bytes_zero(&e->weights, sizeof(e->weights)) &&
+            ds4_test_engine_bytes_zero(&e->mtp_weights,
+                                       sizeof(e->mtp_weights)) &&
+            ds4_test_engine_bytes_zero(&e->dspark_weights,
+                                       sizeof(e->dspark_weights)) &&
+            ds4_test_engine_bytes_zero(&e->dflash_weights,
+                                       sizeof(e->dflash_weights));
+    } else if (phase == DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED) {
+        trace->dflash_shadow_unmapped_first =
+            e->dflash_f16_map == NULL &&
+            e->dflash_f16_map_size == 0 &&
+            e->model.map != NULL && e->mtp_model.map != NULL &&
+            e->dflash_model.map != NULL;
+    } else if (phase == DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED) {
+        trace->model_maps_unmapped =
+            e->model.map == NULL && e->mtp_model.map == NULL &&
+            e->dflash_model.map == NULL;
+    }
+}
+#else
+#define ds4_engine_close_note(engine, phase) ((void)(engine))
+#endif
 
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
 static bool laguna_metal_router_simd_topk_preflight(
@@ -51512,6 +51592,7 @@ typedef struct ds4_dspark_spec_stats {
 struct ds4_session {
     ds4_engine *engine;
     bool speculative_enabled;
+    bool registered_with_engine;
 #ifndef DS4_NO_GPU
     ds4_gpu_graph graph;
     ds4_glm_gpu_graph glm_graph;
@@ -59559,27 +59640,134 @@ void ds4_engine_sampling_defaults(ds4_engine *e, float *temperature,
     }
 }
 
+static bool ds4_session_register_with_engine(ds4_session *s) {
+    ds4_engine *e = s ? s->engine : NULL;
+    if (!e || s->registered_with_engine) return false;
+    if (e->closing) {
+        fprintf(stderr,
+                "ds4: cannot register a session while the engine is closing\n");
+        return false;
+    }
+    if (e->live_sessions == SIZE_MAX) {
+        fprintf(stderr, "ds4: engine live-session count overflow\n");
+        return false;
+    }
+    e->live_sessions++;
+    s->registered_with_engine = true;
+    return true;
+}
+
+static void ds4_session_unregister_from_engine(ds4_session *s) {
+    if (!s || !s->registered_with_engine) return;
+    ds4_engine *e = s->engine;
+    s->registered_with_engine = false;
+    if (!e) {
+        fprintf(stderr,
+                "ds4: registered session lost its engine during teardown\n");
+        return;
+    }
+    if (e->live_sessions == 0) {
+        fprintf(stderr,
+                "ds4: engine live-session count was already zero during session teardown\n");
+        return;
+    }
+    e->live_sessions--;
+}
+
+static int ds4_session_publish(ds4_session **out, ds4_session *s) {
+    if (!out || !s || !ds4_session_register_with_engine(s)) {
+        ds4_session_free(s);
+        return 1;
+    }
+    *out = s;
+    return 0;
+}
+
 void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
-    ds4_expert_profile_close();
-    weights_free(&e->weights);
-    vocab_free(&e->vocab);
-    ds4_threads_shutdown();
-    if (e->mtp_model.map) model_close(&e->mtp_model);
-    if (e->dflash_model.map) model_close(&e->dflash_model);
-    model_close(&e->model);
+    if (e->closing) {
+        fprintf(stderr, "ds4: engine close is already in progress\n");
+        return;
+    }
+    if (e->live_sessions != 0) {
+        fprintf(stderr,
+                "ds4: refusing to close engine with %zu live session%s\n",
+                e->live_sessions,
+                e->live_sessions == 1 ? "" : "s");
+        return;
+    }
+    e->closing = true;
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_BEGIN);
+
+    /* Model tensors are exposed to graph backends as no-copy views.  Drain
+     * submitted work and destroy every backend cache while the main, support,
+     * and optional shadow mappings are all still valid. */
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN);
+#ifndef DS4_NO_GPU
+    bool gpu_drained = false;
+    if (e->metal_ready) {
+        /* metal_ready proves initialization, so this guard prevents the
+         * synchronize API from initializing a backend during teardown. */
+        gpu_drained = ds4_gpu_synchronize() != 0;
+        if (!gpu_drained) {
+            fprintf(stderr,
+                    "ds4: warning: GPU drain failed during engine close; "
+                    "backend cleanup will perform the terminal wait\n");
+        }
+    }
+#endif
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_DRAINED);
 #ifndef DS4_NO_GPU
     if (e->shared_prefill_workspace_ready) {
-        metal_graph_free_prefill_workspace(&e->shared_prefill_workspace);
+        if (e->metal_ready && gpu_drained) {
+            /* Tensor handles must be retired before ds4_gpu_cleanup resets
+             * the backend's live-handle tracking table. */
+            metal_graph_free_prefill_workspace(&e->shared_prefill_workspace);
+        } else {
+            fprintf(stderr,
+                    "ds4: warning: shared prefill workspace could not be "
+                    "retired before GPU cleanup\n");
+        }
         e->shared_prefill_workspace_ready = false;
     }
-    ds4_gpu_cleanup();
 #endif
-    lgn_dflash_release_f16_map(e->dflash_f16_map, e->dflash_f16_map_size);
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_SHARED_WORKSPACE_RELEASED);
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_CLEANUP_BEGIN);
+#ifndef DS4_NO_GPU
+    ds4_gpu_cleanup();
+    e->metal_ready = false;
+    memset(&e->shared_prefill_workspace, 0,
+           sizeof(e->shared_prefill_workspace));
+#endif
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_CLEANED);
+
+    /* No worker or host-side tensor alias may survive into model unmapping. */
+    ds4_threads_shutdown();
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_CPU_WORKERS_STOPPED);
+    ds4_expert_profile_close();
+    weights_free(&e->weights);
+    memset(&e->mtp_weights, 0, sizeof(e->mtp_weights));
+    memset(&e->dspark_weights, 0, sizeof(e->dspark_weights));
+    memset(&e->dflash_weights, 0, sizeof(e->dflash_weights));
+    vocab_free(&e->vocab);
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED);
+
+    lgn_dflash_release_f16_map(e->dflash_f16_map,
+                               e->dflash_f16_map_size);
+    e->dflash_f16_map = NULL;
+    e->dflash_f16_map_size = 0;
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED);
+    model_close(&e->mtp_model);
+    model_close(&e->dflash_model);
+    model_close(&e->model);
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED);
     ds4_ssd_memory_lock_release(&e->simulated_memory);
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_SSD_RELEASED);
     ds4_release_instance_lock();
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_LOCK_RELEASED);
     free(e->directional_steering_dirs);
     free(e->directional_steering_file);
+    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING);
     free(e);
 }
 
@@ -59696,6 +59884,10 @@ static void ds4_session_print_dspark_stats(const ds4_session *s) {
 
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     if (!out || !e || ctx_size <= 0) return 1;
+    if (e->closing) {
+        fprintf(stderr, "ds4: cannot create a session while the engine is closing\n");
+        return 1;
+    }
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (!laguna_metal_swa_gqa9_preflight(
             e, "session create", NULL, 0)) return 1;
@@ -59722,8 +59914,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         cpu_decode_scratch_init(&s->cpu_scratch, (uint32_t)ctx_size);
         s->logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
         s->sample_probs = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->sample_probs[0]));
-        *out = s;
-        return 0;
+        return ds4_session_publish(out, s);
     }
 #ifdef DS4_NO_GPU
     return 1;
@@ -59777,8 +59968,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         s->logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
         s->sample_probs =
             xmalloc((size_t)DS4_N_VOCAB * sizeof(s->sample_probs[0]));
-        *out = s;
-        return 0;
+        return ds4_session_publish(out, s);
     }
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
         const uint32_t normal_layers = glm_graph_normal_layer_count();
@@ -59834,8 +60024,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         s->logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
         s->sample_probs =
             xmalloc((size_t)DS4_N_VOCAB * sizeof(s->sample_probs[0]));
-        *out = s;
-        return 0;
+        return ds4_session_publish(out, s);
     }
     s->prefill_cap = metal_graph_prefill_cap_for_prompt(ctx_size,
                                                         e->prefill_chunk);
@@ -59948,8 +60137,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         s->mtp_logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->mtp_logits[0]));
         s->mtp_draft_token = -1;
     }
-    *out = s;
-    return 0;
+    return ds4_session_publish(out, s);
 #endif
 }
 
@@ -60005,8 +60193,152 @@ void ds4_session_free(ds4_session *s) {
     free(s->dspark_markov_bias);
     free(s->dspark_conf_features);
 #endif
+    ds4_session_unregister_from_engine(s);
+    s->engine = NULL;
     free(s);
 }
+
+#ifdef DS4_TEST_HOOKS
+bool ds4_test_engine_session_lifecycle(void) {
+    bool ok = true;
+    ds4_engine *e = xcalloc(1, sizeof(*e));
+    e->model.fd = -1;
+    e->mtp_model.fd = -1;
+    e->dflash_model.fd = -1;
+    e->backend = DS4_BACKEND_CPU;
+    e->power_percent = 73;
+
+    ds4_session *registered = xcalloc(1, sizeof(*registered));
+    registered->engine = e;
+    ok = ok && ds4_session_register_with_engine(registered);
+    ok = ok && registered->registered_with_engine && e->live_sessions == 1;
+
+    /* A partially-built/failed session must not consume another session's
+     * registration or underflow the engine count when its cleanup runs. */
+    ds4_session *unregistered = xcalloc(1, sizeof(*unregistered));
+    unregistered->engine = e;
+    ds4_session_free(unregistered);
+    ok = ok && e->live_sessions == 1;
+
+    ds4_engine_close(e);
+    ok = ok && !e->closing && e->live_sessions == 1 &&
+         e->power_percent == 73;
+
+    ds4_session_free(registered);
+    ok = ok && e->live_sessions == 0;
+
+    ds4_session *out = (ds4_session *)(uintptr_t)0x1;
+    ok = ok && ds4_session_create(&out, e, 0) != 0 &&
+         out == (ds4_session *)(uintptr_t)0x1 && e->live_sessions == 0;
+
+    e->closing = true;
+    ok = ok && ds4_session_create(&out, e, 1) != 0 &&
+         out == (ds4_session *)(uintptr_t)0x1 && e->live_sessions == 0;
+    ds4_session *late = xcalloc(1, sizeof(*late));
+    late->engine = e;
+    ok = ok && ds4_session_publish(&out, late) != 0 &&
+         out == (ds4_session *)(uintptr_t)0x1 && e->live_sessions == 0;
+    e->closing = false;
+
+    e->live_sessions = SIZE_MAX;
+    ds4_session *overflow = xcalloc(1, sizeof(*overflow));
+    overflow->engine = e;
+    ok = ok && !ds4_session_register_with_engine(overflow) &&
+         !overflow->registered_with_engine && e->live_sessions == SIZE_MAX;
+    ds4_session_free(overflow);
+    ok = ok && e->live_sessions == SIZE_MAX;
+    e->live_sessions = 0;
+
+    free(e);
+    return ok;
+}
+
+bool ds4_test_engine_close_order(void) {
+    static const ds4_engine_close_phase expected[] = {
+        DS4_ENGINE_CLOSE_BEGIN,
+        DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN,
+        DS4_ENGINE_CLOSE_GPU_DRAINED,
+        DS4_ENGINE_CLOSE_SHARED_WORKSPACE_RELEASED,
+        DS4_ENGINE_CLOSE_GPU_CLEANUP_BEGIN,
+        DS4_ENGINE_CLOSE_GPU_CLEANED,
+        DS4_ENGINE_CLOSE_CPU_WORKERS_STOPPED,
+        DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED,
+        DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED,
+        DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED,
+        DS4_ENGINE_CLOSE_SSD_RELEASED,
+        DS4_ENGINE_CLOSE_LOCK_RELEASED,
+        DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING,
+    };
+
+    const long page_long = sysconf(_SC_PAGESIZE);
+    if (page_long <= 0) return false;
+    const size_t page = (size_t)page_long;
+#if defined(MAP_ANONYMOUS)
+    const int anonymous = MAP_ANONYMOUS;
+#else
+    const int anonymous = MAP_ANON;
+#endif
+    void *maps[4] = {0};
+    for (size_t i = 0; i < sizeof(maps) / sizeof(maps[0]); i++) {
+        maps[i] = mmap(NULL, page, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | anonymous, -1, 0);
+        if (maps[i] == MAP_FAILED) {
+            maps[i] = NULL;
+            for (size_t j = 0; j < i; j++) munmap(maps[j], page);
+            return false;
+        }
+    }
+
+    ds4_engine *e = xcalloc(1, sizeof(*e));
+    e->model.fd = -1;
+    e->mtp_model.fd = -1;
+    e->dflash_model.fd = -1;
+    e->backend = DS4_BACKEND_CPU;
+    e->model.map = maps[0];
+    e->model.size = page;
+    e->mtp_model.map = maps[1];
+    e->mtp_model.size = page;
+    e->dflash_model.map = maps[2];
+    e->dflash_model.size = page;
+    e->dflash_f16_map = maps[3];
+    e->dflash_f16_map_size = page;
+    memset(&e->weights, 0xa5, sizeof(e->weights));
+    memset(&e->mtp_weights, 0xa5, sizeof(e->mtp_weights));
+    memset(&e->dspark_weights, 0xa5, sizeof(e->dspark_weights));
+    memset(&e->dflash_weights, 0xa5, sizeof(e->dflash_weights));
+
+    ds4_test_engine_close_trace trace = {
+        .engine = e,
+        .maps_live_through_gpu = true,
+    };
+    ds4_test_engine_close_trace *previous = g_ds4_test_engine_close_trace;
+    g_ds4_test_engine_close_trace = &trace;
+    ds4_engine_close(e);
+    g_ds4_test_engine_close_trace = previous;
+
+    const bool phase_count_ok =
+        trace.phase_count == sizeof(expected) / sizeof(expected[0]);
+    const bool phases_ok =
+        phase_count_ok && memcmp(trace.phases, expected, sizeof(expected)) == 0;
+    const bool ok = phases_ok && trace.maps_live_through_gpu &&
+                    trace.aliases_cleared_before_unmap &&
+                    trace.dflash_shadow_unmapped_first &&
+                    trace.model_maps_unmapped;
+    if (!ok) {
+        fprintf(stderr,
+                "ds4: engine close-order test failed: phases=%zu/%zu order=%d "
+                "gpu_maps=%d aliases=%d shadow=%d models=%d\n",
+                trace.phase_count,
+                sizeof(expected) / sizeof(expected[0]),
+                phases_ok,
+                trace.maps_live_through_gpu,
+                trace.aliases_cleared_before_unmap,
+                trace.dflash_shadow_unmapped_first,
+                trace.model_maps_unmapped);
+    }
+    return ok;
+}
+#endif
 
 int ds4_session_power(ds4_session *s) {
     if (!s || !s->engine) return 100;

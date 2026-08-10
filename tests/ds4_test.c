@@ -14552,6 +14552,11 @@ static void test_server_unit_group(void) {
     ds4_server_unit_tests_run();
 }
 
+static void test_engine_lifecycle(void) {
+    TEST_ASSERT(ds4_test_engine_session_lifecycle());
+    TEST_ASSERT(ds4_test_engine_close_order());
+}
+
 typedef void (*test_fn)(void);
 
 typedef struct {
@@ -14569,6 +14574,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-selector-parser", "laguna-selector-parser",
      "strict Laguna selector and prefill-route parser boundaries",
      test_laguna_selector_parser, false},
+    {"--engine-lifecycle", "engine-lifecycle",
+     "session ownership and model-map-safe engine shutdown ordering",
+     test_engine_lifecycle, true},
 #ifndef DS4_NO_GPU
 #if defined(__APPLE__)
     {"--dflash-payload-lifecycle", "dflash-payload-lifecycle",

@@ -292,6 +292,8 @@ void ds4_test_logprob_stats_reset(void);
 void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out);
 int ds4_test_logprob_cache_probe(void);
 int ds4_test_sample_arena_lifecycle(void);
+bool ds4_test_engine_session_lifecycle(void);
+bool ds4_test_engine_close_order(void);
 /* Exercise the raw-graph admission guard with an initialized sentinel graph.
  * The hook is test-only and must return without allocating or opening a
  * command batch when the caller has arranged a malformed Q8 or unavailable

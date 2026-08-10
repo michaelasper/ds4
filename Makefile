@@ -61,7 +61,7 @@ METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 UNSUPPORTED_TARGETS := cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm \
 	test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch
 
-.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dflash-verify-depth $(UNSUPPORTED_TARGETS)
+.PHONY: all help clean test test-legacy test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dflash-verify-depth $(UNSUPPORTED_TARGETS)
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -245,8 +245,11 @@ tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_t
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
 	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
 
+test-engine-lifecycle: ds4_test
+	./ds4_test --engine-lifecycle
+
 test-legacy: test-lgn ds4-eval q4k-dot-test mxfp4-dot-test \
-	$(SAMPLING_TEST) $(METAL_EXACT_TEST) $(SSD_STREAMING_HOOK_TEST) ds4 ds4-server ds4-bench
+	$(SAMPLING_TEST) $(METAL_EXACT_TEST) $(SSD_STREAMING_HOOK_TEST) ds4 ds4-server ds4-bench test-engine-lifecycle
 	./ds4-eval --self-test-extractors
 	$(if $(SSD_STREAMING_HOOK_TEST),./$(SSD_STREAMING_HOOK_TEST),:)
 	./tests/test_sampling
@@ -254,7 +257,7 @@ test-legacy: test-lgn ds4-eval q4k-dot-test mxfp4-dot-test \
 test-laguna-cli-options: ds4 ds4-server tests/test_laguna_cli_options.sh
 	./tests/test_laguna_cli_options.sh
 
-test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options ds4_test ds4 ds4-server ds4-bench ds4-eval
+test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options test-engine-lifecycle ds4 ds4-server ds4-bench ds4-eval
 	@set -eu; \
 	./ds4_test --laguna-architecture --laguna-selector-parser --server; \
 	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
