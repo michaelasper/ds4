@@ -71,7 +71,7 @@ major refactor boundary, verify:
 
 Do not add new CPU, CUDA, ROCm, SSD, distributed, tensor-parallel, multi-GPU,
 MTP, DSpark, steering, power, or custom-prefill test obligations. Keep the
-benchmark/default Laguna S2.1 baseline frozen while this work proceeds on the
+frozen `laguna-s2.1` benchmark commit unchanged while this work proceeds on the
 refactor branch; compare against it rather than changing it.
 
 ## Safety

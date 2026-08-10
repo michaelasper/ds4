@@ -2,8 +2,8 @@
 
 This file records the migration boundary for `refactor/laguna-metal-only`.
 It is an implementation guide, not a replacement for the frozen benchmark
-baseline. The existing `benchmark/default` Laguna S2.1 behaviour, defaults,
-and benchmark data remain unchanged while this branch is cleaned up.
+baseline. The frozen `laguna-s2.1` benchmark commit, its defaults, and its
+benchmark data remain unchanged while this branch is cleaned up.
 
 ## Current boundary
 
@@ -54,7 +54,7 @@ The `ds4_*` names are retained temporarily; renaming is deliberately deferred.
 ## Guardrails
 
 - Work only on `refactor/laguna-metal-only`; do not modify or reinterpret the
-  frozen `benchmark/default` Laguna S2.1 baseline.
+  frozen `laguna-s2.1` benchmark commit.
 - Make the smallest coherent change at each boundary. Do not mix a broad
   rename with backend or model deletion.
 - Remove flags and dead branches instead of preserving unsupported behaviour
@@ -81,8 +81,9 @@ At each stage, the minimum gate is:
   tests pass;
 - the retained DFlash regression passes.
 
-Use the frozen Laguna S2.1 benchmark/default only as a comparison fixture. Do
-not alter its model default, benchmark results, or runbook while refactoring.
+Use the frozen Laguna S2.1 default-branch commit only as a comparison fixture.
+Do not alter its model default, benchmark results, or runbook while
+refactoring.
 Deletion stages should also include a repository search for removed flags,
 targets, source names, and documentation claims so stale compatibility does
 not survive the code removal.
