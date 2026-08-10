@@ -1578,6 +1578,8 @@ int ds4_gpu_glm_rope_tail_tensor(
         float           beta_fast,
         float           beta_slow);
 
+/* Target graph single-tensor form: rejects the paired selector when it is
+ * requested, so target callers cannot silently split Q/K. */
 int ds4_gpu_laguna_head_rms_norm_rope_tensor(
         ds4_gpu_tensor *x,
         const void     *model_map,
@@ -1596,6 +1598,29 @@ int ds4_gpu_laguna_head_rms_norm_rope_tensor(
         float           beta_fast,
         float           beta_slow,
         float           eps);
+
+#ifdef __APPLE__
+/* DFlash support-only K staging.  Under the strict atlas plan this consumes
+ * the independent one-family support atlas and remains separate evidence. */
+int ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+        ds4_gpu_tensor *x,
+        const void     *model_map,
+        uint64_t        model_size,
+        uint64_t        weight_offset,
+        uint32_t        n_tokens,
+        uint32_t        n_head,
+        uint32_t        head_dim,
+        uint32_t        n_rot,
+        uint32_t        pos0,
+        uint32_t        n_ctx_orig,
+        float           freq_base,
+        float           freq_scale,
+        float           ext_factor,
+        float           attn_factor,
+        float           beta_fast,
+        float           beta_slow,
+        float           eps);
+#endif
 
 int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         ds4_gpu_tensor *q,
@@ -1618,6 +1643,101 @@ int ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
         float           beta_fast,
         float           beta_slow,
         float           eps);
+
+#ifdef __APPLE__
+/* Strict opt-in state: -1 is a malformed value, 0 is unset/empty/0, and 1 is
+ * the literal requested value.  These diagnostics do not encode graph work. */
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_env_mode(void);
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+        uint32_t n_q_head,
+        uint32_t n_k_head,
+        uint32_t head_dim,
+        uint32_t n_rot);
+/* Frozen graph-plan state: -2 is unplanned, -1 malformed/unavailable, 0 is
+ * disabled, and 1 is the literal opt-in.  Production routes use these
+ * cached values instead of reparsing the environment per layer. */
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached(void);
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled(void);
+/* Returns 1 when the frozen plan was reset, 0 when active/pending work made
+ * reset unsafe.  Production never calls this test-only hook. */
+int ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test(void);
+
+/* Encoded-dispatch evidence for the distinct SIMD32 PSO.  This is not a
+ * completion counter: callers must end/wait their command batch before using
+ * it as path evidence. */
+uint64_t ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count(void);
+/* Completion-scoped evidence: increments only when an owning command buffer
+ * containing the SIMD32 route completes successfully. */
+uint64_t ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count(void);
+
+/* Strict Laguna S 2.1 RoPE angle-atlas experiment.  The atlas contains both
+ * the global 64-rotary and SWA 128-rotary families, generated once per token
+ * batch on the GPU and consumed by the atlas-specific Q/K PSOs. */
+int ds4_gpu_laguna_rope_atlas_env_mode(void);
+/* Frozen graph-plan state: -2 is unplanned, -1 malformed, 0 disabled, 1
+ * enabled.  Production callers use this instead of reparsing the environment
+ * after preflight. */
+int ds4_gpu_laguna_rope_atlas_plan_mode_cached(void);
+/* Read-only completed-key query.  A target key with only an encoded/pending
+ * generation is deliberately not reusable across graph command boundaries. */
+int ds4_gpu_laguna_rope_atlas_target_reuse_ready(
+    uint32_t n_tokens,
+    uint32_t pos0);
+int ds4_gpu_laguna_rope_atlas_trace_enabled(void);
+int ds4_gpu_laguna_rope_atlas_preflight(
+    uint32_t n_q_head,
+    uint32_t n_k_head,
+    uint32_t head_dim,
+    uint32_t n_rot);
+/* Test-only plan reset for subprocess-style environment matrix tests. */
+/* Returns 1 when the frozen plan/cache was reset, 0 when active/pending work
+ * made reset unsafe. */
+int ds4_gpu_laguna_rope_atlas_plan_reset_for_test(void);
+/* Direct atlas generate/consumer wrappers require a successful atlas
+ * preflight for the active Laguna geometry; an unplanned (-2) state is
+ * intentionally treated as disabled rather than auto-selecting a plan. */
+int ds4_gpu_laguna_rope_atlas_generate(uint32_t n_tokens, uint32_t pos0);
+uint64_t ds4_gpu_laguna_rope_atlas_encoded_dispatch_count(void);
+uint64_t ds4_gpu_laguna_rope_atlas_consumed_dispatch_count(void);
+uint64_t ds4_gpu_laguna_rope_atlas_consumed_family_count(uint32_t family);
+uint64_t ds4_gpu_laguna_rope_atlas_completed_generated_count(void);
+uint64_t ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count(void);
+uint64_t ds4_gpu_laguna_rope_atlas_completed_family_count(uint32_t family);
+uint64_t ds4_gpu_laguna_rope_support_atlas_encoded_dispatch_count(void);
+uint64_t ds4_gpu_laguna_rope_support_atlas_consumed_dispatch_count(void);
+uint64_t ds4_gpu_laguna_rope_support_atlas_completed_generated_count(void);
+uint64_t ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count(void);
+#ifdef DS4_TEST_HOOKS
+/* Test-only cache proof: reports whether the current target key was promoted
+ * by a successfully completed generator command buffer. */
+int ds4_gpu_laguna_rope_atlas_valid_completed_for_test(void);
+/* Focused-test poison hook: encodes a GPU fill into the active command batch
+ * without invalidating the corresponding cache key, so consumers must prove
+ * they load the atlas rather than recomputing angles or using stock RoPE. */
+int ds4_gpu_laguna_rope_atlas_test_poison(uint32_t support_atlas);
+/* Test-only deferred graph evidence seam.  Snapshot while an owning command
+ * batch is active, then complete after ds4_gpu_end_commands(); production
+ * builds do not export these helpers. */
+int ds4_laguna_test_rope_atlas_deferred_snapshot(
+    uint64_t generated_before,
+    uint64_t expected_generated,
+    uint64_t consumed_before,
+    uint64_t family0_before,
+    uint64_t family1_before,
+    uint32_t n_tokens);
+int ds4_laguna_test_rope_atlas_deferred_complete(void);
+#endif
+
+/* Pure graph route seam: atlas or SIMD32 plans force paired Q/K even for
+ * ordinary prefill, capture, verifier, or draft-token batches. */
+int ds4_laguna_graph_prefill_qk_norm_rope_paired_route(
+    int simd32_plan_mode,
+    int atlas_plan_mode,
+    int exact_q8_rows,
+    int gpu_draft_tokens,
+    int capture,
+    int explicit_request);
+#endif
 
 int ds4_gpu_laguna_qkvg_f16_tensor(
         ds4_gpu_tensor       *q,
