@@ -296,7 +296,7 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
                 last_ws_start = p;
                 if (scan.cp == '\r' || scan.cp == '\n') last_newline_end = scan.next;
                 p = scan.next;
-                nspace++;
+                if (nspace < 2) nspace++;
             }
             if (last_newline_end) {
                 pos = last_newline_end;
