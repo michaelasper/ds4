@@ -1796,7 +1796,6 @@ int main(int argc, char **argv) {
     cfg.engine.inspect_only = cfg.inspect;
     cfg.engine.metal_graph_test = cfg.gen.metal_graph_test;
     cfg.engine.context_size = cfg.gen.ctx_size;
-    cfg.engine.placement_ctx_hint = cfg.gen.ctx_size;
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &cfg.engine) != 0) {
         free(cfg.prompt_owned);

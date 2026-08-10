@@ -527,7 +527,6 @@ int main(int argc, char **argv) {
         .backend = DS4_BACKEND_METAL,
         .n_threads = 0,
         .context_size = ctx_size,
-        .placement_ctx_hint = ctx_size,
         .warm_weights = false,
         .quality = quality,
     };

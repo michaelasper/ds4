@@ -103,15 +103,10 @@ typedef struct {
     bool dspark_strict;
     bool dflash_p_min_set;
     bool dspark_confidence_threshold_set;
-    bool cuda_tensor_parallel;
     bool ssd_streaming;
     bool ssd_streaming_cold;
     bool ssd_streaming_full_layers_set;
     bool inspect_only;
-    /* Multi-GPU placement uses this to price per-layer KV storage. */
-    int placement_ctx_hint;
-    /* Number of independently allocated session graphs/caches to reserve. */
-    int placement_session_count_hint;
     /* Server batch mode serializes execution and can share prefill scratch. */
     bool share_session_prefill_workspace;
     bool first_token_test;
@@ -147,27 +142,6 @@ typedef struct {
 } ds4_session_payload_file;
 
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt);
-
-/* Multi-GPU pipeline-parallel entry point (wave 2).
- *
- * Accepts an optional ds4_gpu_config (defined in ds4_gpu_mgpu.h) that
- * lets callers describe a multi-GPU placement target. Passing NULL is
- * back-compatible with ds4_engine_open and produces identical engine
- * state — bit-equivalent execution at runtime.
- *
- * When a non-NULL config is supplied AND the computed placement spans
- * more than one tier (either multiple GPUs or any CPU-spill), this
- * wave-2 implementation prints the layout and refuses to open: full
- * multi-tier execution wiring lands in a follow-up task
- * (mgpu-graph-session-execution). Callers receive a non-zero return
- * and a documented stderr notice. */
-/* ds4_gpu_config is declared in ds4_gpu_mgpu.h, which callers should
- * include separately. We forward-declare it here so this header can be
- * used as-is (callers passing NULL don't need the struct definition). */
-struct ds4_gpu_config;
-int ds4_engine_create_with_gpu_config(ds4_engine **out,
-                                       const ds4_engine_options *opt,
-                                       const struct ds4_gpu_config *gpu_cfg);
 void ds4_engine_close(ds4_engine *e);
 void ds4_engine_summary(ds4_engine *e);
 int ds4_engine_vocab_size(ds4_engine *e);

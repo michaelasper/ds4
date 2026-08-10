@@ -236,12 +236,6 @@ ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h ds4_gpu_mgpu.h ds4_layer
 ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h ds4_layer_pack.h lgn.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-tests/test_engine_mgpu_placement.o: tests/test_engine_mgpu_placement.c ds4.h ds4_gpu_mgpu.h ds4_layer_pack.h
-	$(CC) $(CFLAGS) -I. -c -o $@ $<
-
-tests/test_engine_mgpu_placement: tests/test_engine_mgpu_placement.o ds4_cpu_test_hooks.o lgn.o ds4_ssd.o ds4_layer_pack.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
-
 tests/test_ssd_streaming_hooks.o: tests/test_ssd_streaming_hooks.c
 	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
@@ -255,12 +249,11 @@ ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SO
 	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
 
 test-legacy: test-lgn ds4-eval q4k-dot-test mxfp4-dot-test \
-	tests/test_layer_pack tests/test_engine_mgpu_placement \
+	tests/test_layer_pack \
 	$(SAMPLING_TEST) $(METAL_EXACT_TEST) $(SSD_STREAMING_HOOK_TEST) ds4 ds4-server ds4-bench
 	./ds4-eval --self-test-extractors
 	$(if $(SSD_STREAMING_HOOK_TEST),./$(SSD_STREAMING_HOOK_TEST),:)
 	./tests/test_layer_pack
-	./tests/test_engine_mgpu_placement
 	./tests/test_sampling
 
 test-laguna-cli-options: ds4 ds4-server tests/test_laguna_cli_options.sh
