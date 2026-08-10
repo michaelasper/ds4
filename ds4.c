@@ -37699,21 +37699,11 @@ static bool ascii_space(uint8_t c) {
            c == '\v' || c == '\f';
 }
 
-static bool ascii_newline(uint8_t c) {
-    return c == '\n' || c == '\r';
-}
-
 static bool joyai_ascii_punct_symbol(uint8_t c) {
     return (c >= '!' && c <= '/') ||
            (c >= ':' && c <= '@') ||
            (c >= '[' && c <= '`') ||
            (c >= '{' && c <= '~');
-}
-
-static bool utf8_is_cjk_hira_kata(uint32_t cp) {
-    return (cp >= 0x4e00 && cp <= 0x9fa5) ||
-           (cp >= 0x3040 && cp <= 0x309f) ||
-           (cp >= 0x30a0 && cp <= 0x30ff);
 }
 
 static uint32_t utf8_peek_one(const char *s, uint64_t len, uint64_t pos, uint64_t *next) {
@@ -37736,36 +37726,6 @@ static uint32_t utf8_peek_one(const char *s, uint64_t len, uint64_t pos, uint64_
            ((uint32_t)((uint8_t)s[pos + 1] & 0x3f) << 12) |
            ((uint32_t)((uint8_t)s[pos + 2] & 0x3f) << 6) |
            ((uint32_t)((uint8_t)s[pos + 3] & 0x3f));
-}
-
-static bool joyai_letter_like_at(const char *s, uint64_t len, uint64_t pos) {
-    (void)len;
-    uint8_t c = (uint8_t)s[pos];
-    if (c < 128) return ascii_alpha(c);
-
-    /*
-     * The JoyAI tokenizer maps Unicode letters into a collapsed regex alphabet before
-     * applying the JoyAI pre-tokenizer.  The prompts we care about are mostly
-     * ASCII, but treating non-ASCII non-control bytes as letters preserves the
-     * useful behavior for ordinary UTF-8 text such as Italian accents.  CJK and
-     * kana are isolated by the JoyAI pre-tokenizer before the generic letter
-     * rule, below.
-     */
-    return true;
-}
-
-static uint64_t joyai_consume_letters(const char *s, uint64_t len, uint64_t pos) {
-    while (pos < len && joyai_letter_like_at(s, len, pos)) {
-        pos = next_utf8_char(s, len, pos);
-    }
-    return pos;
-}
-
-static bool joyai_cjk_at(const char *s, uint64_t len, uint64_t pos) {
-    if ((uint8_t)s[pos] < 128) return false;
-    uint64_t next = pos;
-    uint32_t cp = utf8_peek_one(s, len, pos, &next);
-    return utf8_is_cjk_hira_kata(cp);
 }
 
 typedef struct {
@@ -38030,101 +37990,8 @@ static void bpe_tokenize_text_laguna(const ds4_vocab *vocab,
     }
 }
 
-/*
- * DeepSeek V4 Flash declares tokenizer.ggml.pre = "joyai-llm".  The split
- * below mirrors the JoyAI BPE pre-tokenizer for the cases this model
- * uses in normal text and source-code prompts:
- *
- *   \p{N}{1,3}
- *   [CJK/Hiragana/Katakana]+
- *   [P/S][A-Za-z]+
- *   [^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+
- *    ?[\p{P}\p{S}]+[\r\n]*
- *   \s*[\r\n]+
- *   \s+(?!\S)
- *   \s+
- *
- * The punctuation rule intentionally keeps trailing newlines in the same BPE
- * word (for example ">;\n").  Splitting those newlines separately changes the
- * token stream for code prompts and produces wrong long-context logits.
- */
 static void bpe_tokenize_text(const ds4_vocab *vocab, const char *text, token_vec *out) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
-        bpe_tokenize_text_glm4_segment(vocab, text, strlen(text), 3, out);
-        return;
-    }
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        bpe_tokenize_text_laguna(vocab, text, out);
-        return;
-    }
-
-    const uint64_t len = strlen(text);
-    uint64_t pos = 0;
-
-    while (pos < len) {
-        uint64_t start = pos;
-        uint8_t c = (uint8_t)text[pos];
-
-        if (ascii_digit(c)) {
-            int ndigits = 0;
-            while (pos < len && ascii_digit((uint8_t)text[pos]) && ndigits < 3) {
-                pos++;
-                ndigits++;
-            }
-        } else if (joyai_cjk_at(text, len, pos)) {
-            do {
-                pos = next_utf8_char(text, len, pos);
-            } while (pos < len && joyai_cjk_at(text, len, pos));
-        } else if (joyai_ascii_punct_symbol(c) &&
-                   pos + 1 < len &&
-                   ascii_alpha((uint8_t)text[pos + 1])) {
-            pos++;
-            while (pos < len && ascii_alpha((uint8_t)text[pos])) pos++;
-        } else if (joyai_letter_like_at(text, len, pos)) {
-            pos = joyai_consume_letters(text, len, pos);
-        } else if (!ascii_newline(c) &&
-                   !joyai_ascii_punct_symbol(c) &&
-                   pos + 1 < len &&
-                   joyai_letter_like_at(text, len, pos + 1)) {
-            pos++;
-            pos = joyai_consume_letters(text, len, pos);
-        } else if (c == ' ' &&
-                   pos + 1 < len &&
-                   joyai_ascii_punct_symbol((uint8_t)text[pos + 1])) {
-            pos++;
-            while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
-            while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
-        } else if (joyai_ascii_punct_symbol(c)) {
-            while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
-            while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
-        } else if (ascii_space(c)) {
-            uint64_t p = pos;
-            uint64_t last_newline_end = 0;
-            while (p < len && ascii_space((uint8_t)text[p])) {
-                uint8_t sc = (uint8_t)text[p++];
-                if (ascii_newline(sc)) last_newline_end = p;
-            }
-            if (last_newline_end) {
-                pos = last_newline_end;
-            } else if (p < len && p > pos + 1 &&
-                       (joyai_letter_like_at(text, len, p) ||
-                        joyai_ascii_punct_symbol((uint8_t)text[p]))) {
-                /*
-                 * JoyAI lets a single leading space join the following word or
-                 * punctuation run.  For "    int", the pre-tokenizer therefore emits
-                 * "   " then " int", not "    " then "int".
-                 */
-                pos = p - 1;
-            } else {
-                pos = p;
-            }
-        } else {
-            pos = next_utf8_char(text, len, pos);
-        }
-
-        if (pos == start) pos = next_utf8_char(text, len, pos);
-        bpe_emit_piece(vocab, (ds4_str){ text + start, pos - start }, out);
-    }
+    bpe_tokenize_text_laguna(vocab, text, out);
 }
 
 static int vocab_lookup(const ds4_vocab *vocab, const char *text) {
