@@ -59684,10 +59684,6 @@ static int ds4_engine_open_internal(ds4_engine **out,
     e->dflash_model.fd = -1;
     e->backend = opt->backend;
     e->quality = opt->quality;
-    e->glm_mtp = opt->glm_mtp;
-    e->glm_mtp_timing = opt->glm_mtp_timing;
-    e->dspark = opt->dspark;
-    e->dspark_strict = opt->dspark_strict;
     e->ssd_streaming = opt->ssd_streaming;
     e->ssd_streaming_cold = opt->ssd_streaming_cold;
     e->ssd_streaming_full_layers_set = opt->ssd_streaming_full_layers_set;
@@ -59698,8 +59694,6 @@ static int ds4_engine_open_internal(ds4_engine **out,
     e->ssd_streaming_full_layers = opt->ssd_streaming_full_layers;
     e->ssd_streaming_preload_experts = opt->ssd_streaming_preload_experts;
     if (e->power_percent > 100) e->power_percent = 100;
-    e->mtp_draft_tokens = opt->mtp_draft_tokens > 0 ? opt->mtp_draft_tokens : 1;
-    if (e->mtp_draft_tokens > 16) e->mtp_draft_tokens = 16;
     if (opt->dflash_draft_tokens < 0 ||
         opt->dflash_draft_tokens >= DS4_DFLASH_BLOCK_SIZE) {
         fprintf(stderr,
@@ -59728,27 +59722,6 @@ static int ds4_engine_open_internal(ds4_engine **out,
     }
     e->dflash_p_min =
         opt->dflash_p_min_set ? opt->dflash_p_min : 0.4f;
-    e->mtp_margin = opt->mtp_margin >= 0.0f ? opt->mtp_margin : 3.0f;
-    if (opt->dspark_confidence_threshold_set) {
-        e->dspark_confidence_threshold = opt->dspark_confidence_threshold;
-    } else {
-        e->dspark_confidence_threshold =
-            e->backend == DS4_BACKEND_METAL ? 0.6f : 0.7f;
-    }
-    if (opt->dspark && (!opt->mtp_path || !opt->mtp_path[0])) {
-        fprintf(stderr, "ds4: --dspark requires --mtp FILE\n");
-        free(e);
-        *out = NULL;
-        return 1;
-    }
-    if (opt->mtp_path && opt->mtp_path[0] &&
-        opt->dflash_path && opt->dflash_path[0]) {
-        fprintf(stderr,
-                "ds4: --mtp and --dflash are mutually exclusive support models\n");
-        free(e);
-        *out = NULL;
-        return 1;
-    }
     if ((opt->directional_steering_attn != 0.0f || opt->directional_steering_ffn != 0.0f) &&
         (!opt->directional_steering_file || !opt->directional_steering_file[0]))
     {
@@ -59828,6 +59801,22 @@ static int ds4_engine_open_internal(ds4_engine **out,
 
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
         if (opt->inspect_only) {
+            if (opt->dflash_path && opt->dflash_path[0]) {
+                model_open(&e->dflash_model, opt->dflash_path, false, false);
+                e->support_kind =
+                    support_model_detect(&e->dflash_model,
+                                         &e->support_stages,
+                                         NULL);
+                if (e->support_kind != DS4_SUPPORT_DFLASH) {
+                    fprintf(stderr,
+                            "ds4: unsupported --dflash support model %s; "
+                            "expected architecture=dflash\n",
+                            opt->dflash_path);
+                    ds4_engine_close(e);
+                    *out = NULL;
+                    return 1;
+                }
+            }
             *out = e;
             return 0;
         }
@@ -59885,12 +59874,11 @@ static int ds4_engine_open_internal(ds4_engine **out,
             opt->directional_steering_ffn != 0.0f ||
             e->power_percent < 100 ||
             opt->prefill_chunk != 0 ||
-            (opt->mtp_path && opt->mtp_path[0]) ||
-            opt->dspark || opt->glm_mtp || opt->first_token_test) {
+            opt->first_token_test) {
             fprintf(stderr,
                     "ds4: Laguna S 2.1 currently supports the standard local "
                     "graph path only (no steering, power cap, custom "
-                    "prefill chunk, MTP/DSpark, or first-token diagnostic)\n");
+                    "prefill chunk, or first-token diagnostic)\n");
             ds4_engine_close(e);
             *out = NULL;
             return 1;
@@ -59926,12 +59914,6 @@ static int ds4_engine_open_internal(ds4_engine **out,
             fprintf(stderr,
                     "ds4: --prefill-chunk is not supported for GLM 5.2; "
                     "GLM uses graph-selected prefill chunks\n");
-            ds4_engine_close(e);
-            *out = NULL;
-            return 1;
-        }
-        if (opt->mtp_path && opt->mtp_path[0]) {
-            fprintf(stderr, "ds4: --mtp is not supported for GLM 5.2 yet\n");
             ds4_engine_close(e);
             *out = NULL;
             return 1;
@@ -60030,36 +60012,12 @@ static int ds4_engine_open_internal(ds4_engine **out,
                     (double)e->ssd_streaming_cache_bytes / 1073741824.0);
         }
     }
-    if (opt->inspect_only) {
-        const bool inspect_dflash = opt->dflash_path && opt->dflash_path[0];
-        const char *inspect_support_path = inspect_dflash ?
-            opt->dflash_path : opt->mtp_path;
-        ds4_model *inspect_support_model = inspect_dflash ?
-            &e->dflash_model : &e->mtp_model;
-        if (inspect_support_path && inspect_support_path[0]) {
-            model_open(inspect_support_model, inspect_support_path, false, false);
-            ds4_dspark_summary dspark = {0};
-            e->support_kind =
-                support_model_detect(inspect_support_model,
-                                     &e->support_stages,
-                                     &dspark);
-            if (e->support_kind == DS4_SUPPORT_DSPARK) {
-                dspark_weights_bind_optional(&e->dspark_weights,
-                                             inspect_support_model,
-                                             &dspark);
-            }
-        }
-        *out = e;
-        return 0;
-    }
     if (e->backend == DS4_BACKEND_CPU && !cpu_load_directional_steering(e)) {
         ds4_engine_close(e);
         *out = NULL;
         return 1;
     }
-    const char *support_path =
-        (opt->dflash_path && opt->dflash_path[0]) ?
-            opt->dflash_path : opt->mtp_path;
+    const char *support_path = opt->dflash_path;
     if (support_path && support_path[0]) {
         if (e->ssd_streaming) {
             fprintf(stderr,
@@ -60068,84 +60026,40 @@ static int ds4_engine_open_internal(ds4_engine **out,
             *out = NULL;
             return 1;
         }
-        const bool dflash_support = opt->dflash_path && opt->dflash_path[0];
-        ds4_model *support_model = dflash_support ?
-            &e->dflash_model : &e->mtp_model;
+        ds4_model *support_model = &e->dflash_model;
         model_open(support_model, support_path, graph_backend, true);
-        ds4_dspark_summary dspark = {0};
         e->support_kind =
-            support_model_detect(support_model, &e->support_stages, &dspark);
-        if (dflash_support) {
-            if (e->support_kind != DS4_SUPPORT_DFLASH) {
-                fprintf(stderr,
-                        "ds4: unsupported --dflash support model %s "
-                        "(detected=%s); expected architecture=dflash\n",
-                        support_path,
-                        support_kind_name(e->support_kind));
-                ds4_engine_close(e);
-                *out = NULL;
-                return 1;
-            }
-            dflash_weights_bind(&e->dflash_weights, &e->dflash_model);
-            if (e->dflash_weights.fc->type == DS4_TENSOR_BF16) {
-                e->dflash_f16_map = dflash_prepare_f16_map(&e->dflash_model);
-                if (!e->dflash_f16_map) {
-                    ds4_engine_close(e);
-                    *out = NULL;
-                    return 1;
-                }
-                e->dflash_f16_map_size = e->dflash_model.size;
-            }
-            e->dflash_ready = true;
+            support_model_detect(support_model, &e->support_stages, NULL);
+        if (e->support_kind != DS4_SUPPORT_DFLASH) {
             fprintf(stderr,
-                    "ds4: Laguna DFlash support loaded: %s "
-                    "(weights=%s, draft=%d, p-min=%.2f, block=%u, "
-                    "cache=%u)\n",
-                    support_path,
-                    tensor_type_name(e->dflash_weights.fc->type),
-                    e->dflash_draft_tokens,
-                    e->dflash_p_min,
-                    e->dflash_weights.block_size,
-                    DS4_DFLASH_CACHE_CAP);
-        } else if (e->support_kind == DS4_SUPPORT_MTP_LEGACY) {
-            mtp_weights_bind(&e->mtp_weights, &e->mtp_model);
-            e->mtp_ready = true;
-            fprintf(stderr, "ds4: MTP support model loaded: %s (draft=%d)\n",
-                    support_path,
-                    e->mtp_draft_tokens);
-        } else if (e->support_kind == DS4_SUPPORT_DSPARK) {
-            dspark_weights_bind_optional(&e->dspark_weights,
-                                         &e->mtp_model,
-                                         &dspark);
-            fprintf(stderr,
-                    "ds4: DSpark support model detected: %s "
-                    "(stages=%u block=%u markov_rank=%u tensors=%u missing=%u "
-                    "invalid=%u metadata_errors=%u); "
-                    "use --dspark to enable experimental runtime decode\n",
-                    support_path,
-                    e->support_stages,
-                    dspark.block_size,
-                    dspark.markov_rank,
-                    e->dspark_weights.present_tensors,
-                    e->dspark_weights.missing_tensors,
-                    e->dspark_weights.invalid_tensors,
-                    e->dspark_weights.metadata_errors);
-            if (e->dspark && !e->quality && !e->dspark_strict) {
-                fprintf(stderr,
-                        "ds4: DSpark direct verifier-state commits enabled; "
-                        "greedy output may differ from one-token decode due "
-                        "to batched floating-point operation order\n");
-            }
-        } else {
-            fprintf(stderr,
-                    "ds4: unsupported --mtp support model %s (detected=%s); "
-                    "expected legacy MTP or DSpark tensors\n",
-                    support_path,
-                    support_kind_name(e->support_kind));
+                    "ds4: unsupported --dflash support model %s; "
+                    "expected architecture=dflash\n",
+                    support_path);
             ds4_engine_close(e);
             *out = NULL;
             return 1;
         }
+        dflash_weights_bind(&e->dflash_weights, &e->dflash_model);
+        if (e->dflash_weights.fc->type == DS4_TENSOR_BF16) {
+            e->dflash_f16_map = dflash_prepare_f16_map(&e->dflash_model);
+            if (!e->dflash_f16_map) {
+                ds4_engine_close(e);
+                *out = NULL;
+                return 1;
+            }
+            e->dflash_f16_map_size = e->dflash_model.size;
+        }
+        e->dflash_ready = true;
+        fprintf(stderr,
+                "ds4: Laguna DFlash support loaded: %s "
+                "(weights=%s, draft=%d, p-min=%.2f, block=%u, "
+                "cache=%u)\n",
+                support_path,
+                tensor_type_name(e->dflash_weights.fc->type),
+                e->dflash_draft_tokens,
+                e->dflash_p_min,
+                e->dflash_weights.block_size,
+                DS4_DFLASH_CACHE_CAP);
     }
 
 #ifndef DS4_NO_GPU
@@ -60409,14 +60323,10 @@ static int ds4_engine_open_internal(ds4_engine **out,
             *out = NULL;
             return 1;
         }
-        const bool support_model_runtime_ready =
-            e->mtp_ready ||
-            (e->support_kind == DS4_SUPPORT_DSPARK && e->dspark) ||
-            e->dflash_ready;
-        const ds4_model *support_model = e->dflash_ready ?
-            &e->dflash_model : &e->mtp_model;
+        const bool support_model_runtime_ready = e->dflash_ready;
+        const ds4_model *support_model = &e->dflash_model;
         const void *support_model_map =
-            (e->dflash_ready && e->dflash_f16_map) ?
+            e->dflash_f16_map ?
                 e->dflash_f16_map : support_model->map;
         if (support_model_runtime_ready &&
             !ds4_gpu_set_model_map_range(support_model_map,
@@ -60466,20 +60376,11 @@ static int ds4_engine_open_internal(ds4_engine **out,
              * no backing descriptor; quantized support weights stay file-backed
              * through the independent DFlash model descriptor. */
             const int support_model_fd =
-                (e->dflash_ready && e->dflash_f16_map) ?
+                e->dflash_f16_map ?
                     -1 : support_model->fd;
             (void)ds4_gpu_set_model_fd_for_map(
                 support_model_fd,
                 support_model_map);
-            if (!e->dflash_ready &&
-                !accelerator_cache_model_tensors(e->backend, support_model,
-                                                  NULL, NULL, 0)) {
-                fprintf(stderr, "ds4: %s failed to prepare optional support model cache\n",
-                        ds4_backend_name(e->backend));
-                ds4_engine_close(e);
-                *out = NULL;
-                return 1;
-            }
             (void)ds4_gpu_set_model_fd_for_map(e->model.fd, e->model.map);
         }
         fprintf(stderr, "ds4: %s backend initialized for graph diagnostics\n",
@@ -60504,9 +60405,7 @@ static int ds4_engine_open_internal(ds4_engine **out,
 
 void ds4_engine_summary(ds4_engine *e) {
     model_summary(&e->model);
-    const ds4_model *support_model = e->dflash_model.map ?
-        &e->dflash_model : &e->mtp_model;
-    if (support_model->map) {
+    if (e->dflash_model.map) {
         printf("\nsupport model");
         if (e->support_kind != DS4_SUPPORT_NONE) {
             printf(" (%s", support_kind_name(e->support_kind));
@@ -60514,15 +60413,7 @@ void ds4_engine_summary(ds4_engine *e) {
             printf(")");
         }
         printf(":\n");
-        model_summary(support_model);
-        if (e->support_kind == DS4_SUPPORT_DSPARK &&
-            e->dspark_weights.n_stages != 0) {
-            printf("support binding: tensors=%u missing=%u invalid=%u metadata_errors=%u\n",
-                   e->dspark_weights.present_tensors,
-                   e->dspark_weights.missing_tensors,
-                   e->dspark_weights.invalid_tensors,
-                   e->dspark_weights.metadata_errors);
-        }
+        model_summary(&e->dflash_model);
     }
 }
 

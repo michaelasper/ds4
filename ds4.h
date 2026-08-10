@@ -74,17 +74,13 @@ typedef bool (*ds4_session_cancel_fn)(void *ud);
 
 typedef struct {
     const char *model_path;
-    const char *mtp_path;
     const char *dflash_path;
     ds4_backend backend;
     int n_threads;
     int context_size;
     uint32_t prefill_chunk;
-    int mtp_draft_tokens;
     int dflash_draft_tokens;
     float dflash_p_min;
-    float mtp_margin;
-    float dspark_confidence_threshold;
     const char *directional_steering_file;
     const char *expert_profile_path;
     float directional_steering_attn;
@@ -97,12 +93,7 @@ typedef struct {
     uint64_t simulate_used_memory_bytes;
     bool warm_weights;
     bool quality;
-    bool glm_mtp;
-    bool glm_mtp_timing;
-    bool dspark;
-    bool dspark_strict;
     bool dflash_p_min_set;
-    bool dspark_confidence_threshold_set;
     bool ssd_streaming;
     bool ssd_streaming_cold;
     bool ssd_streaming_full_layers_set;

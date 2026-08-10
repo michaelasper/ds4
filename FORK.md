@@ -116,17 +116,24 @@ rename/boundary break, not an append-only API evolution: callers must rebuild
 against the current headers. No reserved compatibility slots are promised;
 retaining them would defeat the rename/break objective.
 
+## Recorded ABI and rename decisions
+
+The current public boundary records the following decisions:
+
+- DFlash remains a public, optional support-model API for Laguna S2.1;
+- legacy MTP, GLM-MTP, and DSpark option fields and public aliases are
+  intentionally absent; callers must use the DFlash fields and rebuild;
+- DSV4/DSVL session payload magics, versions, and layouts remain fixed.
+
 ## Deferred ABI and rename decisions
 
 No decision has yet been made on:
 
 - renaming `ds4_*`/`DS4_*` symbols and executable names;
 - changing `DS4_METAL_*` environment variables;
-- migrating or breaking `DSV4`/`DSVL` session payload magics and versions;
 - changing model IDs, model aliases, default filenames, or `~/.ds4` cache paths;
-- retaining deprecated API aliases or providing a one-release migration;
 - whether server protocol compatibility names remain unchanged;
-- whether DFlash stays public API or becomes an internal Laguna implementation.
 
 Until those choices are recorded, preserve the existing identifiers where the
-supported Laguna path still depends on them and avoid silent format changes.
+supported Laguna path still depends on them and avoid silent format changes;
+this does not authorize the removed legacy option fields or aliases.
