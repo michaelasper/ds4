@@ -618,6 +618,12 @@ static int g_mpp_invalid_env_reported;
 static uint32_t g_q8_mv_ext_max_tokens = 16u;
 static uint32_t g_glm_grouped_moe_min_tokens = 96u;
 static int g_direct_kv_prefill_mode;
+/* Laguna SWA selectors are lifecycle state.  Capturing them once keeps an
+ * A/B environment edit from changing arithmetic halfway through a graph. */
+static int g_laguna_swa_gqa9_mode;
+static int g_laguna_swa_gqa3_mode;
+static int g_laguna_staged_swa_mode;
+static int g_laguna_swa_selectors_snapshot_valid;
 
 /* Test-only route evidence.  Counters stay cold unless a focused test arms
  * them, so normal inference pays no atomic/locking cost. */
@@ -641,6 +647,20 @@ static uint64_t g_laguna_router_fused_batch_dispatches;
 static uint64_t g_laguna_router_fused_owned_dispatches;
 static uint64_t g_laguna_router_fused_pending_dispatches;
 static uint64_t g_laguna_router_fused_completed_dispatches;
+enum {
+    DS4_LAGUNA_TEST_DECODE_ORDINARY = 0,
+    DS4_LAGUNA_TEST_DECODE_GQA3 = 1,
+    DS4_LAGUNA_TEST_DECODE_GQA9 = 2,
+    DS4_LAGUNA_TEST_DECODE_STAGED = 3,
+    DS4_LAGUNA_TEST_DECODE_GLOBAL_GROUPED = 4,
+    DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT = 5,
+};
+static uint64_t g_laguna_test_decode_route_counts[
+    DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT];
+static uint64_t g_laguna_test_decode_route_batch[
+    DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT];
+static uint64_t g_laguna_test_decode_route_inflight[
+    DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT];
 #endif
 #define DS4_METAL_MAX_ROUTED_EXPERT_USED 8
 static int32_t g_routed_moe_selected_override[DS4_METAL_MAX_ROUTED_EXPERT_USED];
@@ -1272,6 +1292,9 @@ static int ds4_gpu_stream_expert_cache_mark_entries_inflight(
 }
 
 static int ds4_gpu_stream_expert_cache_wait_inflight(const char *label);
+#ifdef DS4_TEST_HOOKS
+static void ds4_gpu_laguna_test_decode_route_batch_completed(int ok);
+#endif
 
 static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     int ok = 1;
@@ -1287,6 +1310,7 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     if (ok) g_laguna_router_fused_completed_dispatches +=
         g_laguna_router_fused_pending_dispatches;
     g_laguna_router_fused_pending_dispatches = 0;
+    ds4_gpu_laguna_test_decode_route_batch_completed(ok);
 #endif
     if (!ok) ds4_gpu_invalidate_zero_prefix_prefill_block_maps();
     return ok;
@@ -2556,7 +2580,58 @@ int ds4_gpu_q8_decode_config_snapshot(ds4_gpu_q8_decode_config *out) {
                    g_q8_decode_config.q8_mv_rows < 0 ? -1 : 1;
 }
 
-static void ds4_gpu_snapshot_lifecycle_selectors(void) {
+#define DS4_METAL_LAGUNA_SWA_GQA9 "DS4_METAL_LAGUNA_SWA_GQA9"
+#define DS4_METAL_LAGUNA_SWA_GQA3 "DS4_METAL_LAGUNA_SWA_GQA3"
+#define DS4_METAL_LAGUNA_STAGED_SWA "DS4_METAL_LAGUNA_STAGED_SWA"
+
+/* GQA9 is an opt-in route whose source/PSO ABI must be unambiguous.  Do not
+ * trim or accept the broad boolean vocabulary here: unset, empty, and the
+ * literal string 0 are off; only the literal string 1 is on. */
+static int ds4_gpu_laguna_swa_gqa9_parse(const char *value) {
+    if (!value || value[0] == '\0' || strcmp(value, "0") == 0) return 0;
+    if (strcmp(value, "1") == 0) return 1;
+    return -1;
+}
+
+static int ds4_gpu_laguna_swa_gqa9_env_mode(void) {
+    if (g_initialized && g_laguna_swa_selectors_snapshot_valid) {
+        return g_laguna_swa_gqa9_mode;
+    }
+    return ds4_gpu_laguna_swa_gqa9_parse(
+        getenv(DS4_METAL_LAGUNA_SWA_GQA9));
+}
+
+static int ds4_gpu_laguna_swa_gqa3_enabled(void) {
+    if (g_initialized && g_laguna_swa_selectors_snapshot_valid) {
+        return g_laguna_swa_gqa3_mode;
+    }
+    return ds4_gpu_env_bool(DS4_METAL_LAGUNA_SWA_GQA3) > 0;
+}
+
+static int ds4_gpu_laguna_staged_swa_enabled(void) {
+    if (g_initialized && g_laguna_swa_selectors_snapshot_valid) {
+        return g_laguna_staged_swa_mode;
+    }
+    return ds4_gpu_env_bool(DS4_METAL_LAGUNA_STAGED_SWA) > 0;
+}
+
+static int ds4_gpu_snapshot_lifecycle_selectors(void) {
+    g_laguna_swa_gqa9_mode = ds4_gpu_laguna_swa_gqa9_parse(
+        getenv(DS4_METAL_LAGUNA_SWA_GQA9));
+    if (g_laguna_swa_gqa9_mode < 0) {
+        fprintf(stderr,
+                "ds4: invalid %s='%s'; expected unset, empty, 0, or literal 1\n",
+                DS4_METAL_LAGUNA_SWA_GQA9,
+                getenv(DS4_METAL_LAGUNA_SWA_GQA9) ?
+                    getenv(DS4_METAL_LAGUNA_SWA_GQA9) : "");
+        g_laguna_swa_selectors_snapshot_valid = 0;
+        return 0;
+    }
+    g_laguna_swa_gqa3_mode =
+        ds4_gpu_env_bool(DS4_METAL_LAGUNA_SWA_GQA3) > 0;
+    g_laguna_staged_swa_mode =
+        ds4_gpu_env_bool(DS4_METAL_LAGUNA_STAGED_SWA) > 0;
+    g_laguna_swa_selectors_snapshot_valid = 1;
     g_q8_mv_ext_max_tokens =
         ds4_gpu_q8_mv_ext_max_tokens_parse(
             getenv("DS4_METAL_Q8_MV_EXT_MAX_TOKENS"));
@@ -2566,6 +2641,7 @@ static void ds4_gpu_snapshot_lifecycle_selectors(void) {
     g_direct_kv_prefill_mode =
         ds4_gpu_laguna_direct_kv_prefill_env_mode(
             getenv("DS4_METAL_LAGUNA_DIRECT_KV_PREFILL"));
+    return 1;
 }
 
 uint32_t ds4_gpu_laguna_q8_mv_ext_max_tokens(void) {
@@ -2580,6 +2656,12 @@ void ds4_gpu_test_laguna_route_counters_reset(void) {
     g_laguna_test_stock_q8_count = 0;
     g_laguna_test_fused_q8_bco_false_count = 0;
     g_laguna_test_fused_q8_bco_true_count = 0;
+    memset(g_laguna_test_decode_route_counts, 0,
+           sizeof(g_laguna_test_decode_route_counts));
+    memset(g_laguna_test_decode_route_batch, 0,
+           sizeof(g_laguna_test_decode_route_batch));
+    memset(g_laguna_test_decode_route_inflight, 0,
+           sizeof(g_laguna_test_decode_route_inflight));
     g_laguna_test_route_hooks = 1;
 }
 
@@ -2603,8 +2685,101 @@ int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
     return 1;
 }
 
+int ds4_gpu_test_laguna_decode_route_counters(
+        uint64_t *ordinary,
+        uint64_t *gqa3,
+        uint64_t *gqa9,
+        uint64_t *staged,
+        uint64_t *global_grouped) {
+    if (!g_initialized || !g_laguna_test_route_hooks) return 0;
+    if (ordinary) *ordinary =
+        g_laguna_test_decode_route_counts[DS4_LAGUNA_TEST_DECODE_ORDINARY];
+    if (gqa3) *gqa3 =
+        g_laguna_test_decode_route_counts[DS4_LAGUNA_TEST_DECODE_GQA3];
+    if (gqa9) *gqa9 =
+        g_laguna_test_decode_route_counts[DS4_LAGUNA_TEST_DECODE_GQA9];
+    if (staged) *staged =
+        g_laguna_test_decode_route_counts[DS4_LAGUNA_TEST_DECODE_STAGED];
+    if (global_grouped) *global_grouped =
+        g_laguna_test_decode_route_counts[
+            DS4_LAGUNA_TEST_DECODE_GLOBAL_GROUPED];
+    return 1;
+}
+
 void ds4_gpu_test_laguna_set_direct_kv_mode(int mode) {
     g_direct_kv_prefill_mode = mode;
+}
+
+static void ds4_gpu_laguna_test_decode_route_note(
+        int route,
+        int owned) {
+    if (!g_laguna_test_route_hooks ||
+        route < 0 || route >= DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT) return;
+    if (owned) {
+        g_laguna_test_decode_route_counts[route]++;
+    } else {
+        g_laguna_test_decode_route_batch[route]++;
+    }
+}
+
+static void ds4_gpu_laguna_test_decode_route_batch_committed(void) {
+    if (!g_laguna_test_route_hooks) return;
+    for (int i = 0; i < DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT; i++) {
+        g_laguna_test_decode_route_inflight[i] +=
+            g_laguna_test_decode_route_batch[i];
+        g_laguna_test_decode_route_batch[i] = 0;
+    }
+}
+
+static void ds4_gpu_laguna_test_decode_route_batch_completed(int ok) {
+    if (!g_laguna_test_route_hooks) return;
+    if (ok) {
+        for (int i = 0; i < DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT; i++) {
+            g_laguna_test_decode_route_counts[i] +=
+                g_laguna_test_decode_route_inflight[i];
+        }
+    }
+    memset(g_laguna_test_decode_route_inflight, 0,
+           sizeof(g_laguna_test_decode_route_inflight));
+}
+
+static int ds4_gpu_laguna_test_decode_route_kind(
+        uint32_t cache_cap,
+        uint32_t key_start,
+        uint32_t key_count,
+        uint32_t n_head,
+        uint32_t n_head_kv,
+        int      gqa9_selected,
+        int      gqa3_selected,
+        int      staged_swa_active) {
+    const bool exact_swa =
+        cache_cap == 512u && key_count == 512u &&
+        n_head == 72u && n_head_kv == 8u;
+    /* The single-token decode entry point suppresses the grouped kernels when
+     * staged SWA is selected, but it does not itself execute the staged
+     * multi-row kernel.  Keep this completion counter honest: a staged label
+     * here means the staged selector won precedence over a grouped selector,
+     * while the actual staged kernel is counted at its own completion site
+     * below. */
+    if (exact_swa && staged_swa_active &&
+        (gqa9_selected || gqa3_selected)) {
+        return DS4_LAGUNA_TEST_DECODE_STAGED;
+    }
+    if (exact_swa && gqa9_selected && !staged_swa_active) {
+        return DS4_LAGUNA_TEST_DECODE_GQA9;
+    }
+    if (exact_swa && gqa3_selected && !gqa9_selected &&
+        !staged_swa_active) {
+        return DS4_LAGUNA_TEST_DECODE_GQA3;
+    }
+    if (cache_cap > 512u && key_start == 0u &&
+        n_head % 3u == 0u &&
+        ((n_head / n_head_kv) % 3u) == 0u &&
+        ((key_count >= 512u && key_count < cache_cap) ||
+         (key_count >= 1024u && key_count % 32u == 0u))) {
+        return DS4_LAGUNA_TEST_DECODE_GLOBAL_GROUPED;
+    }
+    return DS4_LAGUNA_TEST_DECODE_ORDINARY;
 }
 #endif
 
@@ -6914,7 +7089,10 @@ int ds4_gpu_init(void) {
     if (ds4_gpu_q8_decode_config_snapshot(NULL) < 0) return 0;
 
     @autoreleasepool {
-        ds4_gpu_snapshot_lifecycle_selectors();
+        /* A failed init must not leave a stale lifecycle snapshot visible to
+         * a later raw preflight after the caller changes the environment. */
+        g_laguna_swa_selectors_snapshot_valid = 0;
+        if (!ds4_gpu_snapshot_lifecycle_selectors()) return 0;
         if (g_direct_kv_prefill_mode < 0) {
             fprintf(stderr,
                     "ds4: invalid DS4_METAL_LAGUNA_DIRECT_KV_PREFILL; "
@@ -6929,6 +7107,12 @@ int ds4_gpu_init(void) {
         g_laguna_test_stock_q8_count = 0;
         g_laguna_test_fused_q8_bco_false_count = 0;
         g_laguna_test_fused_q8_bco_true_count = 0;
+        memset(g_laguna_test_decode_route_counts, 0,
+               sizeof(g_laguna_test_decode_route_counts));
+        memset(g_laguna_test_decode_route_batch, 0,
+               sizeof(g_laguna_test_decode_route_batch));
+        memset(g_laguna_test_decode_route_inflight, 0,
+               sizeof(g_laguna_test_decode_route_inflight));
 #endif
         ds4_gpu_decode_pipeline_fast_cache_reset();
         g_pair_compressor_store_missing_count = 0;
@@ -9664,6 +9848,7 @@ int ds4_gpu_flush_commands(void) {
     g_laguna_router_fused_pending_dispatches +=
         g_laguna_router_fused_batch_dispatches;
     g_laguna_router_fused_batch_dispatches = 0;
+    ds4_gpu_laguna_test_decode_route_batch_committed();
 #endif
     [cb commit];
     [g_pending_cbs addObject:cb];
@@ -9698,6 +9883,7 @@ int ds4_gpu_submit_commands(void) {
     g_laguna_router_fused_pending_dispatches +=
         g_laguna_router_fused_batch_dispatches;
     g_laguna_router_fused_batch_dispatches = 0;
+    ds4_gpu_laguna_test_decode_route_batch_committed();
 #endif
     [cb commit];
     [g_pending_cbs addObject:cb];
@@ -9724,6 +9910,8 @@ int ds4_gpu_discard_commands(void) {
     /* The current batch is discarded; only previously committed pending
      * batches, if any, remain eligible for completion accounting. */
     g_laguna_router_fused_batch_dispatches = 0;
+    memset(g_laguna_test_decode_route_batch, 0,
+           sizeof(g_laguna_test_decode_route_batch));
 #endif
     const uint64_t discarded_seq = g_stream_expert_cache_batch_seq;
     g_stream_expert_cache_batch_seq = 0;
@@ -10159,6 +10347,7 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
         g_laguna_router_fused_pending_dispatches +=
             g_laguna_router_fused_batch_dispatches;
         g_laguna_router_fused_batch_dispatches = 0;
+        ds4_gpu_laguna_test_decode_route_batch_committed();
 #endif
         [cb commit];
         ds4_gpu_stream_expert_cache_note_batch_committed();
@@ -10181,6 +10370,13 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
             [g_transient_buffers removeAllObjects];
             return 0;
         }
+#ifdef DS4_TEST_HOOKS
+        /* The shared event wait above is the completion boundary for this
+         * command buffer.  Promote route evidence here; the pending-array
+         * cleanup below must not be the only place a successful event path
+         * becomes visible. */
+        ds4_gpu_laguna_test_decode_route_batch_completed(1);
+#endif
 
         g_batch_cb = ds4_gpu_new_command_buffer();
         g_batch_has_work = NO;
@@ -10811,6 +11007,7 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
         g_laguna_router_fused_pending_dispatches +=
             g_laguna_router_fused_batch_dispatches;
         g_laguna_router_fused_batch_dispatches = 0;
+        ds4_gpu_laguna_test_decode_route_batch_committed();
 #endif
         const uint64_t value = ++g_selected_readback_event_value;
         [cb encodeSignalEvent:g_selected_readback_event value:value];
@@ -10835,6 +11032,9 @@ static int ds4_gpu_signal_batch_and_wait_event(const char *label) {
             [g_transient_buffers removeAllObjects];
             return 0;
         }
+#ifdef DS4_TEST_HOOKS
+        ds4_gpu_laguna_test_decode_route_batch_completed(1);
+#endif
 
         g_batch_cb = ds4_gpu_new_command_buffer();
         g_batch_has_work = NO;
@@ -10869,7 +11069,18 @@ int ds4_gpu_end_commands(void) {
     g_batch_has_work = NO;
     g_stream_expert_cache_owned_seq = g_stream_expert_cache_batch_seq;
     g_stream_expert_cache_batch_seq = 0;
-    return ds4_gpu_finish_command_buffer(cb, 1, "command batch");
+    const int ok = ds4_gpu_finish_command_buffer(cb, 1, "command batch");
+#ifdef DS4_TEST_HOOKS
+    if (ok) {
+        for (int i = 0; i < DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT; i++) {
+            g_laguna_test_decode_route_counts[i] +=
+                g_laguna_test_decode_route_batch[i];
+        }
+    }
+    memset(g_laguna_test_decode_route_batch, 0,
+           sizeof(g_laguna_test_decode_route_batch));
+#endif
+    return ok;
 }
 
 static int ds4_gpu_flash_attn_stage_profile_boundary(
@@ -10933,7 +11144,16 @@ int ds4_gpu_synchronize(void) {
 }
 
 void ds4_gpu_cleanup(void) {
-    if (!g_initialized) return;
+    if (!g_initialized) {
+        /* Cleanup is also the lifecycle boundary after a failed init.  Do
+         * not let a partially captured selector snapshot leak into the next
+         * raw/preflight call. */
+        g_laguna_swa_gqa9_mode = 0;
+        g_laguna_swa_gqa3_mode = 0;
+        g_laguna_staged_swa_mode = 0;
+        g_laguna_swa_selectors_snapshot_valid = 0;
+        return;
+    }
 
     @autoreleasepool {
         ds4_gpu_decode_pipeline_fast_cache_reset();
@@ -11293,6 +11513,10 @@ void ds4_gpu_cleanup(void) {
         g_q8_mv_ext_max_tokens = 16u;
         g_glm_grouped_moe_min_tokens = 96u;
         g_direct_kv_prefill_mode = 0;
+        g_laguna_swa_gqa9_mode = 0;
+        g_laguna_swa_gqa3_mode = 0;
+        g_laguna_staged_swa_mode = 0;
+        g_laguna_swa_selectors_snapshot_valid = 0;
 #ifdef DS4_TEST_HOOKS
         g_laguna_test_route_hooks = 0;
         g_laguna_test_direct_kv_count = 0;
@@ -11306,6 +11530,12 @@ void ds4_gpu_cleanup(void) {
         g_laguna_router_fused_owned_dispatches = 0;
         g_laguna_router_fused_pending_dispatches = 0;
         g_laguna_router_fused_completed_dispatches = 0;
+        memset(g_laguna_test_decode_route_counts, 0,
+               sizeof(g_laguna_test_decode_route_counts));
+        memset(g_laguna_test_decode_route_batch, 0,
+               sizeof(g_laguna_test_decode_route_batch));
+        memset(g_laguna_test_decode_route_inflight, 0,
+               sizeof(g_laguna_test_decode_route_inflight));
 #endif
         g_initialized = 0;
     }
@@ -36400,7 +36630,10 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
         uint32_t              n_head,
         uint32_t              n_head_kv,
         uint32_t              head_dim,
-        float                 scale) {
+        float                 scale,
+        int                   gqa9_selected,
+        int                   gqa3_selected,
+        int                   staged_swa_active) {
     if (!cb || !headsbuf || !qbuf || !gatebuf || !keybuf || !valuebuf ||
         key_count == 0u || key_count > cache_cap || n_head == 0u ||
         n_head_kv == 0u || n_head % n_head_kv != 0u || head_dim != 128u) {
@@ -36411,27 +36644,46 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     const uint32_t nwg = 32u;
     const uint32_t nsg = ds4_gpu_flash_attn_vec_nsg(key_count, nwg, ncpsg);
     const bool has_pad = (key_count % ncpsg) != 0u;
-    const bool swa_gqa3_requested =
+    const bool swa_gqa9_requested =
+        gqa9_selected != 0 &&
         cache_cap == 512u && key_count == 512u &&
-        n_head == 72u && n_head_kv == 8u &&
-        ds4_gpu_env_bool("DS4_METAL_LAGUNA_SWA_GQA3") > 0;
-    const bool staged_swa_active =
-        swa_gqa3_requested &&
-        ds4_gpu_env_bool("DS4_METAL_LAGUNA_STAGED_SWA") > 0;
-    /* Staged SWA currently reduces virtual-ring rows with the ordinary Flash
-     * arithmetic.  Do not silently compare or mix it with grouped GQA3 when
-     * both experiments are exported: staged SWA wins, and the grouped opt-in
-     * is ignored for this 512-slot production shape. */
-    static int staged_swa_gqa3_conflict_reported;
-    if (staged_swa_active && swa_gqa3_requested &&
-        !staged_swa_gqa3_conflict_reported) {
+        n_head == 72u && n_head_kv == 8u && head_dim == 128u;
+    const bool swa_gqa3_requested =
+        gqa3_selected != 0 &&
+        cache_cap == 512u && key_count == 512u &&
+        n_head == 72u && n_head_kv == 8u && head_dim == 128u;
+    /* Precedence for the SWA full ring: staged SWA > GQA9 > GQA3.  Staged SWA
+     * reduces virtual-ring rows with the ordinary Flash arithmetic, so it must
+     * not be silently mixed with a grouped opt-in.  GQA9 groups all 9 heads of
+     * the production 72/8 ratio and strictly dominates GQA3 for that shape, so
+     * GQA3 is dropped when both are exported.  Each lower-precedence knob is
+     * ignored with a one-time stderr notice (benchmarked separately). */
+    static int staged_swa_gqa_conflict_reported;
+    if (staged_swa_active &&
+        (swa_gqa9_requested || swa_gqa3_requested) &&
+        !staged_swa_gqa_conflict_reported) {
         fprintf(stderr,
-                "ds4: Metal Laguna SWA GQA3 ignored while staged SWA is enabled; staged SWA takes precedence (benchmark these flags separately)\n");
-        staged_swa_gqa3_conflict_reported = 1;
+                "ds4: Metal Laguna SWA grouped decode (GQA9/GQA3) ignored "
+                "while staged SWA is enabled; staged SWA takes precedence "
+                "(benchmark these flags separately)\n");
+        staged_swa_gqa_conflict_reported = 1;
     }
+    static int gqa9_gqa3_conflict_reported;
+    if (swa_gqa9_requested && swa_gqa3_requested && !staged_swa_active &&
+        !gqa9_gqa3_conflict_reported) {
+        fprintf(stderr,
+                "ds4: Metal Laguna SWA GQA3 ignored while SWA GQA9 is enabled; "
+                "GQA9 takes precedence for the 72/8 ring (benchmark these flags "
+                "separately)\n");
+        gqa9_gqa3_conflict_reported = 1;
+    }
+    const bool use_gqa9 =
+        swa_gqa9_requested && !staged_swa_active &&
+        (n_head % 9u) == 0u &&
+        ((n_head / n_head_kv) % 9u) == 0u;
     const bool use_gqa3 =
         (cache_cap > 512u ||
-         (swa_gqa3_requested && !staged_swa_active)) &&
+         (swa_gqa3_requested && !staged_swa_active && !use_gqa9)) &&
         (n_head % 3u) == 0u &&
         ((n_head / n_head_kv) % 3u) == 0u;
     const NSUInteger head_bytes = (NSUInteger)head_dim * sizeof(uint16_t);
@@ -36452,7 +36704,8 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
                                        "ds4_laguna_flash_attn_tmp")) {
         return 0;
     }
-    if (!use_gqa3 &&
+    const bool use_grouped = use_gqa3 || use_gqa9;
+    if (!use_grouped &&
         (!ds4_gpu_ensure_zero_attention_mask(mask_bytes) ||
          !ds4_gpu_ensure_scratch_buffer(&g_flash_attn_pad_buffer,
                                          &g_flash_attn_pad_bytes,
@@ -36462,12 +36715,15 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     }
 
     id<MTLComputePipelineState> pad_pipeline = nil;
-    if (has_pad && !use_gqa3) {
+    if (has_pad && !use_grouped) {
         pad_pipeline = ds4_gpu_get_flash_attn_pad_pipeline(true, (int32_t)ncpsg);
         if (!pad_pipeline) return 0;
     }
-    id<MTLComputePipelineState> vec_pipeline = use_gqa3 ?
-        ds4_gpu_get_pipeline("kernel_laguna_attention_decode_gqa3_split_f16") :
+    id<MTLComputePipelineState> vec_pipeline =
+        use_gqa9 ? ds4_gpu_get_pipeline(
+                       "kernel_laguna_attention_decode_gqa9_split_f16") :
+        use_gqa3 ? ds4_gpu_get_pipeline(
+                       "kernel_laguna_attention_decode_gqa3_split_f16") :
         ds4_gpu_get_flash_attn_vec_pipeline(
             "kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128",
             true, false, false, false, has_pad, false,
@@ -36479,7 +36735,7 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     if (!vec_pipeline || !reduce_pipeline) return 0;
 
     id<MTLComputeCommandEncoder> enc = nil;
-    if (has_pad && !use_gqa3) {
+    if (has_pad && !use_grouped) {
         ds4_gpu_flash_attn_pad_args pad_args = {
             .ne11 = (int32_t)key_count,
             .ne_12_2 = (int32_t)n_head_kv,
@@ -36556,7 +36812,8 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
     [enc setBuffer:qbuf offset:q_offset atIndex:1];
     [enc setBuffer:keybuf offset:key_offset atIndex:2];
     [enc setBuffer:valuebuf offset:value_offset atIndex:3];
-    if (use_gqa3) {
+    if (use_gqa3 || use_gqa9) {
+        const uint32_t group = use_gqa9 ? 9u : 3u;
         const ds4_gpu_laguna_gqa3_decode_args grouped_args = {
             .n_head = n_head,
             .n_head_kv = n_head_kv,
@@ -36568,11 +36825,11 @@ static int ds4_gpu_encode_laguna_flash_attention_decode(
             .scale = scale,
         };
         const NSUInteger grouped_shared_bytes =
-            3u * nsg * (2u + head_dim) * sizeof(float);
+            (NSUInteger)group * nsg * (2u + head_dim) * sizeof(float);
         [enc setBytes:&grouped_args length:sizeof(grouped_args) atIndex:0];
         [enc setBuffer:g_flash_attn_tmp_buffer offset:0 atIndex:4];
         [enc setThreadgroupMemoryLength:grouped_shared_bytes atIndex:0];
-        [enc dispatchThreadgroups:MTLSizeMake(n_head / 3u, 1, nwg)
+        [enc dispatchThreadgroups:MTLSizeMake(n_head / group, 1, nwg)
              threadsPerThreadgroup:MTLSizeMake(32, nsg, 1)];
     } else {
         [enc setBytes:&vec_args length:sizeof(vec_args) atIndex:0];
@@ -36617,7 +36874,32 @@ int ds4_gpu_laguna_store_attention_tensor(
         uint32_t              n_head_kv,
         uint32_t              head_dim,
         float                 scale) {
+    /* Parse and probe the optional grouped route before Metal initialization
+     * can open a command batch.  In particular, an old source that lacks the
+     * GQA9 symbol must fail before the KV store below is recorded into a
+     * caller-owned batch. */
+    const int gqa9_mode = ds4_gpu_laguna_swa_gqa9_env_mode();
+    if (gqa9_mode < 0) return 0;
+    /* GQA9 is shape-gated to the SWA full ring.  A global 48/8 layer (or a
+     * short/partial ring) must keep using its ordinary/GQA3 route even when
+     * the lifecycle opt-in is exported; only an eligible GQA9 dispatch needs
+     * the optional source/PSO preflight. */
+    const bool gqa9_shape =
+        cache_cap == 512u && key_count == 512u &&
+        n_head == 72u && n_head_kv == 8u && head_dim == 128u;
+    const int gqa9_preflight = gqa9_mode > 0 && gqa9_shape ?
+        ds4_gpu_laguna_swa_gqa9_preflight(
+            cache_cap, key_count, n_head, n_head_kv, head_dim) : 0;
+    if (gqa9_preflight < 0) return 0;
     if (!g_initialized && !ds4_gpu_init()) return 0;
+    const int gqa9_selected =
+        ds4_gpu_laguna_swa_gqa9_env_mode() > 0;
+    const int gqa3_selected = ds4_gpu_laguna_swa_gqa3_enabled();
+    const int staged_swa_active =
+        ds4_gpu_laguna_staged_swa_enabled() > 0;
+#ifdef DS4_TEST_HOOKS
+    int decode_route_kind = DS4_LAGUNA_TEST_DECODE_ORDINARY;
+#endif
     if (!heads || !key_cache || !value_cache || !q || !k || !v || !gate ||
         cache_cap == 0 || key_count == 0 || key_count > cache_cap ||
         n_head == 0 || n_head_kv == 0 || n_head % n_head_kv != 0 ||
@@ -36680,13 +36962,30 @@ int ds4_gpu_laguna_store_attention_tensor(
          * A full sliding ring also contains exactly the active key set; its
          * physical rotation does not affect an unmasked softmax reduction.
          * An unaligned full global cache uses the old kernel so tail padding
-         * never reads beyond the interleaved KV allocation. */
+         * never reads beyond the interleaved KV allocation.
+         *
+         * Grouped-eligible shapes (the production 72/8 and 48/8 ratios, both
+         * GQA3-eligible) use a split-K kernel that strides keys and needs no
+         * tail padding, so they may enter the flash path below 1024 keys once
+         * the history is long enough to amortize the three-dispatch split-K
+         * cost.  Below this floor the ungrouped single/8-SIMD kernel remains
+         * cheaper.  This is a default-path change: the same grouped family is
+         * already the default at >=1024 keys, so extending it down to the 512
+         * boundary only removes the 3x redundant KV traffic the ungrouped
+         * kernel paid in the 513-1023 range while keeping the padding-clamped
+         * ungrouped gate intact for non-grouped-eligible shapes. */
+        const bool grouped_eligible =
+            (n_head % 3u) == 0u &&
+            ((n_head / n_head_kv) % 3u) == 0u;
         const bool full_sliding_ring =
             cache_cap == 512u && key_count == cache_cap;
         const bool use_flash_decode =
             full_sliding_ring ||
-            (cache_cap > 512u && key_start == 0u && key_count >= 1024u &&
-             (key_count < cache_cap || key_count % 32u == 0u));
+            (cache_cap > 512u && key_start == 0u &&
+             ((grouped_eligible && key_count >= 512u &&
+               key_count < cache_cap) ||
+              (key_count >= 1024u &&
+               (key_count < cache_cap || key_count % 32u == 0u))));
         if (use_flash_decode) {
             if (!ds4_gpu_encode_laguna_flash_attention_decode(
                     cb,
@@ -36705,9 +37004,23 @@ int ds4_gpu_laguna_store_attention_tensor(
                     n_head,
                     n_head_kv,
                     head_dim,
-                    scale)) {
+                    scale,
+                    gqa9_selected,
+                    gqa3_selected,
+                    staged_swa_active)) {
                 return 0;
             }
+#ifdef DS4_TEST_HOOKS
+            decode_route_kind = ds4_gpu_laguna_test_decode_route_kind(
+                cache_cap,
+                key_start,
+                key_count,
+                n_head,
+                n_head_kv,
+                gqa9_selected,
+                gqa3_selected,
+                staged_swa_active);
+#endif
         } else {
             ds4_gpu_laguna_attention_args attention_args = {
                 .n_head = n_head,
@@ -36734,6 +37047,9 @@ int ds4_gpu_laguna_store_attention_tensor(
             ds4_gpu_end_compute_encoder(cb, enc);
         }
         if (!ds4_gpu_finish_command_buffer(cb, owned, "Laguna KV store + attention")) return 0;
+#ifdef DS4_TEST_HOOKS
+        ds4_gpu_laguna_test_decode_route_note(decode_route_kind, owned);
+#endif
     }
     return 1;
 }
@@ -37027,7 +37343,25 @@ int ds4_gpu_laguna_attention_prefill_tensor(
         uint32_t              head_dim,
         float                 scale,
         int                   split_decode_rows) {
+    /* Probe the optional GQA9 source/shape contract before the first staged
+     * or direct KV command.  Passing the full ring as key_count keeps an
+     * explicit request fail-closed even when this prefill begins before the
+     * first complete window. */
+    const int gqa9_mode = ds4_gpu_laguna_swa_gqa9_env_mode();
+    if (gqa9_mode < 0) return 0;
+    const bool gqa9_shape =
+        cache_cap == 512u && n_head == 72u &&
+        n_head_kv == 8u && head_dim == 128u;
+    const int gqa9_preflight = gqa9_mode > 0 && gqa9_shape ?
+        ds4_gpu_laguna_swa_gqa9_preflight(
+            cache_cap, cache_cap, n_head, n_head_kv, head_dim) : 0;
+    if (gqa9_preflight < 0) return 0;
     if (!g_initialized && !ds4_gpu_init()) return 0;
+    const int gqa9_selected =
+        ds4_gpu_laguna_swa_gqa9_env_mode() > 0;
+    const int gqa3_selected = ds4_gpu_laguna_swa_gqa3_enabled();
+    const int staged_swa_active =
+        ds4_gpu_laguna_staged_swa_enabled() > 0;
     /* The selector is lifecycle-snapshotted and rejected during init. Keep
      * this guard at the low-level entry as well so a malformed opt-in can
      * never reach either the split-row or ordinary command encoder. */
@@ -37124,7 +37458,7 @@ int ds4_gpu_laguna_attention_prefill_tensor(
 
             const bool use_staged_swa_rows =
                 split_decode_rows != 0 &&
-                ds4_gpu_env_bool("DS4_METAL_LAGUNA_STAGED_SWA") > 0 &&
+                ds4_gpu_laguna_staged_swa_enabled() > 0 &&
                 n_tokens >= 2u && n_tokens <= 16u &&
                 cache_cap == 512u && pos0 >= cache_cap;
             const bool require_staged_swa_rows =
@@ -37197,6 +37531,13 @@ int ds4_gpu_laguna_attention_prefill_tensor(
                         cb, owned, "Laguna staged SWA attention")) {
                     return 0;
                 }
+#ifdef DS4_TEST_HOOKS
+                /* This is the staged kernel's completion-scoped evidence;
+                 * unlike selector diagnostics it is recorded only after the
+                 * command buffer has finished successfully. */
+                ds4_gpu_laguna_test_decode_route_note(
+                    DS4_LAGUNA_TEST_DECODE_STAGED, owned);
+#endif
                 return 1;
             }
             if (use_staged_swa_rows && require_staged_swa_rows) {
@@ -37428,7 +37769,10 @@ int ds4_gpu_laguna_attention_prefill_tensor(
                             n_head,
                             n_head_kv,
                             head_dim,
-                            scale)) {
+                            scale,
+                            gqa9_selected,
+                            gqa3_selected,
+                            staged_swa_active)) {
                         return 0;
                     }
                 } else {
@@ -39807,6 +40151,117 @@ int ds4_gpu_laguna_router_simd_topk_preflight(
         float    expert_weight_scale) {
     return ds4_gpu_laguna_router_simd_topk_validate(
         n_expert, n_expert_used, expert_weight_scale);
+}
+
+/* A source override can compile the rest of the Laguna graph while predating
+ * the optional GQA9 function, so resolving the PSO lazily from the attention
+ * encoder is unsafe: that encoder may already have recorded the KV store into
+ * the caller-owned batch.  Probe every resource the grouped route needs before
+ * a command batch, graph, or cache can be touched. */
+static int ds4_gpu_laguna_swa_gqa9_shape_valid(
+        uint32_t cache_cap,
+        uint32_t key_count,
+        uint32_t n_head,
+        uint32_t n_head_kv,
+        uint32_t head_dim) {
+    return cache_cap == 512u && key_count == 512u &&
+        n_head == 72u && n_head_kv == 8u && head_dim == 128u;
+}
+
+int ds4_gpu_laguna_swa_gqa9_preflight(
+        uint32_t cache_cap,
+        uint32_t key_count,
+        uint32_t n_head,
+        uint32_t n_head_kv,
+        uint32_t head_dim) {
+    int mode = ds4_gpu_laguna_swa_gqa9_env_mode();
+    if (mode < 0) return -1;
+    if (mode == 0) return 0;
+
+    /* Staged SWA owns the full ring at higher precedence.  Parse GQA9 first
+     * so a malformed explicit GQA9 value never hides behind staged routing,
+     * but do not impose GQA9's production shape or source symbol on the
+     * winning staged route. */
+    if (ds4_gpu_laguna_staged_swa_enabled() > 0) return 0;
+
+    if (!ds4_gpu_laguna_swa_gqa9_shape_valid(
+            cache_cap, key_count, n_head, n_head_kv, head_dim)) {
+        fprintf(stderr,
+                "ds4: %s requested but requires cache/key=512/512, "
+                "heads=72/8, head_dim=128 (got cache/key=%u/%u "
+                "heads=%u/%u dim=%u); refusing fallback\n",
+                DS4_METAL_LAGUNA_SWA_GQA9,
+                cache_cap,
+                key_count,
+                n_head,
+                n_head_kv,
+                head_dim);
+        return -1;
+    }
+
+    /* Env-off must remain quiet and must not initialize Metal.  The explicit
+     * request is an availability probe; init is still before any command
+     * batch and does not allocate a Laguna graph or mutate KV state. */
+    if (!g_initialized && !ds4_gpu_init()) {
+        fprintf(stderr,
+                "ds4: %s requested but Metal initialization failed\n",
+                DS4_METAL_LAGUNA_SWA_GQA9);
+        return -1;
+    }
+    mode = ds4_gpu_laguna_swa_gqa9_env_mode();
+    if (mode <= 0) return mode;
+
+    @autoreleasepool {
+        const uint32_t nwg = 32u;
+        const uint32_t ncpsg = 32u;
+        const uint32_t nsg = ds4_gpu_flash_attn_vec_nsg(
+            key_count, nwg, ncpsg);
+        id<MTLComputePipelineState> grouped_pipeline =
+            ds4_gpu_get_pipeline(
+                "kernel_laguna_attention_decode_gqa9_split_f16");
+        id<MTLComputePipelineState> reduce_pipeline =
+            ds4_gpu_get_laguna_flash_attn_reduce_gate_pipeline(
+                (int32_t)head_dim, (int32_t)nwg);
+        const NSUInteger grouped_threads = 32u * (NSUInteger)nsg;
+        const NSUInteger grouped_shared =
+            9u * (NSUInteger)nsg * (2u + (NSUInteger)head_dim) *
+            sizeof(float);
+        const NSUInteger reduce_threads = 32u * (NSUInteger)nwg;
+        const NSUInteger max_threadgroup_memory =
+            g_device ? [g_device maxThreadgroupMemoryLength] : 0u;
+        const bool grouped_ready =
+            grouped_pipeline && reduce_pipeline &&
+            grouped_pipeline.threadExecutionWidth == 32u &&
+            grouped_pipeline.maxTotalThreadsPerThreadgroup >= grouped_threads &&
+            reduce_pipeline.threadExecutionWidth == 32u &&
+            reduce_pipeline.maxTotalThreadsPerThreadgroup >= reduce_threads &&
+            max_threadgroup_memory >= grouped_shared;
+        if (!grouped_ready) {
+            fprintf(stderr,
+                    "ds4: %s requested but GQA9 PSO/TEW/threadgroup "
+                    "resources are unavailable (gqa9=%s reduce=%s "
+                    "gqa9_tew=%lu gqa9_max=%lu reduce_tew=%lu "
+                    "reduce_max=%lu need_threads=%lu/%lu "
+                    "shared=%lu max_shared=%lu); refusing fallback\n",
+                    DS4_METAL_LAGUNA_SWA_GQA9,
+                    grouped_pipeline ? "yes" : "no",
+                    reduce_pipeline ? "yes" : "no",
+                    grouped_pipeline ?
+                        (unsigned long)grouped_pipeline.threadExecutionWidth : 0ul,
+                    grouped_pipeline ?
+                        (unsigned long)grouped_pipeline.maxTotalThreadsPerThreadgroup : 0ul,
+                    reduce_pipeline ?
+                        (unsigned long)reduce_pipeline.threadExecutionWidth : 0ul,
+                    reduce_pipeline ?
+                        (unsigned long)reduce_pipeline.maxTotalThreadsPerThreadgroup : 0ul,
+                    (unsigned long)grouped_threads,
+                    (unsigned long)reduce_threads,
+                    (unsigned long)grouped_shared,
+                    (unsigned long)max_threadgroup_memory);
+            return -1;
+        }
+    }
+    return 1;
 }
 
 static void ds4_gpu_laguna_router_simd_topk_report_once(void) {

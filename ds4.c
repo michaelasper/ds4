@@ -28724,6 +28724,16 @@ static bool metal_graph_dspark_capture_verified_suffix_layer(
     return ok;
 }
 
+/* This declaration is needed by the legacy raw graph path, which appears
+ * before the shared public graph/session preflight helper below. */
+#if defined(__APPLE__)
+static bool laguna_metal_swa_gqa9_preflight(
+        const ds4_engine *engine,
+        const char       *operation,
+        char             *err,
+        size_t            errlen);
+#endif
+
 /* Encode a full single-token decode step on Metal.  This is the generation
  * hot path: update caches, run all layers, then produce logits. */
 static bool metal_graph_encode_token_raw_swa(
@@ -28734,6 +28744,14 @@ static bool metal_graph_encode_token_raw_swa(
         uint32_t               pos,
         bool                   need_logits,
         bool                   allow_split_flush) {
+#if defined(__APPLE__)
+    /* Raw callers can bypass the public session boundary.  Keep the optional
+     * GQA9 source/PSO probe ahead of token embedding and the first command
+     * buffer so an old source cannot leave an earlier layer's KV work in a
+     * batch that a later error path would otherwise finish. */
+    if (!laguna_metal_swa_gqa9_preflight(
+            NULL, "Metal raw Laguna decode", NULL, 0)) return false;
+#endif
     if (g->raw_cap == 0) {
         fprintf(stderr, "ds4: Metal graph raw KV cache is not allocated\n");
         return false;
@@ -38242,6 +38260,11 @@ struct ds4_engine {
 
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
 static bool laguna_metal_router_simd_topk_preflight(
+        const ds4_engine *engine,
+        const char       *operation,
+        char             *err,
+        size_t            errlen);
+static bool laguna_metal_swa_gqa9_preflight(
         const ds4_engine *engine,
         const char       *operation,
         char             *err,
@@ -50193,6 +50216,11 @@ static bool laguna_graph_alloc(ds4_laguna_gpu_graph *g, uint32_t ctx_size) {
         DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) {
         return false;
     }
+#ifdef __APPLE__
+    if (!laguna_metal_swa_gqa9_preflight(NULL,
+                                         "Laguna graph allocation",
+                                         NULL, 0)) return false;
+#endif
     memset(g, 0, sizeof(*g));
     g->ctx_size = ctx_size;
     g->prefill_cap = ctx_size < 16384u ? ctx_size : 16384u;
@@ -50409,7 +50437,7 @@ static bool laguna_graph_spec_snapshot(
     /* Drafting and verification append to this batch. Keeping it open avoids
      * a completion whose only purpose was to delimit the KV backup. */
     if (!ok && ds4_gpu_commands_active()) {
-        (void)ds4_gpu_end_commands();
+        (void)ds4_gpu_discard_commands();
     }
     return ok;
 }
@@ -50439,14 +50467,16 @@ static bool laguna_graph_spec_restore(
                                          g->cache_cap[il],
                                          row_bytes, false);
     }
-    if (ds4_gpu_commands_active() &&
+    if (ds4_gpu_commands_active()) {
+        if (ok) {
 #if defined(__APPLE__)
-        ds4_gpu_submit_commands() == 0
+            if (ds4_gpu_submit_commands() == 0) ok = false;
 #else
-        ds4_gpu_end_commands() == 0
+            if (ds4_gpu_end_commands() == 0) ok = false;
 #endif
-    ) {
-        ok = false;
+        } else if (ds4_gpu_discard_commands() == 0) {
+            ok = false;
+        }
     }
     return ok;
 }
@@ -51316,6 +51346,11 @@ static void dflash_graph_free(ds4_dflash_gpu_graph *g) {
 
 static bool dflash_graph_alloc(ds4_dflash_gpu_graph *g) {
     if (!g || DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return false;
+#ifdef __APPLE__
+    if (!laguna_metal_swa_gqa9_preflight(NULL,
+                                         "Laguna DFlash graph allocation",
+                                         NULL, 0)) return false;
+#endif
     memset(g, 0, sizeof(*g));
     g->feature_cap = DS4_DFLASH_CACHE_CAP;
     g->block_cap = DS4_DFLASH_BLOCK_SIZE;
@@ -51557,7 +51592,16 @@ static bool dflash_graph_encode_inject(
                      head_dim) != 0;
         }
     }
-    if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
+    /* An encode failure can occur after earlier layers have appended KV
+     * stores to this batch.  Ending the batch here would commit those partial
+     * stores and leave the DFlash support cache ahead of its checkpoint. */
+    if (ds4_gpu_commands_active()) {
+        if (ok) {
+            if (ds4_gpu_end_commands() == 0) ok = false;
+        } else if (ds4_gpu_discard_commands() == 0) {
+            ok = false;
+        }
+    }
     return ok;
 }
 
@@ -51784,8 +51828,12 @@ static bool dflash_graph_draft_block(
                  n_rows,
                  DS4_N_VOCAB) != 0;
     }
-    if (!ok && ds4_gpu_commands_active()) {
-        (void)ds4_gpu_end_commands();
+    if (ds4_gpu_commands_active()) {
+        if (ok) {
+            ok = ds4_gpu_end_commands() != 0;
+        } else if (ds4_gpu_discard_commands() == 0) {
+            ok = false;
+        }
     }
     (void)q_dim;
     (void)kv_dim;
@@ -51809,6 +51857,8 @@ static bool laguna_graph_forward_token(
         const ds4_laguna_feature_capture *capture,
         float                *logits_out) {
 #ifdef __APPLE__
+    if (!laguna_metal_swa_gqa9_preflight(
+            NULL, "Laguna decode", NULL, 0)) return false;
     if (!laguna_metal_router_simd_topk_preflight(
             NULL, "Laguna decode", NULL, 0)) return false;
 #endif
@@ -52479,14 +52529,19 @@ static bool laguna_graph_forward_token(
 #endif
 #ifdef __APPLE__
     if (ds4_gpu_commands_active()) {
-        if (ds4_gpu_end_commands() == 0) {
-            ok = false;
-        } else if (ok) {
-            decode_residual_norm_completion_waited = true;
-            laguna_dense_q8_gate_up_swiglu_report_waited(g);
+        if (ok) {
+            if (ds4_gpu_end_commands() == 0) {
+                ok = false;
+            } else {
+                decode_residual_norm_completion_waited = true;
+                laguna_dense_q8_gate_up_swiglu_report_waited(g);
+            }
         } else {
-            /* The buffer did finish, but an earlier graph stage already
-             * failed, so this is not a successful route completion. */
+            /* Never commit KV/attention work recorded before a later graph
+             * stage failed.  A failed command batch is a transaction: drop
+             * it so the cache remains unchanged and route evidence cannot
+             * promote. */
+            if (ds4_gpu_discard_commands() == 0) ok = false;
             laguna_dense_q8_gate_up_swiglu_pending_clear(g);
         }
     }
@@ -52524,7 +52579,13 @@ static bool laguna_graph_forward_token(
         decode_ladder_reported = true;
     }
 #else
-    if (ds4_gpu_commands_active() && ds4_gpu_end_commands() == 0) ok = false;
+    if (ds4_gpu_commands_active()) {
+        if (ok) {
+            if (ds4_gpu_end_commands() == 0) ok = false;
+        } else if (ds4_gpu_discard_commands() == 0) {
+            ok = false;
+        }
+    }
 #endif
     if (ok && g->gpu_argmax_enabled) {
         ok = ds4_gpu_tensor_read(g->argmax,
@@ -52684,6 +52745,8 @@ static bool laguna_graph_forward_batch(
         void                 *display_progress_ud,
         int                   display_total) {
 #ifdef __APPLE__
+    if (!laguna_metal_swa_gqa9_preflight(
+            NULL, "Laguna prefill/speculative batch", NULL, 0)) return false;
     if (!laguna_metal_router_simd_topk_preflight(
             NULL, "Laguna prefill/speculative batch", NULL, 0)) return false;
 #endif
@@ -53406,10 +53469,16 @@ static bool laguna_graph_forward_batch(
      * the shared snapshot/draft/verify command stream. */
     const bool defer_completion = ok && gpu_draft_tokens != NULL;
     if (!defer_completion && ds4_gpu_commands_active()) {
-        if (ds4_gpu_end_commands() == 0) {
-            ok = false;
+        if (ok) {
+            if (ds4_gpu_end_commands() == 0) {
+                ok = false;
+            } else {
+                dense_q8_completion_waited = true;
+            }
         } else {
-            dense_q8_completion_waited = true;
+            /* Never commit KV/attention work recorded before a later graph
+             * stage failed.  Drop the shared batch transaction instead. */
+            if (ds4_gpu_discard_commands() == 0) ok = false;
         }
     }
     if (ok && dense_q8_completion_waited) {
@@ -53580,6 +53649,44 @@ static bool laguna_metal_decode_residual_norm_preflight(void) {
         fprintf(stderr,
                 "ds4: Laguna decode residual fusion requested but "
                 "kernel_add3_rms_norm_mul_f32_4 is unavailable\n");
+        return false;
+    }
+    return true;
+}
+
+/* Public Laguna graph/session boundaries call this before allocating graph
+ * scratch, opening a command batch, or changing session/cache state.  The
+ * Metal entry point repeats the same probe defensively for raw callers. */
+static bool laguna_metal_swa_gqa9_preflight(
+        const ds4_engine *engine,
+        const char       *operation,
+        char             *err,
+        size_t            errlen) {
+    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return true;
+    const int mode = ds4_gpu_laguna_swa_gqa9_preflight(
+        DS4_SHAPE_LAGUNA_S21.n_swa,
+        DS4_SHAPE_LAGUNA_S21.n_swa,
+        DS4_SHAPE_LAGUNA_S21.n_head,
+        DS4_SHAPE_LAGUNA_S21.n_head_kv,
+        DS4_SHAPE_LAGUNA_S21.n_head_dim);
+    if (mode < 0) {
+        if (err && errlen) {
+            snprintf(err, errlen,
+                     "%s Laguna SWA GQA9 preflight failed",
+                     operation ? operation : "graph operation");
+        }
+        return false;
+    }
+    if (mode > 0 && engine &&
+        (!ds4_backend_uses_graph(engine->backend) || !engine->metal_ready)) {
+        fprintf(stderr,
+                "ds4: Laguna SWA GQA9 requires a ready Metal graph backend; "
+                "refusing explicit opt-in fallback\n");
+        if (err && errlen) {
+            snprintf(err, errlen,
+                     "%s Laguna SWA GQA9 requires a ready Metal graph backend",
+                     operation ? operation : "graph operation");
+        }
         return false;
     }
     return true;
@@ -53807,6 +53914,8 @@ static int generate_laguna_metal_argmax(
     }
     if (!laguna_dense_q8_gate_up_swiglu_preflight(model, weights, NULL)) return 1;
 #if defined(__APPLE__)
+    if (!laguna_metal_swa_gqa9_preflight(
+            NULL, "Laguna generation", NULL, 0)) return 1;
     if (!laguna_metal_router_simd_topk_preflight(
             NULL, "Laguna generation", NULL, 0)) return 1;
     if (!laguna_metal_router_decode_fused_preflight(model, weights)) return 1;
@@ -58607,6 +58716,10 @@ static bool ds4_session_greedy_splitkv_replay_exact(
 
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_swa_gqa9_preflight(
+            s->engine, "session argmax", err, errlen)) return -1;
+#endif
     ds4_session_note_logits_dirty(s);
     if (ds4_session_is_cpu(s) || ds4_session_is_glm(s)) {
         if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
@@ -59077,6 +59190,8 @@ int ds4_engine_generate_argmax(
         ds4_session_progress_fn progress,
         void              *progress_ud) {
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_swa_gqa9_preflight(
+            e, "generation", NULL, 0)) return 1;
     if (!laguna_metal_router_simd_topk_preflight(
             e, "generation", NULL, 0)) return 1;
 #endif
@@ -64996,6 +65111,8 @@ static int ds4_session_tp_register(ds4_session *s) {
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     if (!out || !e || ctx_size <= 0) return 1;
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_swa_gqa9_preflight(
+            e, "session create", NULL, 0)) return 1;
     if (!laguna_metal_router_simd_topk_preflight(
             e, "session create", NULL, 0)) return 1;
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA &&
@@ -65902,6 +66019,8 @@ int ds4_session_eval_layer_slice(ds4_session *s,
         return 1;
     }
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_swa_gqa9_preflight(
+            s->engine, "session layer slice", err, errlen)) return 1;
     if (!laguna_metal_router_simd_topk_preflight(
             s->engine, "session layer slice", err, errlen)) return 1;
 #endif
@@ -66433,6 +66552,8 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
  * here instead of as a gate timeout mid-decode. */
 int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (s && !laguna_metal_swa_gqa9_preflight(
+            s->engine, "session sync", err, errlen)) return 1;
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session sync", err, errlen)) return 1;
 #endif
@@ -68727,6 +68848,8 @@ static int ds4_session_eval_probe_tp(ds4_session *s, int token, bool probe_mtp,
 
 int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (s && !laguna_metal_swa_gqa9_preflight(
+            s->engine, "session eval", err, errlen)) return 1;
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session eval", err, errlen)) return 1;
 #endif
@@ -69516,6 +69639,10 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
         if (err && errlen) snprintf(err, errlen, "decode batch has no session");
         return 1;
     }
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_swa_gqa9_preflight(
+            first->engine, "session batch eval", err, errlen)) return 1;
+#endif
     for (int i = 0; i < count; i++) {
         ds4_session_note_logits_dirty(items[i].session);
     }
@@ -69604,6 +69731,11 @@ int ds4_sessions_eval_batch_with_prefill(
         }
         return 1;
     }
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_swa_gqa9_preflight(
+            prefill_session->engine, "session mixed prefill/eval",
+            err, errlen)) return 1;
+#endif
     ds4_session_note_logits_dirty(prefill_session);
     for (int i = 0; i < count; i++) {
         ds4_session_note_logits_dirty(items[i].session);
@@ -70111,6 +70243,10 @@ int ds4_session_tp_spec_cycle(ds4_session *s, const int *drafts, int draft_n,
         snprintf(err, errlen, "tp: spec cycle outside worker mode");
         return 1;
     }
+#if defined(__APPLE__)
+    if (!laguna_metal_swa_gqa9_preflight(
+            e, "tp speculative cycle", err, errlen)) return 1;
+#endif
     ds4_session_note_logits_dirty(s);
     if (draft_n <= 0 || draft_n > DS4_DSPARK_MAX_BLOCK_SIZE) {
         snprintf(err, errlen, "tp: bad verify block size %d", draft_n);
@@ -73476,8 +73612,9 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                                         int *accepted, int accepted_cap,
                                         char *err, size_t errlen) {
     if (!s || max_tokens <= 0 || accepted_cap <= 0) return 0;
-    ds4_session_note_logits_dirty(s);
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    if (!laguna_metal_swa_gqa9_preflight(
+            s->engine, "speculative eval", err, errlen)) return -1;
     if (!laguna_metal_router_simd_topk_preflight(
             s->engine, "speculative eval", err, errlen)) return -1;
     const bool laguna_router_simd_topk_trace =
@@ -73490,6 +73627,7 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
         laguna_metal_router_simd_topk_trace_reset();
     }
 #endif
+    ds4_session_note_logits_dirty(s);
     if (s->distributed) {
         if (!accepted) return 0;
         if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;

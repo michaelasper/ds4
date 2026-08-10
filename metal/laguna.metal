@@ -1329,6 +1329,152 @@ kernel void kernel_laguna_attention_decode_gqa3_split_f16(
     }
 }
 
+// GQA9 sibling of the split decode kernel: one simdgroup evaluates all 9
+// query heads of a single KV head together.  The production SWA layer is 72 Q
+// heads over 8 KV heads (heads_per_kv = 9), so grouping 9 heads removes the 3x
+// redundant K/V traffic the GQA3 kernel still pays on a 9:1 ratio.  The per-
+// head arithmetic, key striding (first = iwg*nsg + simd_group,
+// stride = nwg*nsg), online-softmax update order, partial-merge layout, and
+// tmp/stats interleave are kept identical to the GQA3 kernel: only the head
+// group width changes.  Because each head's operation sequence is unchanged,
+// the merged output is bit-exact with the GQA3 kernel for the same shape, so
+// the reduce/gate kernel is reused unchanged.
+kernel void kernel_laguna_attention_decode_gqa9_split_f16(
+        constant ds4_metal_args_laguna_gqa3_decode &args,
+        device const float *q,
+        device const half  *key_cache,
+        device const half  *value_cache,
+        device float       *tmp,
+        threadgroup float  *scratch [[threadgroup(0)]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd_group_u [[simdgroup_index_in_threadgroup]],
+        uint3 tgpig [[threadgroup_position_in_grid]]) {
+    constexpr uint GROUP = 9u;
+    const uint head0 = tgpig.x * GROUP;
+    const uint head8 = head0 + (GROUP - 1u);
+    const uint token = tgpig.y;
+    const uint iwg = tgpig.z;
+    const uint simd_group = (uint)simd_group_u;
+    const uint key_count = args.key_count0 + token;
+    if (head8 >= args.n_head || token >= args.n_tokens ||
+        args.n_head_kv == 0u || args.head_dim != 128u ||
+        key_count == 0u ||
+        args.nsg == 0u || simd_group >= args.nsg || iwg >= args.nwg) {
+        return;
+    }
+
+    const uint heads_per_kv = args.n_head / args.n_head_kv;
+    const uint kv_head = head0 / heads_per_kv;
+    if (head8 / heads_per_kv != kv_head) return;
+    const uint cache_width = args.n_head_kv * args.head_dim;
+    const uint64_t query_base =
+        (uint64_t)token * args.n_head * args.head_dim;
+    device const float *qbase = q + query_base +
+                                (uint64_t)head0 * args.head_dim;
+
+    float4 acc[GROUP];
+    float maxv[GROUP];
+    float sumv[GROUP];
+    for (uint h = 0u; h < GROUP; h++) {
+        acc[h] = float4(0.0f);
+        maxv[h] = -INFINITY;
+        sumv[h] = 0.0f;
+    }
+    const uint first = iwg * args.nsg + simd_group;
+    const uint stride = args.nwg * args.nsg;
+    for (uint i = first; i < key_count; i += stride) {
+        const uint64_t kv_base =
+            (uint64_t)i * cache_width +
+            (uint64_t)kv_head * args.head_dim;
+        const uint d0 = lane;
+        const float4 key = float4((float)key_cache[kv_base + d0],
+                                  (float)key_cache[kv_base + d0 + 32u],
+                                  (float)key_cache[kv_base + d0 + 64u],
+                                  (float)key_cache[kv_base + d0 + 96u]);
+        float score[GROUP];
+        float next_max[GROUP];
+        float old_scale[GROUP];
+        float value_scale[GROUP];
+        for (uint h = 0u; h < GROUP; h++) {
+            device const float *qh = qbase + (uint64_t)h * args.head_dim;
+            score[h] = simd_sum(dot(float4(qh[d0],
+                                             qh[d0 + 32u],
+                                             qh[d0 + 64u],
+                                             qh[d0 + 96u]), key)) * args.scale;
+            next_max[h] = max(maxv[h], score[h]);
+            old_scale[h] = maxv[h] == -INFINITY ? 0.0f : exp(maxv[h] - next_max[h]);
+            value_scale[h] = exp(score[h] - next_max[h]);
+            sumv[h] = sumv[h] * old_scale[h] + value_scale[h];
+        }
+        const float4 value = float4((float)value_cache[kv_base + d0],
+                                    (float)value_cache[kv_base + d0 + 32u],
+                                    (float)value_cache[kv_base + d0 + 64u],
+                                    (float)value_cache[kv_base + d0 + 96u]);
+        for (uint h = 0u; h < GROUP; h++) {
+            acc[h] = acc[h] * old_scale[h] + value * value_scale[h];
+            maxv[h] = next_max[h];
+        }
+    }
+
+    threadgroup float *partial_max = scratch;
+    threadgroup float *partial_sum = partial_max + GROUP * args.nsg;
+    threadgroup float *partial_value = partial_sum + GROUP * args.nsg;
+    for (uint h = 0u; h < GROUP; h++) {
+        const uint slot = h * args.nsg + simd_group;
+        if (lane == 0u) {
+            partial_max[slot] = maxv[h];
+            partial_sum[slot] = sumv[h];
+        }
+        const uint base = slot * args.head_dim + lane;
+        partial_value[base] = acc[h].x;
+        partial_value[base + 32u] = acc[h].y;
+        partial_value[base + 64u] = acc[h].z;
+        partial_value[base + 96u] = acc[h].w;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group != 0u) return;
+    const uint nrows = args.n_tokens * args.n_head;
+    device float *stats =
+        tmp + (uint64_t)nrows * args.head_dim * args.nwg;
+    for (uint h = 0u; h < GROUP; h++) {
+        const uint slot_base = h * args.nsg;
+        float global_max = partial_max[slot_base];
+        for (uint sg = 1u; sg < args.nsg; sg++) {
+            global_max = max(global_max, partial_max[slot_base + sg]);
+        }
+        float merged_sum = 0.0f;
+        float4 merged = float4(0.0f);
+        for (uint sg = 0u; sg < args.nsg; sg++) {
+            const uint slot = slot_base + sg;
+            const float weight = partial_sum[slot] > 0.0f ?
+                exp(partial_max[slot] - global_max) : 0.0f;
+            merged_sum += partial_sum[slot] * weight;
+            const uint base = slot * args.head_dim + lane;
+            merged.x += partial_value[base] * weight;
+            merged.y += partial_value[base + 32u] * weight;
+            merged.z += partial_value[base + 64u] * weight;
+            merged.w += partial_value[base + 96u] * weight;
+        }
+
+        const uint row = token * args.n_head + head0 + h;
+        const uint64_t row_base =
+            (uint64_t)row * args.head_dim * args.nwg;
+        const uint dims[4] = {lane, lane + 32u, lane + 64u, lane + 96u};
+        const float outputs[4] = {merged.x, merged.y, merged.z, merged.w};
+        for (uint j = 0u; j < 4u; j++) {
+            const uint d = dims[j];
+            tmp[row_base + (d / 4u) * args.nwg * 4u + iwg * 4u + d % 4u] =
+                outputs[j];
+        }
+        if (lane == 0u) {
+            const uint64_t stat = (uint64_t)row * 2u * args.nwg + 2u * iwg;
+            stats[stat] = merged_sum;
+            stats[stat + 1u] = global_max;
+        }
+    }
+}
+
 // One threadgroup owns one query head. Short histories retain the original
 // single-SIMD online reduction. Longer histories are striped over eight SIMD
 // groups, then their independently normalized partials are merged in
