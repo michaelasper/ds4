@@ -1,14 +1,13 @@
-/* ds4_gpu_mgpu.h — multi-GPU plumbing types and APIs (v0).
+/* ds4_gpu_mgpu.h — low-level GPU tier plumbing types and APIs.
  *
- * This header carries the shared multi-GPU additions for the plumbing work
- * (device-aware accelerator support). It is included by C/Metal callers and
- * downstream tasks that need access to g_gpu[], g_n_gpus, g_gpu_peer_ok[],
- * the ds4_gpu_config struct, and the new tensor APIs.
+ * This header carries the low-level shared GPU additions used by graph code
+ * that needs access to g_gpu[], g_n_gpus, g_gpu_peer_ok[], and the tensor
+ * APIs. It is included by C/Metal callers and downstream tasks that need
+ * these declarations.
  *
  * Why not in ds4_gpu.h? The legacy ds4_gpu.h is included from C-only
  * callers (ds4.c, ds4_cli.c, etc.) and from the Metal build. This header
- * keeps the newer shared types separate, so it is the single source of truth
- * for multi-GPU tasks without disturbing the legacy contract.
+ * keeps the low-level shared types separate from those legacy declarations.
  *
  * The struct definitions use opaque void * placeholders for backend-specific
  * stream, BLAS, and event handles, so the header is safe to include from C
@@ -63,23 +62,6 @@ typedef struct {
 } ds4_gpu_attention_decode_row;
 #endif
 
-/* Tagged so headers (notably ds4.h) can forward-declare `struct
- * ds4_gpu_config` without dragging in this entire header. */
-typedef struct ds4_gpu_config {
-    int    device_indices[DS4_MAX_GPUS];   /* CUDA device IDs to use */
-    /* Explicit per-device budget in bytes. The engine does NOT auto-fill
-     * missing budgets - a value of 0 means "zero bytes of budget for
-     * this slot" and (combined with reserves) will push placement to
-     * CPU spill. Auto-detection (e.g. mapping --gpu-vram auto to
-     * cudaMemGetInfo) is the caller's job; see CLI flag wiring for the
-     * canonical CLI path. The engine emits a clear stderr and refuses
-     * if n_gpus > 0 and every vram_bytes[] is 0 (almost certainly a
-     * caller bug from zero-initializing the struct). */
-    size_t vram_bytes[DS4_MAX_GPUS];
-    int    n_gpus;
-    size_t safety_margin_bytes;            /* per-device reserve */
-} ds4_gpu_config;
-
 typedef struct {
     int    device_id;
     void  *stream;             /* cudaStream_t under CUDA */
@@ -96,11 +78,6 @@ extern ds4_gpu_ctx g_gpu[DS4_MAX_GPUS];
 extern int         g_n_gpus;
 extern int         g_gpu_peer_ok[DS4_MAX_GPUS][DS4_MAX_GPUS];
 
-/* Primary multi-device init. The existing ds4_gpu_init (declared in
- * ds4_gpu.h) is a thin shim that builds a single-device config for
- * device 0 and calls this. */
-int ds4_gpu_init_multi(const ds4_gpu_config *cfg);
-
 /* Caller-supplied struct alloc on a specific device. Returns 0 on
  * success, nonzero on error. Pair with ds4_gpu_tensor_free_in_place. */
 int  ds4_gpu_tensor_alloc_on(ds4_gpu_tensor *t, int device_id, uint64_t bytes);
@@ -108,8 +85,8 @@ void ds4_gpu_tensor_free_in_place(ds4_gpu_tensor *t);
 
 /* Heap-allocated tensor on a specific logical tier; mirrors the legacy
  * ds4_gpu_tensor_alloc ABI (returns ds4_gpu_tensor *) but with a tier
- * parameter. Returns NULL on failure. Used by the multi-tier graph
- * allocations in ds4.c. Single-tier callers can continue using the
+ * parameter. Returns NULL on failure. Retained tier-aware graph helpers can
+ * use this entry point. Single-tier callers can continue using the
  * legacy ds4_gpu_tensor_alloc(bytes) which is equivalent to
  * ds4_gpu_tensor_alloc_ptr_on(0, bytes). */
 ds4_gpu_tensor *ds4_gpu_tensor_alloc_ptr_on(int tier, uint64_t bytes);
@@ -196,9 +173,8 @@ int ds4_gpu_tensor_device(const ds4_gpu_tensor *t);
  * cudaSetDevice. Returns 0 on success, nonzero on error or if the
  * tier index is out of range.
  *
- * Wave-2 multi-GPU placement scaffolding adds this shim but does not
- * exercise the multi-tier execution path; multi-GPU execution
- * (follow-up) is its first caller. */
+ * This remains a low-level tier-routing shim; it is not a public placement or
+ * engine-initialization API. */
 int ds4_gpu_set_current_device(int logical_tier);
 int ds4_gpu_set_current_device_fenced(int logical_tier);
 

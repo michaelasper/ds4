@@ -55,7 +55,6 @@ enum {
 
 /* Retained graph helpers use the low-level tier-aware tensor declarations;
  * the public engine itself is single-device. */
-#include "ds4_layer_pack.h"
 #include "ds4_gpu_mgpu.h"
 
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD) && \

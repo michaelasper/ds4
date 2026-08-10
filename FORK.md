@@ -27,14 +27,17 @@ The refactor branch already:
 - routes raw generation directly through the Laguna graph;
 - removes the obsolete GLM one-shot generation graph, distributed runtime,
   and tensor-parallel transport/lifecycle;
+- removes the obsolete multi-GPU layer planner/packer, placement test, and
+  their build wiring; this boundary does not claim graph scalarization is
+  complete;
 - retains only Laguna quality fixtures and tooling under `quality/`;
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.
 
-Multi-GPU placement, CUDA-oriented tensor-parallel graph helpers, SSD expert
+Low-level CUDA-oriented tensor-parallel/tier-aware graph helpers, SSD expert
 streaming, legacy model helpers, and broad shared-backend Metal code still
-remain internally. Their presence is transitional and must not be interpreted
-as supported behavior.
+remain internally. Graph scalarization is not complete. Their presence is
+transitional and must not be interpreted as supported behavior.
 
 ## Staged deletion and extraction order
 
@@ -104,6 +107,14 @@ refactoring.
 Deletion stages should also include a repository search for removed flags,
 targets, source names, and documentation claims so stale compatibility does
 not survive the code removal.
+
+## Intentional source-ABI break
+
+`refactor/laguna-metal-only` intentionally breaks the old public
+`ds4_engine_options` layout and the multi-GPU source ABI. This is a deliberate
+rename/boundary break, not an append-only API evolution: callers must rebuild
+against the current headers. No reserved compatibility slots are promised;
+retaining them would defeat the rename/break objective.
 
 ## Deferred ABI and rename decisions
 
