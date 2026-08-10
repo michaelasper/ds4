@@ -18359,17 +18359,37 @@ static bool metal_graph_install_model_spans(
 }
 
 static bool metal_graph_stream_readahead_enabled(void) {
+    if (glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_READAHEAD",
+                              "DS4_METAL_DISABLE_STREAMING_READAHEAD")) {
+        return false;
+    }
+#ifdef DS4_ROCM_BUILD
     return glm_graph_env_present("DS4_ROCM_ENABLE_STREAMING_READAHEAD",
-                                 "DS4_METAL_ENABLE_STREAMING_READAHEAD") &&
-           !glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_READAHEAD",
-                                  "DS4_METAL_DISABLE_STREAMING_READAHEAD");
+                                 "DS4_METAL_ENABLE_STREAMING_READAHEAD");
+#else
+    /* Streaming layers sit in cold mmap pages; without F_RDADVISE the GPU
+     * faults them in page-by-page instead of streaming warm pages behind the
+     * current layer's compute. Every caller is an ssd_streaming path and the
+     * Metal-default non-streaming mmap path never reaches here, so default
+     * ON. DS4_METAL_DISABLE_STREAMING_READAHEAD is the diagnostic off-switch. */
+    return true;
+#endif
 }
 
 static bool metal_graph_stream_madvise_willneed_enabled(void) {
+    if (glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_MADVISE_WILLNEED",
+                              "DS4_METAL_DISABLE_STREAMING_MADVISE_WILLNEED")) {
+        return false;
+    }
+#ifdef DS4_ROCM_BUILD
     return glm_graph_env_present("DS4_ROCM_ENABLE_STREAMING_MADVISE_WILLNEED",
-                                 "DS4_METAL_ENABLE_STREAMING_MADVISE_WILLNEED") &&
-           !glm_graph_env_present("DS4_ROCM_DISABLE_STREAMING_MADVISE_WILLNEED",
-                                  "DS4_METAL_DISABLE_STREAMING_MADVISE_WILLNEED");
+                                 "DS4_METAL_ENABLE_STREAMING_MADVISE_WILLNEED");
+#else
+    /* Same default as the readahead gate above: warm the next streaming
+     * layer's pages during the current layer's inference. Diagnostic
+     * off-switch: DS4_METAL_DISABLE_STREAMING_MADVISE_WILLNEED. */
+    return true;
+#endif
 }
 
 static bool metal_graph_stream_decode_static_map_enabled(void) {
