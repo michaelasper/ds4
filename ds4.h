@@ -46,6 +46,14 @@ typedef struct {
     int cap;
 } ds4_tokens;
 
+/* Minimal growable byte buffer for engine helpers that append into a
+ * frontend-owned running buffer. */
+typedef struct {
+    char *ptr;
+    size_t len;
+    size_t cap;
+} ds4_buf;
+
 typedef struct {
     int id;
     float logit;
@@ -319,6 +327,10 @@ void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_thi
 void ds4_chat_append_assistant_end(ds4_engine *e, ds4_tokens *tokens);
 
 char *ds4_token_text(ds4_engine *e, int token, size_t *len);
+/* Append-decoding twin of ds4_token_text for per-token streaming loops: the
+ * decoded bytes land directly in the running buffer, so no per-token heap
+ * allocation or copy is needed. */
+void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b);
 int ds4_token_eos(ds4_engine *e);
 bool ds4_token_is_stop(ds4_engine *e, int token);
 bool ds4_token_is_thinking_control(ds4_engine *e, int token);
@@ -388,6 +400,15 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
 int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
                                      int excluded_id);
 uint64_t ds4_test_mixed_native_count(void);
+typedef struct {
+    uint64_t max_scans;
+    uint64_t sum_scans;
+    uint64_t cache_hits;
+} ds4_test_logprob_stats;
+void ds4_test_logprob_stats_reset(void);
+void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out);
+int ds4_test_logprob_cache_probe(void);
+int ds4_test_sample_arena_lifecycle(void);
 #endif
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k);
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out);
