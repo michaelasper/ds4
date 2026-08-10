@@ -1,6 +1,13 @@
 #include "lgn.h"
 
 #include <stdio.h>
+#include <string.h>
+
+bool lgn_architecture_is_supported(const char *value, size_t value_len) {
+    static const char supported[] = "laguna";
+    return value && value_len == sizeof(supported) - 1u &&
+           memcmp(value, supported, sizeof(supported) - 1u) == 0;
+}
 
 bool lgn_decode_ladder_parse(const char *value,
                              uint32_t    layer_count,

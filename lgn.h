@@ -15,6 +15,10 @@ enum {
     LGN_SWA_HEAD_COUNT    = 72u,
 };
 
+/* The fork admits one GGUF architecture spelling.  The input is an explicit
+ * byte span because GGUF strings are not NUL-terminated. */
+bool lgn_architecture_is_supported(const char *value, size_t value_len);
+
 /* Parse the optional Laguna decode command-buffer ladder.  An unset/empty
  * value is disabled and succeeds for every model layer count.  A nonempty
  * value is a strict decimal comma list, increasing and bounded by the model

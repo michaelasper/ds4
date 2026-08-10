@@ -12,6 +12,23 @@ static int failures;
     }                                                                         \
 } while (0)
 
+static void test_architecture(void) {
+    CHECK(lgn_architecture_is_supported("laguna", 6),
+          "literal Laguna architecture is accepted");
+    CHECK(!lgn_architecture_is_supported(NULL, 0),
+          "missing architecture is rejected");
+    CHECK(!lgn_architecture_is_supported("", 0),
+          "empty architecture is rejected");
+    CHECK(!lgn_architecture_is_supported("Laguna", 6),
+          "architecture matching is case-sensitive");
+    CHECK(!lgn_architecture_is_supported("laguna ", 7),
+          "architecture whitespace is rejected");
+    CHECK(!lgn_architecture_is_supported("deepseek4", 9),
+          "DeepSeek architecture is rejected");
+    CHECK(!lgn_architecture_is_supported("glm-dsa", 7),
+          "GLM architecture is rejected");
+}
+
 static void test_ladder_parser(void) {
     const uint64_t all_expected =
         (UINT64_C(1) << 0) |
@@ -124,6 +141,7 @@ static void test_s21_topology(void) {
 }
 
 int main(void) {
+    test_architecture();
     test_ladder_parser();
     test_ladder_formatter();
     test_s21_topology();

@@ -4,6 +4,29 @@
 #include "../lgn.h"
 #include "../ds4_gpu.h"
 
+static void test_laguna_architecture_gate(void) {
+    static const struct {
+        const char *architecture;
+        int accepted;
+    } cases[] = {
+        {"laguna", 1},
+        {"deepseek4", 0},
+        {"glm-dsa", 0},
+        {"unknown", 0},
+        {"", 0},
+        {"Laguna", 0},
+        {"laguna ", 0},
+        {NULL, 0},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const char *architecture = cases[i].architecture;
+        const size_t len = architecture ? strlen(architecture) : 0;
+        TEST_ASSERT((int)lgn_architecture_is_supported(architecture, len) ==
+                    cases[i].accepted);
+    }
+}
+
 /* These selectors are backend-independent, so keep their strict parser and
  * route-boundary checks runnable in the default CPU/no-GPU test binary too. */
 static void test_laguna_selector_parser(void) {
@@ -15659,6 +15682,9 @@ typedef struct {
 } ds4_test_entry;
 
 static const ds4_test_entry test_entries[] = {
+    {"--laguna-architecture", "laguna-architecture",
+     "accept literal Laguna GGUF architecture and reject legacy/missing values",
+     test_laguna_architecture_gate, false},
     {"--laguna-selector-parser", "laguna-selector-parser",
      "strict Laguna selector and prefill-route parser boundaries",
      test_laguna_selector_parser, false},

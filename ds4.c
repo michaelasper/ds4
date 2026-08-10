@@ -5981,7 +5981,7 @@ static void config_validate_fixed_shape(uint32_t n_layer) {
 
 /* Validate metadata values that affect semantics: attention shape, HC count,
  * expert routing, RoPE scaling, compression ratios, and SwiGLU clamp. */
-static void config_validate_deepseek4_model(const ds4_model *m) {
+static DS4_MAYBE_UNUSED void config_validate_deepseek4_model(const ds4_model *m) {
     const uint32_t n_layer = required_u32(m, "deepseek4.block_count");
     const uint32_t n_embd = required_u32(m, "deepseek4.embedding_length");
     const uint32_t n_vocab = required_u32(m, "deepseek4.vocab_size");
@@ -6093,7 +6093,7 @@ static void config_validate_deepseek4_model(const ds4_model *m) {
     config_expect_bool("expert_weights_norm", expert_weight_norm, true);
 }
 
-static void config_validate_glm_dsa_model(const ds4_model *m) {
+static DS4_MAYBE_UNUSED void config_validate_glm_dsa_model(const ds4_model *m) {
     g_ds4_shape = DS4_SHAPE_GLM52;
     memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
 
@@ -6265,17 +6265,38 @@ static void config_validate_laguna_model(const ds4_model *m) {
                        true);
 }
 
-static void config_validate_model(const ds4_model *m) {
+/* Architecture admission is deliberately side-effect free.  Keep this
+ * predicate ahead of every family validator: those validators select global
+ * shape state, and a non-Laguna GGUF must never reach the legacy branches. */
+static bool config_model_is_laguna(const ds4_model *m, ds4_str *arch_out) {
     ds4_str arch = {0};
-    if (model_get_string(m, "general.architecture", &arch) && ds4_streq(arch, "glm-dsa")) {
-        config_validate_glm_dsa_model(m);
-        return;
+    if (!m || !model_get_string(m, "general.architecture", &arch)) return false;
+    if (arch_out) *arch_out = arch;
+    if (arch.len > SIZE_MAX) return false;
+    return lgn_architecture_is_supported(arch.ptr, (size_t)arch.len);
+}
+
+static void config_require_laguna_architecture(const ds4_model *m) {
+    ds4_str arch = {0};
+    if (!config_model_is_laguna(m, &arch)) {
+        if (!arch.ptr) {
+            ds4_die("GGUF general.architecture is required and must be literal laguna");
+        }
+        const int shown = arch.len > 128u ? 128 : (int)arch.len;
+        fprintf(stderr,
+                "ds4: unsupported GGUF general.architecture '%.*s%s'; "
+                "only literal laguna is supported\n",
+                shown,
+                arch.ptr,
+                arch.len > 128u ? "..." : "");
+        exit(1);
     }
-    if (arch.ptr && ds4_streq(arch, "laguna")) {
-        config_validate_laguna_model(m);
-        return;
-    }
-    config_validate_deepseek4_model(m);
+}
+
+static void config_validate_model(const ds4_model *m) {
+    /* Fail closed before any legacy model-family selection or shape mutation. */
+    config_require_laguna_architecture(m);
+    config_validate_laguna_model(m);
 }
 
 static void weights_bind_output(
@@ -64227,8 +64248,11 @@ static int ds4_engine_open_internal(ds4_engine **out,
     const bool graph_backend = ds4_backend_uses_graph(opt->backend);
     if (graph_backend) ds4_linux_graph_backend_set_oom_score(opt->backend);
     model_open(&e->model, opt->model_path, graph_backend, !opt->inspect_only);
-    if (opt->warm_weights) model_warm_weights(&e->model);
+    /* Admit the model before weight warming or graph setup.
+     * config_validate_model fails closed before legacy family selection can
+     * mutate the global shape state. */
     config_validate_model(&e->model);
+    if (opt->warm_weights) model_warm_weights(&e->model);
     if (load_slice && load_layer_end == UINT32_MAX) {
         const uint32_t normal_layers = ds4_model_normal_layer_count();
         if (normal_layers == 0) {
