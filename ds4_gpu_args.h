@@ -2,9 +2,8 @@
  * --gpu-devices flags. Used by ds4_cli, ds4_server, and ds4_bench.
  * See mgpu-cli-wiring task (wave 2) for design.
  *
- * The parser does not link CUDA headers directly. On CUDA builds the
- * "auto" path is gated and dispatches to ds4_gpu_args_probe_auto_cuda,
- * which is defined in ds4_cuda.cu. On Metal/CPU builds, "auto" returns
+ * The parser does not link accelerator headers directly. The optional
+ * non-Metal "auto" path is build-gated; on Metal/CPU builds, "auto" returns
  * an error.
  */
 #ifndef DS4_GPU_ARGS_H
@@ -60,7 +59,7 @@ int format_gpu_layout_line(const ds4_gpu_config *cfg,
                            char                 *out,
                            size_t                outlen);
 
-/* CUDA-only auto probe. Defined in ds4_cuda.cu under the same gate.
+/* Non-Metal auto-probe ABI retained under the same build gate.
  * Returns 0 on success, nonzero on failure (errbuf populated).
  * device_filter may be NULL (use all visible devices) or a list of
  * length filter_len (use only those device indices).

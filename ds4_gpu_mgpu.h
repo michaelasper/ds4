@@ -1,22 +1,19 @@
 /* ds4_gpu_mgpu.h — multi-GPU plumbing types and APIs (v0).
  *
- * This header carries the new multi-GPU additions for the multi-GPU plumbing PP work
- * (device-aware CUDA). It is included from ds4_cuda.cu and from
+ * This header carries the shared multi-GPU additions for the plumbing work
+ * (device-aware accelerator support). It is included by C/Metal callers and
  * downstream tasks that need access to g_gpu[], g_n_gpus, g_gpu_peer_ok[],
  * the ds4_gpu_config struct, and the new tensor APIs.
  *
  * Why not in ds4_gpu.h? The legacy ds4_gpu.h is included from C-only
- * callers (ds4.c, ds4_cli.c, etc.) and from the Metal build, but is NOT
- * included from ds4_cuda.cu historically. That asymmetry hid pre-existing
- * signature mismatches between the legacy header and ds4_cuda.cu. We keep
- * the legacy header opaque and put the new shared types here, so this
- * file is the single source of truth for both ds4_cuda.cu and downstream
- * multi-GPU tasks without disturbing the legacy contract.
+ * callers (ds4.c, ds4_cli.c, etc.) and from the Metal build. This header
+ * keeps the newer shared types separate, so it is the single source of truth
+ * for multi-GPU tasks without disturbing the legacy contract.
  *
- * The struct definitions reference CUDA-specific handle types via void *
- * placeholders so the header is safe to include from C builds, Metal
- * builds, and the CUDA build (where ds4_cuda.cu casts the void * back
- * to cudaStream_t / cublasHandle_t / cudaEvent_t internally).
+ * The struct definitions use opaque void * placeholders for backend-specific
+ * stream, BLAS, and event handles, so the header is safe to include from C
+ * and Metal builds; backend implementations cast them to native handles
+ * internally.
  */
 #ifndef DS4_GPU_MGPU_H
 #define DS4_GPU_MGPU_H

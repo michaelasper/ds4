@@ -865,16 +865,6 @@ across requests. The tested host is configured for up to 16 resident sessions:
   --host 0.0.0.0
 ```
 
-The equivalent local launcher is `./run-nvidia-tp-server.sh`. The server launcher
-also enables the on-disk KV cache and defaults to the native 0731 MXFP4 GGUF. Set `DS4_MODEL` to use the Q4
-file above instead. Reduce the session count or context size if the requested
-resident KV caches do not fit after model loading. CUDA TP, half-resident expert
-ownership, output sharding, pipelined prefill, and compatible grouped decode are
-selected by `--cuda-tensor-parallel`; no `DS4_CUDA_*` environment tuning is required.
-Without an explicit `--prefill-chunk`, this mode uses 2048-token chunks so the
-tested 16-session, 100k-context layout retains enough VRAM for resident KV
-caches. An explicit `--prefill-chunk` remains an override for other topologies.
-
 Any even card count that can hold the selected model and graph scratch is a
 valid topology. On this class of 48 GB card, the useful measured endpoints are
 Q2 on four cards (two pipeline stages) and Q4 on eight cards (four stages).

@@ -3683,12 +3683,12 @@ int ds4_gpu_matmul_q8_0_hc_expand_tensor(
         uint32_t                n_embd,
         uint32_t                n_hc);
 
-/* Decode-island CUDA graph capture (CUDA backend; Metal/ROCm/CPU stub it
- * out and stay eager).  Design ported from the Entrpi/ds4 batched-serving
- * fork's per-layer decode graph capture.  The key identifies a captured
- * island: layer, island index, and the activation buffers whose addresses
- * the captured kernels bake in.  ds4_cuda.cu mirrors this struct
- * byte-for-byte (it does not include this header); keep both in sync. */
+/* Decode-island graph-capture descriptor. Metal/CPU builds stub capture out
+ * and stay eager. Design ported from the Entrpi/ds4 batched-serving fork's
+ * per-layer decode graph capture. The key identifies a captured island:
+ * layer, island index, and the activation buffers whose addresses captured
+ * kernels bake in. Backend implementations must mirror this layout
+ * byte-for-byte; keep the fields in sync. */
 typedef struct ds4_decode_graph_key {
     uint32_t il;
     uint32_t island;    /* 0: layer top to pre-rope; 1: attn-out to layer end */
