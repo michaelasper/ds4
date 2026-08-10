@@ -46,6 +46,14 @@ typedef struct {
     int cap;
 } ds4_tokens;
 
+/* Minimal growable byte buffer for engine helpers that append into a
+ * frontend-owned running buffer. */
+typedef struct {
+    char *ptr;
+    size_t len;
+    size_t cap;
+} ds4_buf;
+
 typedef struct {
     int id;
     float logit;
@@ -319,6 +327,10 @@ void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_thi
 void ds4_chat_append_assistant_end(ds4_engine *e, ds4_tokens *tokens);
 
 char *ds4_token_text(ds4_engine *e, int token, size_t *len);
+/* Append-decoding twin of ds4_token_text for per-token streaming loops: the
+ * decoded bytes land directly in the running buffer, so no per-token heap
+ * allocation or copy is needed. */
+void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b);
 int ds4_token_eos(ds4_engine *e);
 bool ds4_token_is_stop(ds4_engine *e, int token);
 bool ds4_token_is_thinking_control(ds4_engine *e, int token);

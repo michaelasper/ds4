@@ -62,11 +62,7 @@ static void stop_signal_handler(int sig) {
     }
 }
 
-typedef struct {
-    char *ptr;
-    size_t len;
-    size_t cap;
-} buf;
+typedef ds4_buf buf;
 
 static void die(const char *msg) {
     fprintf(stderr, "ds4-server: %s\n", msg);
@@ -5707,7 +5703,8 @@ static bool sse_error_event(int fd, const request *r, const char *msg) {
     return ok;
 }
 
-static bool sse_chunk(int fd, const request *r, const char *id, const char *text, const char *finish) {
+static bool sse_chunk_n(int fd, const request *r, const char *id,
+                        const char *text, size_t text_len, const char *finish) {
     buf b = {0};
     long now = (long)time(NULL);
     if (r->kind == REQ_CHAT) {
@@ -5715,9 +5712,11 @@ static bool sse_chunk(int fd, const request *r, const char *id, const char *text
         json_escape(&b, r->model);
         buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":");
         if (text) {
-            buf_puts(&b, "{\"content\":");
-            json_escape(&b, text);
-            buf_putc(&b, '}');
+            /* Length-taking escape: the delta stays in the caller's running
+             * buffer, no per-token copy or NUL termination is needed. */
+            buf_puts(&b, "{\"content\":\"");
+            json_escape_fragment_n(&b, text, text_len);
+            buf_puts(&b, "\"}");
         } else {
             buf_puts(&b, finish ? "{}" : "{\"role\":\"assistant\"}");
         }
@@ -5727,15 +5726,19 @@ static bool sse_chunk(int fd, const request *r, const char *id, const char *text
     } else {
         buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"text_completion\",\"created\":%ld,\"model\":", id, now);
         json_escape(&b, r->model);
-        buf_puts(&b, ",\"choices\":[{\"text\":");
-        json_escape(&b, text ? text : "");
-        buf_puts(&b, ",\"index\":0,\"finish_reason\":");
+        buf_puts(&b, ",\"choices\":[{\"text\":\"");
+        if (text) json_escape_fragment_n(&b, text, text_len);
+        buf_puts(&b, "\",\"index\":0,\"finish_reason\":");
         if (finish) json_escape(&b, finish); else buf_puts(&b, "null");
         buf_puts(&b, "}]}\n\n");
     }
     bool ok = send_all(fd, b.ptr, b.len);
     buf_free(&b);
     return ok;
+}
+
+static bool sse_chunk(int fd, const request *r, const char *id, const char *text, const char *finish) {
+    return sse_chunk_n(fd, r, id, text, text ? strlen(text) : 0, finish);
 }
 
 static int clamp_usage_tokens(int value, int max) {
@@ -11950,12 +11953,15 @@ decode_again:
             }
             committed_visible = ti + 1;
 
-            size_t piece_len = 0;
-            char *piece = ds4_token_text(s->engine, token, &piece_len);
+            const size_t piece_start = text.len;
+            ds4_token_text_into(s->engine, token, &text);
+            const size_t piece_len = text.len - piece_start;
+            /* Points into the running buffer; valid only until the next
+             * token append.  NULL for empty pieces. */
+            const char *piece = piece_len ? text.ptr + piece_start : NULL;
             completion++;
 
             trace_piece(s, trace_id, piece, piece_len);
-            buf_append(&text, piece, piece_len);
             thinking_state_feed(&thinking, piece, piece_len);
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
                 dsml_decode_tracker_update(&dsml_tracker, text.ptr, text.len);
@@ -11976,14 +11982,13 @@ decode_again:
             }
 
             if (j->req.stream && !structured_stream && stream_len > plain_stream_pos) {
-                char *delta = xstrndup(text.ptr + plain_stream_pos, stream_len - plain_stream_pos);
-                bool ok = sse_chunk(j->fd, &j->req, id, delta, NULL);
-                free(delta);
+                bool ok = sse_chunk_n(j->fd, &j->req, id,
+                                      text.ptr + plain_stream_pos,
+                                      stream_len - plain_stream_pos, NULL);
                 if (!ok) {
                     job_mark_cancelled(j);
                     finish = "error";
                     snprintf(err, sizeof(err), "client stream write failed");
-                    free(piece);
                     stop_decode = true;
                     break;
                 }
@@ -11996,7 +12001,6 @@ decode_again:
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
@@ -12007,7 +12011,6 @@ decode_again:
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
@@ -12018,11 +12021,9 @@ decode_again:
                 job_mark_cancelled(j);
                 finish = "error";
                 snprintf(err, sizeof(err), "client stream write failed");
-                free(piece);
                 stop_decode = true;
                 break;
             }
-            free(piece);
 
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
                 if (thinking_gates_tool_markers && thinking.inside) {

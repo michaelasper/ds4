@@ -39222,6 +39222,37 @@ char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
     return out;
 }
 
+void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b) {
+    ds4_vocab *vocab = &e->vocab;
+    if (!b || token < 0 || token >= vocab->n_vocab) return;
+
+    ds4_str s = vocab->token[token];
+    /* Decoding emits at most one byte per source byte, so one reserve covers
+     * both the raw copy and the GPT-2 byte-mapping loop below. */
+    if (b->len + (size_t)s.len + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < b->len + (size_t)s.len + 1) cap *= 2;
+        b->ptr = xrealloc(b->ptr, cap);
+        b->cap = cap;
+    }
+    char *out = b->ptr + b->len;
+    if (vocab_token_is_named_special(vocab, token) ||
+        vocab_token_is_literal_special(s)) {
+        memcpy(out, s.ptr, (size_t)s.len);
+        b->len += (size_t)s.len;
+    } else {
+        size_t n = 0;
+        uint64_t pos = 0;
+        while (pos < s.len) {
+            uint32_t cp = utf8_decode_one(s.ptr, s.len, &pos);
+            int byte = gpt2_codepoint_to_byte(cp);
+            if (byte >= 0) out[n++] = (char)byte;
+        }
+        b->len += n;
+    }
+    b->ptr[b->len] = '\0';
+}
+
 static bool vocab_token_is_generation_stop(const ds4_vocab *vocab, int token) {
     if (!vocab || token < 0) return false;
     if (token == vocab->eos_id) return true;
