@@ -19,6 +19,21 @@ enum {
  * byte span because GGUF strings are not NUL-terminated. */
 bool lgn_architecture_is_supported(const char *value, size_t value_len);
 
+/* Callback used by the Laguna GPT-2/GLM4 pre-tokenizer.  Each callback span
+ * is a non-empty borrowed slice of the input, delivered in source order.  The
+ * slice remains valid only until the callback returns.  Returning false stops
+ * tokenization and makes lgn_bpe_pretokenize return false. */
+typedef bool (*lgn_bpe_piece_fn)(const char *piece,
+                                 size_t      piece_len,
+                                 void       *userdata);
+
+/* Split a NUL-terminated input into the exact byte spans consumed by
+ * Laguna's BPE implementation.  This function performs no vocabulary or BPE
+ * merge work; callers own those concerns in their callback. */
+bool lgn_bpe_pretokenize(const char       *text,
+                         lgn_bpe_piece_fn  emit,
+                         void             *userdata);
+
 /* Parse the optional Laguna decode command-buffer ladder.  An unset/empty
  * value is disabled and succeeds for every model layer count.  A nonempty
  * value is a strict decimal comma list, increasing and bounded by the model
