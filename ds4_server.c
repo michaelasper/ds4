@@ -8637,6 +8637,12 @@ struct server_slot {
 static bool id_list_contains(const stop_list *ids, const char *id);
 static void id_list_push_unique(stop_list *ids, const char *id);
 
+typedef struct kv_store_job {
+    struct kv_store_job *next;
+    ds4_kvstore_staged_store staged;
+    ds4_kvstore_trailer_hooks hooks;
+} kv_store_job;
+
 struct server {
     ds4_engine *engine;
     server_slot *slots;
@@ -8653,6 +8659,14 @@ struct server {
     pthread_mutex_t tool_mu;
     pthread_mutex_t kv_mu;
     pthread_mutex_t inference_mu;
+    /* Background continued-checkpoint commits (DS4_KV_CONTINUED_STORE_ASYNC). */
+    pthread_t kv_store_thread;
+    bool kv_store_started;
+    bool kv_store_stop;
+    pthread_mutex_t kv_store_mu;
+    pthread_cond_t kv_store_cv;
+    kv_store_job *kv_store_head;
+    kv_store_job *kv_store_tail;
     pthread_mutex_t model_mu;
     pthread_cond_t model_cv;
     bool model_busy;
@@ -9775,7 +9789,13 @@ static void kv_cache_restore_suppressed_continued(kv_disk_cache *kc,
 static int kv_cache_slot_continued_target(server *s, server_slot *slot,
                                           int live_tokens) {
     if (!s || !slot) return 0;
-    kv_disk_cache view = s->kv;
+    /* Lock-free peek on the per-token path: opt is fixed at open and the
+     * last-store counter is owned by this slot's decode thread.  Do not copy
+     * the whole cache here: the entry index is mutated under kv_mu by store
+     * and load paths (and by the async commit worker when enabled). */
+    kv_disk_cache view = {0};
+    view.enabled = s->kv.enabled;
+    view.opt = s->kv.opt;
     view.continued_last_store_tokens = slot->continued_last_store_tokens;
     return kv_cache_continued_store_target(&view, live_tokens);
 }
@@ -9823,6 +9843,130 @@ static void kv_cache_discard_failed_disk_entry(server *s, server_slot *slot,
     pthread_mutex_unlock(&s->inference_mu);
 }
 
+/* -------------------------------------------------------------------------
+ * Async continued-checkpoint stores (DS4_KV_CONTINUED_STORE_ASYNC=1,
+ * default off).
+ *
+ * A continued store snapshots the token ids and stages the session payload
+ * under the usual inference_mu + kv_mu locks, then hands the multi-MB file
+ * commit to a single background worker so the write overlaps the next
+ * tokens' GPU decode.  Ordering and crash consistency:
+ * - the worker is one FIFO thread, so commits run in issue order and
+ *   same-prefix writes serialize;
+ * - every commit re-checks the target path under kv_mu and converges on an
+ *   identical existing file (trailer refresh) instead of overwriting a newer
+ *   checkpoint with an older snapshot;
+ * - a checkpoint file appears only via rename once fully written, and its
+ *   content comes entirely from the locked snapshot, so it can never
+ *   reference tokens or KV rows outside that snapshot;
+ * - the worker touches only the cache index/files (kv_mu) and the tool map
+ *   trailer hooks (tool_mu, same kv_mu -> tool_mu order as the synchronous
+ *   store path), never the session, so no lock ordering changes.
+ * ------------------------------------------------------------------------- */
+
+static bool kv_async_continued_enabled(void) {
+    const char *env = getenv("DS4_KV_CONTINUED_STORE_ASYNC");
+    return env && env[0] && strcmp(env, "0") != 0;
+}
+
+static void *kv_store_worker_main(void *ud) {
+    server *s = ud;
+    for (;;) {
+        pthread_mutex_lock(&s->kv_store_mu);
+        while (!s->kv_store_head && !s->kv_store_stop) {
+            pthread_cond_wait(&s->kv_store_cv, &s->kv_store_mu);
+        }
+        kv_store_job *job = s->kv_store_head;
+        if (job) {
+            s->kv_store_head = job->next;
+            if (!s->kv_store_head) s->kv_store_tail = NULL;
+        }
+        pthread_mutex_unlock(&s->kv_store_mu);
+        if (!job) break;   /* stop requested with the queue drained */
+        char err[160] = {0};
+        pthread_mutex_lock(&s->kv_mu);
+        ds4_kvstore_commit_staged_store(&s->kv, &job->hooks, &job->staged,
+                                        err, sizeof(err));
+        pthread_mutex_unlock(&s->kv_mu);
+        free(job);
+    }
+    return NULL;
+}
+
+static void kv_store_worker_stop(server *s) {
+    pthread_mutex_lock(&s->kv_store_mu);
+    s->kv_store_stop = true;
+    pthread_cond_signal(&s->kv_store_cv);
+    pthread_mutex_unlock(&s->kv_store_mu);
+    if (s->kv_store_started) {
+        pthread_join(s->kv_store_thread, NULL);
+        s->kv_store_started = false;
+    }
+}
+
+/* Attempts to hand a continued checkpoint to the background store worker.
+ * Sets *stored the way a synchronous store would: true when the checkpoint
+ * is queued or already on disk, false when it was skipped.  Returns false
+ * only when no worker could start, in which case the caller should store
+ * synchronously. */
+static bool kv_store_try_async_continued(server *s, server_slot *slot,
+                                         const ds4_tokens *tokens, int target,
+                                         bool *stored) {
+    *stored = false;
+    pthread_mutex_lock(&s->kv_store_mu);
+    if (s->kv_store_head) {
+        /* One queued commit is plenty: when the disk falls a whole frontier
+         * behind, drop this boundary; the next aligned frontier stores a
+         * longer prefix and subsumes it. */
+        pthread_mutex_unlock(&s->kv_store_mu);
+        server_log(DS4_LOG_KVCACHE,
+                   "ds4-server: kv cache async store busy, dropped continued boundary tokens=%d",
+                   target);
+        return true;
+    }
+    if (!s->kv_store_started) {
+        s->kv_store_stop = false;
+        if (pthread_create(&s->kv_store_thread, NULL,
+                           kv_store_worker_main, s) != 0) {
+            pthread_mutex_unlock(&s->kv_store_mu);
+            return false;
+        }
+        s->kv_store_started = true;
+    }
+    pthread_mutex_unlock(&s->kv_store_mu);
+
+    kv_store_job *job = xmalloc(sizeof(*job));
+    memset(job, 0, sizeof(*job));
+    job->hooks = kv_cache_tool_map_hooks(s, NULL);
+    char err[160] = {0};
+    pthread_mutex_lock(&s->inference_mu);
+    pthread_mutex_lock(&s->kv_mu);
+    const int rc = ds4_kvstore_stage_live_prefix_text(&s->kv, s->engine,
+                                                      slot->session,
+                                                      tokens, target,
+                                                      "continued",
+                                                      NULL, 0, NULL,
+                                                      &job->hooks,
+                                                      &job->staged,
+                                                      err, sizeof(err));
+    pthread_mutex_unlock(&s->kv_mu);
+    pthread_mutex_unlock(&s->inference_mu);
+    if (rc == 1) {
+        pthread_mutex_lock(&s->kv_store_mu);
+        if (s->kv_store_tail) s->kv_store_tail->next = job;
+        else s->kv_store_head = job;
+        s->kv_store_tail = job;
+        pthread_cond_signal(&s->kv_store_cv);
+        pthread_mutex_unlock(&s->kv_store_mu);
+        *stored = true;
+    } else {
+        /* rc 0: skipped/failed like a sync store; rc 2: already on disk. */
+        *stored = rc == 2;
+        free(job);
+    }
+    return true;
+}
+
 static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
     if (!s || !slot) return;
     kv_disk_cache *kc = &s->kv;
@@ -9830,6 +9974,13 @@ static void kv_cache_maybe_store_continued(server *s, server_slot *slot) {
     if (!tokens) return;
     const int target = kv_cache_slot_continued_target(s, slot, tokens->len);
     if (target == 0) return;
+    if (kv_async_continued_enabled()) {
+        bool stored = false;
+        if (kv_store_try_async_continued(s, slot, tokens, target, &stored)) {
+            if (stored) kv_cache_slot_note_store(slot, target);
+            return;
+        }
+    }
     if (kv_cache_store_live_prefix(s, slot, tokens, target, "continued")) {
         (void)kc;
         kv_cache_slot_note_store(slot, target);
@@ -13273,6 +13424,7 @@ static void log_context_memory(ds4_backend backend, int ctx_size,
     }
 }
 static void server_close_resources(server *s) {
+    kv_store_worker_stop(s);
     if (s->trace) {
         fclose(s->trace);
         s->trace = NULL;
@@ -13290,6 +13442,8 @@ static void server_close_resources(server *s) {
     free(s->slots);
     pthread_mutex_destroy(&s->tool_mu);
     pthread_mutex_destroy(&s->kv_mu);
+    pthread_mutex_destroy(&s->kv_store_mu);
+    pthread_cond_destroy(&s->kv_store_cv);
     pthread_mutex_destroy(&s->inference_mu);
     pthread_mutex_destroy(&s->model_mu);
     pthread_mutex_destroy(&s->trace_mu);
@@ -13664,6 +13818,8 @@ int main(int argc, char **argv) {
     pthread_cond_init(&s.clients_cv, NULL);
     pthread_mutex_init(&s.tool_mu, NULL);
     pthread_mutex_init(&s.kv_mu, NULL);
+    pthread_mutex_init(&s.kv_store_mu, NULL);
+    pthread_cond_init(&s.kv_store_cv, NULL);
     pthread_mutexattr_t inference_attr;
     pthread_mutexattr_init(&inference_attr);
     pthread_mutexattr_settype(&inference_attr, PTHREAD_MUTEX_RECURSIVE);
