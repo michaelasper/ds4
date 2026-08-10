@@ -1,26 +1,20 @@
-# Official Quality Fixtures
+# Laguna quality fixture
 
-This directory contains curated hosted-model continuation fixtures that are
-safe to commit and use in release QA.
+The release fixture is `laguna-openrouter-100`: 100 deterministic Laguna S2.1
+continuations collected through OpenRouter model `poolside/laguna-s-2.1`.
 
-- `glm52-openrouter-100`: 100 GLM 5.2 OpenRouter continuations with API
-  top-logprob slices.
-- `laguna-openrouter-100`: 100 Laguna S 2.1 OpenRouter continuations. Poolside's
-  endpoint does not expose output-token logprobs, so these support
-  teacher-forced continuation scoring only.
-- `flash`: 100 DeepSeek V4 Flash 0731 continuations from the official DeepSeek
-  API, with API top-logprob slices.
-- `pro`: 100 DeepSeek V4 PRO official continuations with API top-logprob
-  slices.
+It contains:
 
-Each fixture directory contains:
+- `prompts/case_*.txt`: exact user prompts;
+- `continuations/case_*.txt`: hosted-model continuations;
+- `responses/case_*.json`: raw hosted responses retained for provenance;
+- `manifest.tsv`: relative prompt and continuation paths consumed by
+  `score_official`.
 
-- `prompts/case_*.txt`: exact user prompts.
-- `continuations/case_*.txt`: deterministic hosted-model continuations.
-- `responses/case_*.json`: raw hosted responses, including logprob slices when
-  the endpoint provides them.
-- `manifest.tsv`: paths consumed by `score_official`; the optional raw-response
-  path is present only for fixtures with API logprobs.
+Poolside does not expose output-token logprobs for this model, so the manifest
+intentionally omits the optional raw-response column. The scorer reports local
+target-token NLL, first-token agreement, and greedy-prefix agreement; API
+top-logprob metrics are unavailable.
 
-DeepSeek V4 Flash smoke vectors are also tracked in `tests/test-vectors/` and
-are run by `./ds4_test --logprob-vectors`.
+Other inherited fixture directories are historical inputs and are not Laguna
+release evidence. They should not be used to evaluate or promote this fork.

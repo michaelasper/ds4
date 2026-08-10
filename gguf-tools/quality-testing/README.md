@@ -1,83 +1,36 @@
-# Official-Continuation Quality Testing
+# Laguna continuation quality testing
 
-This directory contains the prompts, tracked official fixtures, and scripts used
-to compare local GGUF variants against hosted-model continuations.
+This directory compares local Laguna S2.1 GGUF variants with deterministic
+hosted-model continuations. The primary metric is target-token negative log
+likelihood: collect one reference continuation, then measure how much
+probability each local GGUF assigns to those exact tokens. This is more useful
+than judging a quantization from one sampled answer.
 
-The metric is target-token negative log likelihood: collect a deterministic
-official continuation, then ask each local GGUF how much probability it assigns
-to that exact continuation token by token.  This avoids judging quality from one
-sampled answer.
+## Tracked fixture
 
-## 1. Tracked Fixture Sets
+`data/laguna-openrouter-100` contains 100 continuations collected from
+OpenRouter model `poolside/laguna-s-2.1`.
 
-Curated fixtures are kept in the repository so release QA can run without
-calling hosted APIs:
+The Poolside endpoint does not expose output-token logprobs. The fixture
+therefore supports target-token NLL, first-token agreement, and greedy-prefix
+comparison. API logprob-delta and top-N agreement fields are zero by design.
+Raw responses are retained for provenance but omitted from `manifest.tsv`.
 
-- `data/glm52-openrouter-100`: 100 GLM 5.2 continuations collected through
-  OpenRouter `z-ai/glm-5.2` with `top_logprobs=20`.
-- `data/laguna-openrouter-100`: 100 Laguna S 2.1 continuations collected
-  through OpenRouter `poolside/laguna-s-2.1`. Poolside's endpoint does not
-  expose output-token logprobs.
-- `data/flash`: 100 DeepSeek V4 Flash 0731 continuations collected from the
-  official DeepSeek API with `top_logprobs=20`.
-- `data/pro`: 100 DeepSeek V4 PRO continuations collected from the official
-  DeepSeek API with `top_logprobs=20`.
+## Refreshing the fixture
 
-DeepSeek V4 Flash also has tracked official smoke vectors in
-`tests/test-vectors/`.  Those vectors drive `./ds4_test --logprob-vectors` and
-include short prompts plus long-prompt attention cases.
+Refreshing a committed fixture is an intentional data change. Use a new output
+directory, review the prompts and responses, and never overwrite the tracked
+set merely to make a candidate score better.
 
-The hosted APIs expose output-token logprobs and top-logprob alternatives, not
-full vocabulary logits.
-
-## 2. Collect Official Continuations
-
-For the tracked DeepSeek V4 Flash 0731 fixture:
-
-```sh
-export DEEPSEEK_API_KEY=...
-python3 gguf-tools/quality-testing/collect_official.py \
-  --model deepseek-v4-flash \
-  --endpoint https://api.deepseek.com/chat/completions \
-  --prompts gguf-tools/quality-testing/prompts.jsonl \
-  --out gguf-tools/quality-testing/data/flash \
-  --count 100 \
-  --max-tokens 24 \
-  --top-logprobs 20 \
-  --thinking disabled \
-  --reasoning-effort omit
-```
-
-For GLM 5.2 through OpenRouter:
-
-```sh
+```zsh
 export OPENROUTER_API_KEY=...
-python3 gguf-tools/quality-testing/collect_official.py \
-  --model z-ai/glm-5.2 \
-  --endpoint https://openrouter.ai/api/v1/chat/completions \
-  --api-key-env OPENROUTER_API_KEY \
-  --prompts gguf-tools/quality-testing/prompts.jsonl \
-  --out gguf-tools/quality-testing/data/glm52-openrouter \
-  --count 100 \
-  --max-tokens 24 \
-  --top-logprobs 20 \
-  --token-limit-field max_tokens \
-  --provider-order parasail/fp8 \
-  --require-parameters \
-  --thinking omit \
-  --reasoning-effort none
-```
 
-For Laguna S 2.1 through OpenRouter:
-
-```sh
-export OPENROUTER_API_KEY=...
 python3 gguf-tools/quality-testing/collect_official.py \
   --model poolside/laguna-s-2.1 \
   --endpoint https://openrouter.ai/api/v1/chat/completions \
   --api-key-env OPENROUTER_API_KEY \
   --prompts gguf-tools/quality-testing/prompts.jsonl \
-  --out gguf-tools/quality-testing/data/laguna-openrouter-100 \
+  --out /tmp/laguna-openrouter-candidate \
   --count 100 \
   --max-tokens 24 \
   --top-logprobs 0 \
@@ -86,124 +39,49 @@ python3 gguf-tools/quality-testing/collect_official.py \
   --reasoning-effort none
 ```
 
-The Laguna fixture supports local target-token NLL, first-token agreement, and
-greedy-prefix comparison. API logprob-delta and top-N agreement fields remain
-zero because the Poolside endpoint does not return logprobs. Its raw response
-files are retained for provenance but omitted from `manifest.tsv`, avoiding
-attempts to parse unavailable API logprobs during local scoring.
+The collector writes exact prompts, continuations, raw JSON responses, and a
+relative `manifest.tsv`.
 
-Use one output directory per official model. For PRO through the official
-DeepSeek API:
+## Building the scorer
 
-```sh
-python3 gguf-tools/quality-testing/collect_official.py \
-  --model deepseek-v4-pro \
-  --prompts gguf-tools/quality-testing/prompts.jsonl \
-  --out gguf-tools/quality-testing/data/pro \
-  --count 100 \
-  --max-tokens 24 \
-  --top-logprobs 20
+The supported scorer uses the project runtime and Apple Metal:
+
+```zsh
+make gguf-tools/quality-testing/score_official
 ```
 
-The script writes:
+The optional `score_llama` program is an external llama.cpp control and is not
+part of the Laguna runtime build.
 
-- `data/<model>/prompts/case_*.txt`
-- `data/<model>/continuations/case_*.txt`
-- `data/<model>/responses/case_*.json`
-- `data/<model>/manifest.tsv`
+## Scoring GGUF variants
 
-The response path is the optional fourth manifest column and is included only
-when `--top-logprobs` is greater than zero.
+Score the old and new GGUF against the same manifest and context:
 
-The prompt list is tracked in `prompts.jsonl`.  Curated fixture directories are
-also tracked after review; ad-hoc API collection directories should stay
-untracked until they are intentionally promoted into the release QA set.
-
-## 3. Build The Local Scorer
-
-```sh
-make -C gguf-tools quality-score
-```
-
-The scorer links against the DS4 runtime and uses Metal by default.
-
-Build the optional llama.cpp control scorer with:
-
-```sh
-make -C gguf-tools quality-llama-score
-```
-
-## 4. Score GGUF Variants
-
-```sh
+```zsh
 gguf-tools/quality-testing/score_official \
-  ../deepseek-v4-quants/gguf/OLD.gguf \
-  gguf-tools/quality-testing/data/pro/manifest.tsv \
-  /tmp/old.tsv \
-  4096
+  /path/to/OLD.gguf \
+  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+  /tmp/old.tsv 4096 --quality
 
 gguf-tools/quality-testing/score_official \
-  ../deepseek-v4-quants/gguf/NEW.gguf \
-  gguf-tools/quality-testing/data/pro/manifest.tsv \
-  /tmp/new.tsv \
-  4096
-```
+  /path/to/NEW.gguf \
+  gguf-tools/quality-testing/data/laguna-openrouter-100/manifest.tsv \
+  /tmp/new.tsv 4096 --quality
 
-Use `data/flash/manifest.tsv` for Flash GGUFs,
-`data/glm52-openrouter-100/manifest.tsv` for GLM 5.2 GGUFs, and
-`data/laguna-openrouter-100/manifest.tsv` for Laguna S 2.1 GGUFs, and
-`data/pro/manifest.tsv` for PRO GGUFs. The scorer and comparator do not care
-which model produced the manifest; the manifest path selects the continuation
-set.
-
-Add `--quality` to disable DS4's speed-oriented numerical shortcuts. For an
-independent llama.cpp comparison of a DeepSeek V4 GGUF, use the same manifest
-and the token-identical DS4 prompt renderer:
-
-```sh
-gguf-tools/quality-testing/score_llama \
-  /path/to/model.gguf \
-  gguf-tools/quality-testing/data/flash/manifest.tsv \
-  /tmp/llama.tsv \
-  4096 \
-  deepseek-ds4
-```
-
-For a full-residency vs SSD-streaming comparison, score the same model twice and
-add the streaming flags to one run:
-
-```sh
-gguf-tools/quality-testing/score_official \
-  /path/to/model.gguf \
-  gguf-tools/quality-testing/data/glm52-openrouter-100/manifest.tsv \
-  /tmp/streaming.tsv \
-  4096 \
-  --ssd-streaming
-```
-
-## 5. Compare
-
-```sh
 python3 gguf-tools/quality-testing/compare_scores.py /tmp/old.tsv /tmp/new.tsv
 ```
 
-Output fields:
+`--quality` selects the runtime's exact/reference choices where an explicitly
+faster numerical path exists. For release evidence, record the model hashes,
+commit, command, hardware, raw TSVs, and comparator output.
 
-- `avg_nll`: average negative log likelihood; lower is better.
-- `delta_new_minus_old`: negative means the new GGUF fits the official
-  continuation better.
-- `case_wins_new_old_ties`: per-prompt NLL wins.
-- `first_token_matches`: how often the local greedy first token matches the
-  official first token.
-- `avg_greedy_lcp`: average greedy longest common prefix against the official
-  continuation.
-- `api_target_mae`: when the manifest includes `response_file`, absolute
-  local-vs-API logprob delta for aligned official output tokens.
-- `api_top_coverage`: fraction of API top-logprob alternatives that map exactly
-  to one local tokenizer token.
-- `api_top1_rate`: how often the API top alternative equals the local greedy
-  token.
-- `api_topn_recall`: fraction of mapped API top-N alternatives found in the
-  local top-N for the same position.
-- `api_top_mae`: local-vs-API logprob MAE over mapped API top alternatives.
-- `api_pair_rate`: pairwise ordering agreement among mapped API alternatives.
+Important output fields:
+
+- `avg_nll`: average negative log likelihood; lower is better;
+- `delta_new_minus_old`: negative favors the new GGUF;
+- `case_wins_new_old_ties`: per-prompt NLL comparison;
+- `first_token_matches`: local greedy first-token agreement;
+- `avg_greedy_lcp`: average greedy longest common prefix.
+
+Do not compare manifests from another model family or checkpoint, and do not
+interpret unavailable API-logprob fields as measured zeros.
