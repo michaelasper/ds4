@@ -4,6 +4,78 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Strict lifecycle configuration parsers shared by production selectors and
+ * focused tests.  They intentionally accept only decimal integers with
+ * optional surrounding ASCII whitespace; malformed, empty, and overflowing
+ * values take the documented fallback. */
+static inline uint32_t ds4_gpu_q8_mv_ext_max_tokens_parse(
+        const char *value) {
+    const uint64_t fallback = 16u;
+    const uint64_t min_value = 2u;
+    const uint64_t max_value = 128u;
+    if (!value) return (uint32_t)fallback;
+    while (*value == ' ' || *value == '\t' || *value == '\n' ||
+           *value == '\r' || *value == '\f' || *value == '\v') value++;
+    if (!*value) return (uint32_t)fallback;
+
+    uint64_t parsed = 0;
+    const char *p = value;
+    while (*p >= '0' && *p <= '9') {
+        const uint64_t digit = (uint64_t)(*p - '0');
+        if (parsed > (UINT64_MAX - digit) / 10u) {
+            return (uint32_t)fallback;
+        }
+        parsed = parsed * 10u + digit;
+        p++;
+    }
+    if (p == value) return (uint32_t)fallback;
+    while (*p == ' ' || *p == '\t' || *p == '\n' ||
+           *p == '\r' || *p == '\f' || *p == '\v') p++;
+    if (*p) return (uint32_t)fallback;
+    /* Preserve the stock parser's historical behavior for values below two
+     * while clamping valid values above the supported ceiling. */
+    if (parsed < min_value) return (uint32_t)fallback;
+    if (parsed > max_value) parsed = max_value;
+    return (uint32_t)parsed;
+}
+
+static inline uint32_t ds4_gpu_laguna_moe_min_tokens_parse(
+        const char *value) {
+    const uint64_t fallback = 96u;
+    const uint64_t min_value = 32u;
+    const uint64_t max_value = 4096u;
+    if (!value) return (uint32_t)fallback;
+    while (*value == ' ' || *value == '\t' || *value == '\n' ||
+           *value == '\r' || *value == '\f' || *value == '\v') value++;
+    if (!*value) return (uint32_t)fallback;
+
+    uint64_t parsed = 0;
+    const char *p = value;
+    while (*p >= '0' && *p <= '9') {
+        const uint64_t digit = (uint64_t)(*p - '0');
+        if (parsed > (UINT64_MAX - digit) / 10u) {
+            return (uint32_t)fallback;
+        }
+        parsed = parsed * 10u + digit;
+        p++;
+    }
+    if (p == value) return (uint32_t)fallback;
+    while (*p == ' ' || *p == '\t' || *p == '\n' ||
+           *p == '\r' || *p == '\f' || *p == '\v') p++;
+    if (*p) return (uint32_t)fallback;
+    if (parsed < min_value) parsed = min_value;
+    if (parsed > max_value) parsed = max_value;
+    return (uint32_t)parsed;
+}
+
+static inline int ds4_gpu_laguna_direct_kv_prefill_env_mode(
+        const char *value) {
+    if (!value || value[0] == '\0' ||
+        (value[0] == '0' && value[1] == '\0')) return 0;
+    if (value[0] == '1' && value[1] == '\0') return 1;
+    return -1;
+}
+
 /* Strict parser shared by the Laguna production selector and focused tests.
  * It is backend-independent so malformed requests can be rejected before a
  * graph is allocated even in a non-Metal build. */
@@ -52,6 +124,7 @@ enum ds4_gpu_laguna_dense_q8_gate_up_swiglu_route {
     DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK = 0,
     DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID = 1,
     DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK = 2,
+    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED = 3,
 };
 
 /* Select the route after preflight.  Exact verifier rows map to generic stock;
@@ -62,6 +135,20 @@ static inline int ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
     if (exact_rows) return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_STOCK;
     if (decode) return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID;
     return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK;
+}
+
+/* Ordinary prefill must preserve stock mul_mv_ext arithmetic through the
+ * lifecycle-snapshotted ceiling.  The batched fused route is only eligible
+ * strictly above that ceiling and never for exact verifier rows. */
+static inline int ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+        int enabled,
+        int exact_rows,
+        uint32_t n_tokens,
+        uint32_t mv_ext_max_tokens) {
+    if (!enabled || exact_rows || n_tokens <= mv_ext_max_tokens) {
+        return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK;
+    }
+    return DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED;
 }
 
 #ifdef __cplusplus
@@ -974,6 +1061,36 @@ int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
         float                   clamp);
+
+#ifdef __APPLE__
+/* Opt-in batched prefill sibling of the fused dense Q8 gate/up+SwiGLU: one
+ * tiled pass over all rows, emitting only the SwiGLU mid. */
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available(void);
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+        ds4_gpu_tensor       *mid,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                gate_offset,
+        uint64_t                up_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t                n_tok);
+uint32_t ds4_gpu_laguna_q8_mv_ext_max_tokens(void);
+
+/* Test-only route evidence.  Production callers do not arm these counters. */
+#ifdef DS4_TEST_HOOKS
+void ds4_gpu_test_laguna_route_counters_reset(void);
+int ds4_gpu_test_laguna_route_counters(uint64_t *direct_kv,
+                                       uint64_t *wrap_kv,
+                                       uint64_t *fused_q8,
+                                       uint64_t *stock_q8);
+int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
+                                        uint64_t *bco_true);
+/* Test-only malformed lifecycle injection for fail-before-mutation coverage. */
+void ds4_gpu_test_laguna_set_direct_kv_mode(int mode);
+#endif
+#endif
 
 int ds4_gpu_shared_gate_up_swiglu_q8_0_model_view_tensor(
         ds4_gpu_tensor       *gate,
