@@ -17,6 +17,24 @@ placement, MTP, DSpark, steering, power controls, and custom prefill. Existing
 code for those features is legacy removal material, even when it still builds.
 The `ds4_*` names are retained temporarily; renaming is deliberately deferred.
 
+## Completed boundary work
+
+The refactor branch already:
+
+- requires the literal Laguna architecture before engine creation;
+- exposes a Metal-only CLI and server contract and rejects retired backend,
+  topology, steering, MTP, and DSpark options;
+- routes raw generation directly through the Laguna graph;
+- removes the obsolete GLM one-shot generation graph and the distributed
+  transport/runtime;
+- retains only Laguna quality fixtures and tooling under `quality/`;
+- preserves normal DSV4 session payloads, disk KV persistence, batching,
+  streaming responses, tool calls, and the optional Laguna DFlash path.
+
+Tensor parallelism, multi-GPU placement, SSD expert streaming, legacy model
+helpers, and broad shared-backend Metal code still remain internally. Their
+presence is transitional and must not be interpreted as supported behavior.
+
 ## Staged deletion and extraction order
 
 1. **Freeze the contract and baseline.** Record the canonical Laguna model
@@ -66,8 +84,6 @@ The `ds4_*` names are retained temporarily; renaming is deliberately deferred.
   DFlash path.
 - Keep legal attribution for upstream GGUF/GGML/llama.cpp-derived code that
   remains after compatibility tooling is removed.
-- This documentation slice owns `AGENT.md` and `FORK.md` only. Runtime,
-  Makefile, and test changes belong to their assigned owners.
 
 ## Test gates
 
