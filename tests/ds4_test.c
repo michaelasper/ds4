@@ -7871,6 +7871,184 @@ static void test_metal_hc_rms_scale_project_f16_exact(void) {
     test_restore_env(disable_env, saved_disable);
 }
 
+/* The fused decode output-head dispatch must reproduce the stock
+ * rms_norm_plain + matmul_f16 pair bit-for-bit on every shape whose
+ * reduction trees it replicates, and fail closed outside that class. */
+static void test_metal_f16_rms_norm_mv_exact_shape(
+        uint32_t in_dim,
+        uint32_t out_dim,
+        uint32_t seed) {
+    const float eps = 1.0e-6f;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t weight_offset = page;
+    const uint64_t weight_bytes =
+        (uint64_t)in_dim * out_dim * sizeof(uint16_t);
+    const uint64_t model_alloc = test_round_up_u64(
+        weight_offset + weight_bytes, page);
+    const uint64_t x_bytes = (uint64_t)in_dim * sizeof(float);
+    const uint64_t out_bytes = (uint64_t)out_dim * sizeof(float);
+
+    void *model_raw = NULL;
+    TEST_ASSERT(posix_memalign(
+                    &model_raw, (size_t)page, (size_t)model_alloc) == 0);
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
+    ds4_gpu_tensor *ref_norm = ds4_gpu_tensor_alloc(x_bytes);
+    ds4_gpu_tensor *ref_out = ds4_gpu_tensor_alloc(out_bytes);
+    ds4_gpu_tensor *fused_out = ds4_gpu_tensor_alloc(out_bytes);
+    float *x_host = malloc((size_t)x_bytes);
+    float *ref_out_host = malloc((size_t)out_bytes);
+    float *fused_out_host = malloc((size_t)out_bytes);
+
+    TEST_ASSERT(model_raw != NULL);
+    TEST_ASSERT(x != NULL);
+    TEST_ASSERT(ref_norm != NULL);
+    TEST_ASSERT(ref_out != NULL);
+    TEST_ASSERT(fused_out != NULL);
+    TEST_ASSERT(x_host != NULL);
+    TEST_ASSERT(ref_out_host != NULL);
+    TEST_ASSERT(fused_out_host != NULL);
+
+    test_float_compare_stats out_stats = {0};
+    const bool allocated = model_raw && x && ref_norm && ref_out &&
+        fused_out && x_host && ref_out_host && fused_out_host;
+    if (allocated) {
+        memset(model_raw, 0, (size_t)model_alloc);
+        uint16_t *weights = (uint16_t *)((uint8_t *)model_raw + weight_offset);
+        for (uint32_t o = 0; o < out_dim; o++) {
+            for (uint32_t i = 0; i < in_dim; i++) {
+                const uint32_t key = i * 37u + o * 1009u + seed * 53u +
+                    ((i >> 4u) ^ (o * 17u));
+                uint16_t bits;
+                if (key % 257u == 0u) {
+                    bits = (key & 1u) ? 0x8000u : 0x0000u;
+                } else if (key % 269u == 0u) {
+                    bits = (key & 1u) ? 0x8400u : 0x0400u;
+                } else {
+                    const int value = (int)(key % 127u) - 63;
+                    bits = test_float_to_f16((float)value / 128.0f);
+                }
+                weights[(uint64_t)o * in_dim + i] = bits;
+            }
+        }
+        static const uint32_t rounding_bits[] = {
+            0x3f800fffu, 0x3f801000u, 0x3f801001u,
+            0xbf800fffu, 0xbf801000u, 0xbf801001u,
+            0x3eaaaaabu, 0xbeaaaaabu,
+        };
+        for (uint32_t i = 0; i < in_dim; i++) {
+            const uint32_t key = i * 131u + seed * 71u + (i >> 3u);
+            const float sign = (key & 1u) ? -1.0f : 1.0f;
+            float value;
+            switch (i % 4u) {
+                case 0:
+                    value = (float)((int)(key % 4093u) - 2046) / 512.0f;
+                    break;
+                case 1:
+                    value = sign * ldexpf(
+                        (float)(1u + (key & 7u)) / 8.0f, -19);
+                    break;
+                case 2: {
+                    const uint32_t bits = rounding_bits[
+                        key % (sizeof(rounding_bits) /
+                               sizeof(rounding_bits[0]))];
+                    memcpy(&value, &bits, sizeof(value));
+                    break;
+                }
+                default:
+                    value = sign * (float)(1u + (key % 251u)) / 256.0f;
+                    break;
+            }
+            x_host[i] = value;
+        }
+        for (uint32_t o = 0; o < out_dim; o++) {
+            const uint32_t bits = 0x7fc01000u + o;
+            memcpy(fused_out_host + o, &bits, sizeof(bits));
+        }
+
+        TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host, x_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_write(
+                        fused_out, 0, fused_out_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, model_alloc) != 0);
+        ds4_gpu_set_quality(false);
+
+        int ref_begun = ds4_gpu_begin_commands();
+        int ref_ok = ref_begun;
+        if (ref_ok) ref_ok = ds4_gpu_rms_norm_plain_tensor(
+            ref_norm, x, in_dim, eps);
+        if (ref_ok) ref_ok = ds4_gpu_matmul_f16_tensor(
+            ref_out, model_raw, model_alloc, weight_offset,
+            in_dim, out_dim, ref_norm, 1);
+        const int ref_end = ref_begun ? ds4_gpu_end_commands() : 0;
+        TEST_ASSERT(ref_ok != 0);
+        TEST_ASSERT(ref_end != 0);
+
+        int fused_begun = ds4_gpu_begin_commands();
+        int fused_ok = fused_begun;
+        if (fused_ok) fused_ok = ds4_gpu_matmul_f16_rms_norm_mv_tensor(
+            fused_out, model_raw, model_alloc, weight_offset,
+            in_dim, out_dim, x, eps);
+        const int fused_end = fused_begun ? ds4_gpu_end_commands() : 0;
+        TEST_ASSERT(fused_ok != 0);
+        TEST_ASSERT(fused_end != 0);
+
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        ref_out, 0, ref_out_host, out_bytes) != 0);
+        TEST_ASSERT(ds4_gpu_tensor_read(
+                        fused_out, 0, fused_out_host, out_bytes) != 0);
+        out_stats = test_compare_float_bits(
+            ref_out_host, fused_out_host, (size_t)out_dim);
+    }
+
+    fprintf(stderr,
+            "ds4-test: fused RMS-norm F16 matvec exact in=%u out=%u "
+            "projection=%zu/%u max_ulp=%u\n",
+            in_dim, out_dim,
+            out_stats.mismatch_count, out_dim, out_stats.max_ulp);
+    TEST_ASSERT(out_stats.mismatch_count == 0);
+    TEST_ASSERT(out_stats.max_ulp == 0);
+
+    free(fused_out_host);
+    free(ref_out_host);
+    free(x_host);
+    ds4_gpu_tensor_free(fused_out);
+    ds4_gpu_tensor_free(ref_out);
+    ds4_gpu_tensor_free(ref_norm);
+    ds4_gpu_tensor_free(x);
+    free(model_raw);
+}
+
+static void test_metal_f16_rms_norm_mv_exact(void) {
+    test_metal_f16_rms_norm_mv_exact_shape(16384u, 4u, 59u);
+    test_metal_f16_rms_norm_mv_exact_shape(4096u, 3u, 61u);
+    test_metal_f16_rms_norm_mv_exact_shape(2048u, 5u, 67u);
+    test_metal_f16_rms_norm_mv_exact_shape(1024u, 2u, 71u);
+
+    /* Outside the replicated reduction trees the fused dispatch must fail
+     * closed: NSG<8 (896), non-power norm sweep (288 threads), and a
+     * reduction dim the vectorized matvec cannot tile. */
+    void *model_raw = NULL;
+    const uint64_t page = (uint64_t)getpagesize();
+    TEST_ASSERT(posix_memalign(&model_raw, (size_t)page, (size_t)page) == 0);
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(928u * sizeof(float));
+    ds4_gpu_tensor *out = ds4_gpu_tensor_alloc(4u * sizeof(float));
+    TEST_ASSERT(model_raw != NULL && x != NULL && out != NULL);
+    if (model_raw && x && out) {
+        TEST_ASSERT(ds4_gpu_set_model_map(model_raw, page) != 0);
+        int begun = ds4_gpu_begin_commands();
+        TEST_ASSERT(begun != 0);
+        TEST_ASSERT(ds4_gpu_matmul_f16_rms_norm_mv_tensor(
+                        out, model_raw, page, 0, 896u, 4u, x, 1.0e-6f) == 0);
+        TEST_ASSERT(ds4_gpu_matmul_f16_rms_norm_mv_tensor(
+                        out, model_raw, page, 0, 928u, 4u, x, 1.0e-6f) == 0);
+        TEST_ASSERT(ds4_gpu_matmul_f16_rms_norm_mv_tensor(
+                        out, model_raw, page, 0, 1000u, 4u, x, 1.0e-6f) == 0);
+        TEST_ASSERT(ds4_gpu_end_commands() != 0);
+    }
+    ds4_gpu_tensor_free(out);
+    ds4_gpu_tensor_free(x);
+    free(model_raw);
+}
+
 static void test_metal_router_simd_finalize_exact(void) {
     typedef struct {
         const char *name;
@@ -9317,6 +9495,7 @@ static void test_metal_kernel_group(void) {
     test_metal_hc_split_weighted_sum_norm_batch_exact();
     test_metal_output_hc_weights4_exact();
     test_metal_hc_rms_scale_project_f16_exact();
+    test_metal_f16_rms_norm_mv_exact();
     test_metal_router_simd_finalize_exact();
     test_metal_glm_router_simd_topk_exact();
     test_metal_router_weights_batch_exact();

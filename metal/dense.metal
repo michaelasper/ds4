@@ -1137,6 +1137,100 @@ kernel void kernel_laguna_attn_output_residual_f16_f32(
         dst, residual, sums, row0, args.ne01, lane, simd_group, shmem);
 }
 
+struct ds4_metal_args_mul_mv_rms_norm {
+    int   ne00;          // reduction dim (flattened HC stream)
+    int   ne01;          // output rows (DS4_N_HC)
+    int   norm_threads;  // thread count the stock plain RMS norm would use
+    float eps;
+};
+
+// Opt-in decode output-head fusion: RMS-normalizes the flattened HC stream
+// and multiplies it by the F16 HC head in one dispatch, removing the
+// normalized-vector round trip.  The norm stage replays
+// kernel_rms_norm_f32_4's reduction tree with args.norm_threads virtual
+// threads mapped onto this 256-thread group (norm_threads % 256 == 0,
+// enforced by the host), and the matvec stage keeps the NSG=8/NR0=2 tree of
+// kernel_mul_mv_f16_f32_4 verbatim, so the result is bit-identical to the
+// two-dispatch path.
+kernel void kernel_mul_mv_f16_f32_rms_norm_4(
+        constant ds4_metal_args_mul_mv_rms_norm &args,
+        device const half  *weight,
+        device const float *x,
+        device float       *dst,
+        threadgroup float  *shmem [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd_group [[simdgroup_index_in_threadgroup]]) {
+    constexpr short NR0 = 2;
+    constexpr short NW = N_SIMDWIDTH;
+    constexpr short NB = 32;
+    constexpr short NF = 16;
+    constexpr short NF4 = NF / 4;
+    constexpr short NSG = 8;
+
+    threadgroup float *norm_slots = shmem;        // NW cross-group slots
+    threadgroup char  *mv_shmem = (threadgroup char *)(shmem + NW);
+
+    const ushort tid = simd_group * NW + lane;
+    const int n_vec = args.ne00 / 4;
+    const int norm_k = args.norm_threads / (NSG * NW);
+
+    // Virtual thread v = tid + NSG*NW*k replays the stock norm sweep; its
+    // simdgroup partial lands in slot simd_group + NSG*k, matching the stock
+    // kernel's shmem layout.  Slot zeroing races nothing: writes follow the
+    // barrier, as in kernel_rms_norm_f32_4.
+    if (simd_group == 0) norm_slots[lane] = 0.0f;
+    device const float4 *x4 = (device const float4 *)x;
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int k = 0; k < norm_k; k++) {
+        for (int i00 = tid + NSG * NW * k; i00 < n_vec;
+             i00 += args.norm_threads) {
+            acc[k] += dot(x4[i00], x4[i00]);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int k = 0; k < norm_k; k++) {
+        const float group_tot = simd_sum(acc[k]);
+        if (lane == 0) norm_slots[simd_group + NSG * k] = group_tot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float total = simd_sum(norm_slots[lane]);
+    const float mean = total / args.ne00;
+    const float scale = 1.0f / sqrt(mean + args.eps);
+
+    const int row0 = (int)tgpig.x * NR0;
+    const int n_blocks = args.ne00 / NB;
+    device const half4 *weight4[NR0];
+    FOR_UNROLL (short row = 0; row < NR0; row++) {
+        weight4[row] = (device const half4 *)(weight +
+            (uint64_t)(row0 + row) * args.ne00);
+    }
+    float sums[NR0] = {0.0f, 0.0f};
+    const short ix = lane / (NW / NF);
+    const short il = lane % (NW / NF);
+    const int block0 = simd_group * NF + ix;
+    device const float4 *xb = x4 + (block0 * NB + il * NF) / 4;
+
+    for (int block = block0; block < n_blocks; block += NSG * NF) {
+        float4 xv[NF4];
+        FOR_UNROLL (short i = 0; i < NF4; i++) xv[i] = xb[i] * scale;
+        FOR_UNROLL (short row = 0; row < NR0; row++) {
+            if (row0 + row >= args.ne01) continue;
+            device const half4 *wb = weight4[row] +
+                (block * NB + il * NF) / 4;
+            float part = 0.0f;
+            FOR_UNROLL (short i = 0; i < NF4; i++) {
+                part += dot(float4(wb[i]), xv[i]);
+            }
+            sums[row] += part;
+        }
+        xb += NSG * NF * NW / 4;
+    }
+
+    helper_mv_reduce_and_write<NR0>(
+        dst, sums, row0, args.ne01, lane, simd_group, mv_shmem);
+}
+
 struct ds4_metal_args_laguna_qkvg {
     uint32_t in_dim;
     uint32_t q_dim;

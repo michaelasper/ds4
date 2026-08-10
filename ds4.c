@@ -26031,6 +26031,32 @@ static bool metal_graph_output_logits_head_matmul(
         uint64_t              vocab_dim);
 
 /* Encode the final HC collapse, output norm, and vocab projection on Metal. */
+/* Opt-in fused decode output head (RMS norm folded into the F16 HC-head
+ * matvec, one dispatch instead of two).  Literal-1 opt-in like the other
+ * DS4_METAL_LAGUNA_* routes; cached process-wide since the output head runs
+ * once per generated token.  Returns -1 on an invalid value. */
+static int metal_graph_output_head_norm_fuse_mode(void) {
+    static int cache = -2;
+    if (cache == -2) {
+#if defined(__APPLE__)
+        const char *value = getenv("DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE");
+        if (!value || value[0] == '\0' || strcmp(value, "0") == 0) {
+            cache = 0;
+        } else if (strcmp(value, "1") == 0) {
+            cache = 1;
+        } else {
+            fprintf(stderr,
+                    "ds4: invalid DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE='%s'; "
+                    "expected unset, empty, 0, or literal 1\n", value);
+            cache = -1;
+        }
+#else
+        cache = 0;
+#endif
+    }
+    return cache;
+}
+
 static bool metal_graph_encode_output_head(
         ds4_gpu_graph *g,
         const ds4_model       *model,
@@ -26046,6 +26072,8 @@ static bool metal_graph_encode_output_head(
         if (!metal_graph_set_active_tier_decode(g, g->head_tier)) return false;
     }
     const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
+    const int output_head_norm_fuse = metal_graph_output_head_norm_fuse_mode();
+    if (output_head_norm_fuse < 0) return false;
     const bool output_stage_profile = g->output_stage_profile;
     double output_stage_t0 = output_stage_profile ? now_sec() : 0.0;
 #define DS4_METAL_PROFILE_OUTPUT_STAGE(name) do { \
@@ -26053,16 +26081,33 @@ static bool metal_graph_encode_output_head(
             ok = metal_graph_layer_stage_profile_boundary("output", (name), DS4_N_LAYER, 0, 1, &output_stage_t0); \
         } \
     } while (0)
-    bool ok = ds4_gpu_rms_norm_plain_tensor(metal_graph_flat_hc(g), metal_graph_cur_hc(g), (uint32_t)hc_dim, DS4_RMS_EPS) != 0;
-    DS4_METAL_PROFILE_OUTPUT_STAGE("hc_flat_norm");
-    if (ok) ok = ds4_gpu_matmul_f16_tensor(metal_graph_output_pre(g),
-                                             model->map,
-                                             model->size,
-                                             weights->output_hc_fn->abs_offset,
-                                             hc_dim,
-                                             DS4_N_HC,
-                                             metal_graph_flat_hc(g),
-                                             1) != 0;
+    bool ok = true;
+#if defined(__APPLE__)
+    if (output_head_norm_fuse > 0) {
+        ok = ds4_gpu_matmul_f16_rms_norm_mv_tensor(
+                metal_graph_output_pre(g),
+                model->map,
+                model->size,
+                weights->output_hc_fn->abs_offset,
+                (uint32_t)hc_dim,
+                (uint32_t)DS4_N_HC,
+                metal_graph_cur_hc(g),
+                DS4_RMS_EPS) != 0;
+        DS4_METAL_PROFILE_OUTPUT_STAGE("hc_flat_norm");
+    } else
+#endif
+    {
+        ok = ds4_gpu_rms_norm_plain_tensor(metal_graph_flat_hc(g), metal_graph_cur_hc(g), (uint32_t)hc_dim, DS4_RMS_EPS) != 0;
+        DS4_METAL_PROFILE_OUTPUT_STAGE("hc_flat_norm");
+        if (ok) ok = ds4_gpu_matmul_f16_tensor(metal_graph_output_pre(g),
+                                                 model->map,
+                                                 model->size,
+                                                 weights->output_hc_fn->abs_offset,
+                                                 hc_dim,
+                                                 DS4_N_HC,
+                                                 metal_graph_flat_hc(g),
+                                                 1) != 0;
+    }
     DS4_METAL_PROFILE_OUTPUT_STAGE("hc_pre");
     if (ok) {
         metal_graph_debug_dump_tensor("result_hc_pre", metal_graph_output_pre(g), DS4_N_HC, DS4_N_LAYER, 0);

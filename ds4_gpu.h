@@ -1026,6 +1026,20 @@ int ds4_gpu_matmul_f16_tensor(
         const ds4_gpu_tensor *x,
         uint64_t                n_tok);
 
+/* Opt-in fused decode path: plain RMS norm of x folded into the F16 matvec
+ * (single token).  Bit-identical to ds4_gpu_rms_norm_plain_tensor followed
+ * by ds4_gpu_matmul_f16_tensor on the supported shape class; fails closed
+ * (returns 0) outside it. */
+int ds4_gpu_matmul_f16_rms_norm_mv_tensor(
+        ds4_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint32_t              in_dim,
+        uint32_t              out_dim,
+        const ds4_gpu_tensor *x,
+        float                 eps);
+
 /* CUDA batch path: fold an input RMS normalization into the FP16 activation
  * conversion used by the following projection. Returns 0 without touching
  * out when the optimized path is unavailable. */
