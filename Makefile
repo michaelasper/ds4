@@ -1,15 +1,14 @@
 CC ?= cc
 UNAME_S := $(shell uname -s)
+.DEFAULT_GOAL := all
 
-ifeq ($(UNAME_S),Darwin)
+ifneq ($(UNAME_S),Darwin)
+$(error Laguna Metal-only build requires Darwin/Apple Metal (got $(UNAME_S)))
+endif
+
 NATIVE_CPU_FLAG ?= -mcpu=native
 SAMPLING_TEST := tests/test_sampling
 METAL_EXACT_TEST := test-glm-q23-metal
-else
-NATIVE_CPU_FLAG ?= -march=native
-SAMPLING_TEST := tests/test_sampling
-METAL_EXACT_TEST :=
-endif
 
 DEBUG_FLAGS ?= -g
 CFLAGS ?= -O3 -ffast-math $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c99
@@ -43,7 +42,6 @@ METAL_SOURCE_SPECS := \
 	DS4_METAL_NORM_SOURCE=metal/norm.metal \
 	DS4_METAL_BIN_SOURCE=metal/bin.metal \
 	DS4_METAL_SET_ROWS_SOURCE=metal/set_rows.metal
-ROCM_SRCS := $(wildcard rocm/*.cuh)
 DS4_TEST_MODEL ?= ds4flash.gguf
 DS4_TEST_MTP ?= gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
 DS4_DSPARK_MODEL ?= $(DS4_TEST_MODEL)
@@ -52,64 +50,20 @@ DS4_DSPARK_SUPPORT ?= gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf
 # pretend that the legacy DS4_TEST_MODEL default is a supported fixture.
 LAGUNA_TEST_MODEL ?=
 
-ifeq ($(UNAME_S),Darwin)
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
 CORE_OBJS = ds4.o lgn.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_metal.o ds4_layer_pack.o
-CPU_CORE_OBJS = ds4_cpu.o lgn.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
-else
-CFLAGS += -D_GNU_SOURCE -fno-finite-math-only
-CUDA_HOME ?= $(shell if [ -x /usr/local/cuda/bin/nvcc ]; then \
-	printf '%s' /usr/local/cuda; \
-	elif command -v nvcc >/dev/null 2>&1; then \
-	dirname "$$(dirname "$$(command -v nvcc)")"; \
-	else \
-	printf '%s' /usr/local/cuda; \
-	fi)
-NVCC ?= $(CUDA_HOME)/bin/nvcc
-CUDA_ARCH ?=
-ifneq ($(strip $(CUDA_ARCH)),)
-ifneq ($(filter sm_120 sm_120a,$(strip $(CUDA_ARCH))),)
-NVCC_ARCH_FLAGS := -gencode arch=compute_120a,code=sm_120a -DDS4_CUDA_HAVE_MXF4=1
-else ifneq ($(filter sm_121 sm_121a,$(strip $(CUDA_ARCH))),)
-NVCC_ARCH_FLAGS := -gencode arch=compute_121a,code=sm_121a -DDS4_CUDA_HAVE_MXF4=1
-else
-NVCC_ARCH_FLAGS := -arch=$(CUDA_ARCH)
-endif
-endif
-NVCCFLAGS ?= -O3 -g -lineinfo --use_fast_math $(NVCC_ARCH_FLAGS) -Xcompiler $(NATIVE_CPU_FLAG) -Xcompiler -pthread
-# Vendored llama.cpp mmq prefill tier (cuda/mmq/, see cuda/mmq/VENDOR.md).
-MMQ_INCLUDES := -Icuda/mmq
-MMQ_OBJS := cuda/mmq/ds4_ggml_stubs.o cuda/mmq/ds4_mmq.o cuda/mmq/ds4_mmq_d2r.o cuda/mmq/quantize.o cuda/mmq/mmid.o cuda/mmq/mmvq.o cuda/mmq/ds4_repack.o
-CORE_OBJS = ds4.o lgn.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_cuda.o ds4_layer_pack.o $(MMQ_OBJS)
-CPU_CORE_OBJS = ds4_cpu.o lgn.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
-CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
-HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
-ROCM_ARCH ?= gfx1151
-ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH)
-ROCM_LDLIBS ?= -lm -pthread -lhipblas -lhipblaslt
-DS4_LINK ?= $(NVCC) $(NVCCFLAGS)
-DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
-METAL_LDLIBS := $(LDLIBS)
-endif
 
-ifeq ($(UNAME_S),Darwin)
 DS4_TEST_METAL_OBJ := ds4_metal_test_hooks.o
 SSD_STREAMING_HOOK_TEST := tests/test_ssd_streaming_hooks
 DS4_TEST_DS4_OBJ := ds4_test_hooks.o
-else
-DS4_TEST_METAL_OBJ :=
-SSD_STREAMING_HOOK_TEST :=
-DS4_TEST_DS4_OBJ := ds4.o
-endif
 TEST_CORE_OBJS := $(filter-out ds4.o ds4_metal.o,$(CORE_OBJS)) $(DS4_TEST_DS4_OBJ) $(DS4_TEST_METAL_OBJ)
 
-ifeq ($(UNAME_S),Darwin)
 METAL_SOURCE_ORDER_ONLY := | check-metal-sources
-else
-METAL_SOURCE_ORDER_ONLY :=
-endif
 
-.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
+UNSUPPORTED_TARGETS := cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm \
+	test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch
+
+.PHONY: all help clean test test-legacy test-metal-laguna test-metal-laguna-integration test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dspark-acceptance dspark-verify-depth mtp-verify-depth $(UNSUPPORTED_TARGETS)
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -128,7 +82,6 @@ check-metal-sources:
 		fi; \
 	done
 
-ifeq ($(UNAME_S),Darwin)
 .PHONY: metal-decode-schedule-bench metal-prefill-variant-bench check-mxfp4-half-lut
 
 all: check-metal-sources ds4 ds4-server ds4-bench ds4-eval
@@ -136,7 +89,6 @@ all: check-metal-sources ds4 ds4-server ds4-bench ds4-eval
 help:
 	@echo "DS4 build targets:"
 	@echo "  make              Build Metal ./ds4, ./ds4-server, ./ds4-bench, and ./ds4-eval"
-	@echo "  make cpu          Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, and ./ds4-eval"
 	@echo "  make test         Build/run the model-independent Apple Metal/Laguna suite"
 	@echo "  make test-metal-laguna  Run the strict model-independent Apple Metal/Laguna suite"
 	@echo "  make test-legacy  Run the temporary umbrella regression suite (may need a model)"
@@ -147,7 +99,12 @@ help:
 	@echo "  make test-mxfp4-metal  Check the MXFP4 half LUT, then run Metal MXFP4 exactness tests"
 	@echo "  make dspark-verify-depth  Run DSpark speculative verification smoke if support GGUF is present"
 	@echo "  make mtp-verify-depth  Run legacy MTP speculative verification smoke if MTP GGUF is present"
+	@echo "  CPU/CUDA/ROCm targets are unsupported in this Darwin/Apple Metal-only fork"
 	@echo "  make clean        Remove build outputs"
+
+$(UNSUPPORTED_TARGETS):
+	@echo "error: make $@ is unsupported; this build requires Darwin/Apple Metal" >&2
+	@exit 2
 
 ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
@@ -216,90 +173,6 @@ tests/test_sampling.o: tests/test_sampling.c ds4.h
 tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o ds4_gpu_args_cpu.o ds4_kvstore.o rax.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_help.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS)
-	$(CC) $(CFLAGS) -o ds4 ds4_cli_cpu.o ds4_help.o linenoise.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-server ds4_server_cpu.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-bench ds4_bench_cpu.o ds4_help.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-eval ds4_eval_cpu.o ds4_help.o $(CPU_CORE_OBJS) $(LDLIBS)
-
-cuda-regression:
-	@echo "cuda-regression requires a CUDA build"
-else
-all: help
-
-help:
-	@echo "DS4 build targets:"
-	@echo "  make cuda-spark          Build CUDA for DGX Spark / GB10"
-	@echo "  make cuda-generic        Build CUDA for a generic local CUDA GPU"
-	@echo "  make cuda CUDA_ARCH=sm_N Build CUDA with an explicit nvcc -arch value"
-	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151"
-	@echo "  make rocm                Alias for make strix-halo"
-	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, and ./ds4-eval"
-	@echo "  make test                Requires Darwin/Apple Metal (strict Laguna suite)"
-	@echo "  make test-metal-laguna   Requires Darwin/Apple Metal (strict Laguna suite)"
-	@echo "  make test-legacy         Run the temporary umbrella regression suite"
-	@echo "  make test-metal-laguna-integration LAGUNA_TEST_MODEL=FILE  Requires Darwin/Apple Metal"
-	@echo "  make dspark-verify-depth Run DSpark speculative verification smoke if support GGUF is present"
-	@echo "  make mtp-verify-depth    Run legacy MTP speculative verification smoke if MTP GGUF is present"
-	@echo "  make clean               Remove build outputs"
-
-cuda-spark:
-	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval CUDA_ARCH=sm_121
-
-cuda-generic:
-	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval CUDA_ARCH=native
-
-cuda:
-	@if [ -z "$(strip $(CUDA_ARCH))" ]; then \
-		echo "error: specify CUDA_ARCH, for example: make cuda CUDA_ARCH=sm_120"; \
-		echo "       or use make cuda-spark / make cuda-generic"; \
-		exit 2; \
-	fi
-	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval CUDA_ARCH="$(CUDA_ARCH)"
-
-strix-halo:
-	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval \
-		CORE_OBJS="ds4.o lgn.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_layer_pack.o" \
-		CFLAGS="$(CFLAGS) -DDS4_ROCM_BUILD" \
-		DS4_LINK="$(HIPCC) $(ROCM_CFLAGS)" \
-		DS4_LINK_LIBS="$(ROCM_LDLIBS)"
-
-rocm: strix-halo
-
-ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
-
-ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
-
-ds4-bench: ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
-
-ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
-
-gguf-tools/quality-testing/score_official.o: gguf-tools/quality-testing/score_official.c ds4.h
-	$(CC) $(filter-out -ffast-math,$(QUALITY_CFLAGS)) -I. -c -o $@ $<
-
-gguf-tools/quality-testing/score_official: gguf-tools/quality-testing/score_official.o $(CORE_OBJS) rax.o ds4_gpu_args.o $(METAL_SOURCE_ORDER_ONLY)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
-
-cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_help.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS)
-	$(CC) $(CFLAGS) -o ds4 ds4_cli_cpu.o ds4_help.o linenoise.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-server ds4_server_cpu.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-bench ds4_bench_cpu.o ds4_help.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-eval ds4_eval_cpu.o ds4_help.o $(CPU_CORE_OBJS) $(LDLIBS)
-
-cuda-regression: tests/cuda_long_context_smoke
-	./tests/cuda_long_context_smoke
-
-tests/test_mxfp4_cuda: tests/test_mxfp4_cuda.cu $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -std=c++17 $(MMQ_INCLUDES) -o $@ $^ $(CUDA_LDLIBS)
-
-test-mxfp4-cuda: tests/test_mxfp4_cuda
-	./tests/test_mxfp4_cuda
-endif
-
 tests/test_lgn.o: tests/test_lgn.c lgn.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
@@ -348,78 +221,20 @@ ds4_kvstore.o: ds4_kvstore.c ds4_kvstore.h ds4.h ds4_ssd.h
 ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_gpu.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h lgn.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ tests/ds4_test.c
 
-tests/cuda_long_context_smoke.o: tests/cuda_long_context_smoke.c ds4_gpu.h
-	$(CC) $(CFLAGS) -I. -c -o $@ tests/cuda_long_context_smoke.c
-
 rax.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CFLAGS) -c -o $@ rax.c
 
 linenoise.o: linenoise.c linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ linenoise.c
 
-ds4_cpu.o: ds4.c ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h lgn.h
-	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -c -o $@ ds4.c
-
-ds4_cli_cpu.o: ds4_cli.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h linenoise.h
-	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_cli.c
-
 ds4_gpu_args_cpu.o: ds4_gpu_args.c ds4_gpu_args.h ds4_gpu_mgpu.h
 	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_gpu_args.c
-
-ds4_server_cpu.o: ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
-	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_server.c
-
-ds4_bench_cpu.o: ds4_bench.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h
-	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_bench.c
-
-ds4_eval_cpu.o: ds4_eval.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h
-	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_eval.c
 
 ds4_metal.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -c -o $@ ds4_metal.m
 
 ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -DDS4_TEST_HOOKS -c -o $@ ds4_metal.m
-
-ds4_cuda.o: ds4_cuda.cu ds4_gpu.h ds4_gpu_mgpu.h ds4_iq2_tables_cuda.inc \
-	cuda/mmq/ds4_mmq.h rocm/ds4_rocm_laguna.cuh rocm/ds4_rocm_dflash.cuh
-	$(NVCC) $(NVCCFLAGS) -c -o $@ ds4_cuda.cu
-
-# Vendored mmq pieces (see cuda/mmq/VENDOR.md).  ds4_mmq.cu transitively
-# pulls in mmq.cuh which has heavy template instantiation -- each piece
-# compiles in its own TU and links in.
-cuda/mmq/ds4_ggml_stubs.o: cuda/mmq/ds4_ggml_stubs.cu cuda/mmq/ds4_ggml_stubs.h cuda/mmq/common.cuh
-	$(NVCC) $(NVCCFLAGS) -std=c++17 $(MMQ_INCLUDES) -c -o $@ $<
-
-cuda/mmq/ds4_mmq.o: cuda/mmq/ds4_mmq.cu cuda/mmq/ds4_mmq.h cuda/mmq/ds4_mmq_d2r.cuh cuda/mmq/mmq.cuh cuda/mmq/common.cuh cuda/mmq/ds4_ggml_stubs.h cuda/mmq/quantize.cuh cuda/mmq/mmid.cuh cuda/mmq/vecdotq.cuh cuda/mmq/mma.cuh
-	$(NVCC) $(NVCCFLAGS) -std=c++17 $(MMQ_INCLUDES) -c -o $@ $<
-
-cuda/mmq/ds4_mmq_d2r.o: cuda/mmq/ds4_mmq_d2r.cu cuda/mmq/ds4_mmq_d2r.cuh cuda/mmq/mmq.cuh cuda/mmq/common.cuh cuda/mmq/ds4_ggml_stubs.h cuda/mmq/vecdotq.cuh cuda/mmq/mma.cuh
-	$(NVCC) $(NVCCFLAGS) -std=c++17 $(MMQ_INCLUDES) -c -o $@ $<
-
-cuda/mmq/quantize.o: cuda/mmq/quantize.cu cuda/mmq/quantize.cuh cuda/mmq/common.cuh cuda/mmq/ds4_ggml_stubs.h cuda/mmq/mmq.cuh
-	$(NVCC) $(NVCCFLAGS) -std=c++17 $(MMQ_INCLUDES) -c -o $@ $<
-
-cuda/mmq/mmid.o: cuda/mmq/mmid.cu cuda/mmq/mmid.cuh cuda/mmq/common.cuh cuda/mmq/ds4_ggml_stubs.h
-	$(NVCC) $(NVCCFLAGS) -std=c++17 $(MMQ_INCLUDES) -c -o $@ $<
-
-cuda/mmq/mmvq.o: cuda/mmq/mmvq.cu cuda/mmq/mmvq.cuh cuda/mmq/common.cuh cuda/mmq/ds4_ggml_stubs.h cuda/mmq/quantize.cuh cuda/mmq/vecdotq.cuh cuda/mmq/unary.cuh
-	$(NVCC) $(NVCCFLAGS) -std=c++17 $(MMQ_INCLUDES) -c -o $@ $<
-
-cuda/mmq/ds4_repack.o: cuda/mmq/ds4_repack.cu cuda/mmq/ds4_repack.h
-	$(NVCC) $(NVCCFLAGS) -std=c++17 -c -o $@ $<
-
-ds4_rocm.o: ds4_rocm.cu ds4_gpu.h ds4_iq2_tables_cuda.inc $(ROCM_SRCS)
-	$(HIPCC) $(ROCM_CFLAGS) -c -o $@ ds4_rocm.cu
-
-ds4_rocm_compat.o: ds4_rocm_compat.cu ds4_gpu.h ds4_gpu_mgpu.h ds4_gpu_args.h
-	$(HIPCC) $(ROCM_CFLAGS) -c -o $@ ds4_rocm_compat.cu
-
-ds4_rocm_unavailable.o: ds4_rocm_unavailable.cu
-	$(HIPCC) $(ROCM_CFLAGS) -c -o $@ ds4_rocm_unavailable.cu
-
-tests/cuda_long_context_smoke: tests/cuda_long_context_smoke.o ds4_cuda.o $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
 
 tests/test_layer_pack.o: tests/test_layer_pack.c ds4_layer_pack.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
@@ -433,10 +248,8 @@ tests/test_gpu_args.o: tests/test_gpu_args.c ds4_gpu_args.h ds4_gpu_mgpu.h
 tests/test_gpu_args: tests/test_gpu_args.o ds4_gpu_args_cpu.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-ifeq ($(UNAME_S),Darwin)
 ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h lgn.h ds4_gpu_mgpu.h ds4_layer_pack.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
-endif
 
 ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h ds4_layer_pack.h lgn.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -DDS4_TEST_HOOKS -c -o $@ ds4.c
@@ -453,82 +266,11 @@ tests/test_ssd_streaming_hooks.o: tests/test_ssd_streaming_hooks.c
 ds4_streaming_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h ds4_layer_pack.h lgn.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-ifeq ($(UNAME_S),Darwin)
 tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o ds4_help.o ds4_kvstore.o rax.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o ds4_metal_test_hooks.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
-endif
-
-ifneq ($(UNAME_S),Darwin)
-tests/test_gpu_xdev.o: tests/test_gpu_xdev.c ds4_gpu.h ds4_gpu_mgpu.h
-	$(CC) $(CFLAGS) -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_gpu_xdev: tests/test_gpu_xdev.o ds4_cuda.o $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-tests/test_gpu_model_cache.o: tests/test_gpu_model_cache.c ds4_gpu.h
-	$(CC) $(CFLAGS) -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_gpu_model_cache: tests/test_gpu_model_cache.o ds4_cuda.o $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-tests/test_gpu_lookup_cache_strict.o: tests/test_gpu_lookup_cache_strict.c ds4_gpu.h ds4_gpu_mgpu.h
-	$(CC) $(CFLAGS) -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_gpu_lookup_cache_strict: tests/test_gpu_lookup_cache_strict.o ds4_cuda.o $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-ds4_cuda_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h ds4_layer_pack.h lgn.h
-	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -I$(CUDA_HOME)/include -c -o $@ ds4.c
-
-tests/test_engine_mgpu_refusal.o: tests/test_engine_mgpu_refusal.c ds4.h ds4_gpu_mgpu.h
-	$(CC) $(CFLAGS) -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_engine_mgpu_refusal: tests/test_engine_mgpu_refusal.o ds4_gpu_args.o ds4_kvstore.o rax.o $(CORE_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-tests/test_engine_mgpu_runtime.o: tests/test_engine_mgpu_runtime.c ds4.h ds4_gpu_mgpu.h
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_engine_mgpu_runtime: tests/test_engine_mgpu_runtime.o ds4_cuda_test_hooks.o lgn.o ds4_gpu_args.o ds4_kvstore.o rax.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_cuda.o ds4_layer_pack.o $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-tests/test_engine_correctness.o: tests/test_engine_correctness.c ds4.h ds4_gpu_mgpu.h
-	$(CC) $(CFLAGS) -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_engine_correctness: tests/test_engine_correctness.o ds4_gpu_args.o ds4_kvstore.o rax.o $(CORE_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-tests/test_sampling.o: tests/test_sampling.c ds4.h
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
-
-tests/test_sampling: tests/test_sampling.o ds4_cuda_test_hooks.o lgn.o ds4_gpu_args.o ds4_kvstore.o rax.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_cuda.o ds4_layer_pack.o $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-tests/test_cuda_session_batch.o: tests/test_cuda_session_batch.c ds4.h ds4_gpu_args.h ds4_gpu_mgpu.h
-	$(CC) $(CFLAGS) -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_cuda_session_batch: tests/test_cuda_session_batch.o ds4_gpu_args.o ds4_kvstore.o rax.o $(CORE_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-test-cuda-session-batch: tests/test_cuda_session_batch
-	DS4_TEST_MODEL="$(DS4_TEST_MODEL)" ./tests/test_cuda_session_batch
-
-tests/test_cuda_mixed_batch.o: tests/test_cuda_mixed_batch.c ds4.h ds4_gpu_args.h ds4_gpu_mgpu.h
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -I$(CUDA_HOME)/include -c -o $@ $<
-
-tests/test_cuda_mixed_batch: tests/test_cuda_mixed_batch.o ds4_cuda_test_hooks.o lgn.o ds4_gpu_args.o ds4_kvstore.o rax.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_cuda.o ds4_layer_pack.o $(MMQ_OBJS)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
-
-test-cuda-mixed-batch: tests/test_cuda_mixed_batch
-	DS4_TEST_MODEL="$(DS4_TEST_MODEL)" ./tests/test_cuda_mixed_batch
-endif
 
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
-ifeq ($(UNAME_S),Darwin)
 	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
-else
-	$(NVCC) $(NVCCFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(CUDA_LDLIBS)
-endif
 
 test-legacy: test-lgn ds4_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
@@ -542,7 +284,6 @@ test-legacy: test-lgn ds4_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	./tests/test_gpu_args_cli.sh
 	./tests/test_sampling
 
-ifeq ($(UNAME_S),Darwin)
 test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal ds4_test ds4 ds4-server ds4-bench ds4-eval
 	@set -eu; \
 	./ds4_test --laguna-architecture --laguna-selector-parser --server; \
@@ -576,17 +317,6 @@ test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-
 	DS4_TEST_TP_LISTEN_HOST= \
 	DS4_TEST_TP_DISCONNECT= \
 	./tests/test_metal_session_batch
-else
-test-metal-laguna:
-	@echo "error: test-metal-laguna requires Darwin/Apple Metal" >&2
-	@exit 2
-
-test: test-metal-laguna
-
-test-metal-laguna-integration:
-	@echo "error: test-metal-laguna-integration requires Darwin/Apple Metal and LAGUNA_TEST_MODEL=FILE" >&2
-	@exit 2
-endif
 
 dspark-acceptance: ds4
 	DS4_DSPARK_MODEL="$(DS4_DSPARK_MODEL)" \
@@ -622,4 +352,4 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 	./tests/test_mxfp4_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_cpu ds4_native ds4_server_test ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o ds4_streaming_test_hooks.o tests/test_ssd_streaming_hooks tests/test_ssd_streaming_hooks.o gguf-tools/quality-testing/score_official gguf-tools/quality-testing/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_mxfp4_cuda tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o ds4_streaming_test_hooks.o tests/test_ssd_streaming_hooks tests/test_ssd_streaming_hooks.o gguf-tools/quality-testing/score_official gguf-tools/quality-testing/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_metal_session_batch tests/test_sampling tests/*.o *.o
