@@ -91,6 +91,8 @@ static void test_laguna_selector_parser(void) {
 #ifndef DS4_NO_GPU
 #include <math.h>
 
+/* DFlash restore invalidation is a GPU-only contract.  Keep both the hook
+ * declaration and its explicit test entry out of DS4_NO_GPU binaries. */
 bool ds4_test_dspark_cache_window_crop(void);
 bool ds4_test_dflash_payload_invalidation(void);
 

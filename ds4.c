@@ -56316,15 +56316,33 @@ void ds4_session_snapshot_free(ds4_session_snapshot *snap) {
 }
 
 #ifdef DS4_TEST_HOOKS
+#ifndef DS4_NO_GPU
+typedef struct {
+    ds4_shape saved_shape;
+} ds4_test_laguna_shape_scope;
+
+static void ds4_test_laguna_shape_scope_begin(
+        ds4_test_laguna_shape_scope *scope) {
+    if (!scope) return;
+    scope->saved_shape = g_ds4_shape;
+    /* The malformed payload is rejected before any layout fields are read;
+     * the family gate is the minimum Laguna state needed by this seam. */
+    g_ds4_shape.family = DS4_MODEL_FAMILY_LAGUNA;
+}
+
+static void ds4_test_laguna_shape_scope_end(
+        const ds4_test_laguna_shape_scope *scope) {
+    if (!scope) return;
+    g_ds4_shape = scope->saved_shape;
+}
+
 /* Exercise the payload-restore boundary without opening a model or allocating
  * the production Laguna/DFlash graphs.  A malformed payload is sufficient:
  * the loader must invalidate already-synced/deferred support state before it
  * can reject the header, and snapshot restore must reach that same loader. */
 bool ds4_test_dflash_payload_invalidation(void) {
-#ifdef DS4_NO_GPU
-    return true;
-#else
-    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return true;
+    ds4_test_laguna_shape_scope shape_scope;
+    ds4_test_laguna_shape_scope_begin(&shape_scope);
 
     ds4_engine engine;
     memset(&engine, 0, sizeof(engine));
@@ -56339,22 +56357,28 @@ bool ds4_test_dflash_payload_invalidation(void) {
         DS4_SESSION_PAYLOAD_VERSION + 1u,
     };
     char err[128] = {0};
+    FILE *payload_fp = NULL;
+    bool payload_cleared = false;
+    bool snapshot_cleared = false;
+    int payload_rc = 1;
+    int snapshot_rc = 1;
 
     session.dflash_synced = true;
     session.dflash_deferred_rows = 3u;
     session.dflash_deferred_pos0 = 41u;
     session.dflash_defer_inject = true;
-    FILE *fp = fmemopen((void *)bad_payload, sizeof(bad_payload), "rb");
-    if (!fp) return false;
-    const int payload_rc = ds4_session_load_payload(
-        &session, fp, sizeof(bad_payload), err, sizeof(err));
-    const bool payload_cleared =
+    payload_fp = fmemopen((void *)bad_payload, sizeof(bad_payload), "rb");
+    if (!payload_fp) goto cleanup;
+    payload_rc = ds4_session_load_payload(
+        &session, payload_fp, sizeof(bad_payload), err, sizeof(err));
+    payload_cleared =
         payload_rc != 0 &&
         !session.dflash_synced &&
         session.dflash_deferred_rows == 0u &&
         session.dflash_deferred_pos0 == 0u &&
         !session.dflash_defer_inject;
-    fclose(fp);
+    fclose(payload_fp);
+    payload_fp = NULL;
 
     session.dflash_synced = true;
     session.dflash_deferred_rows = 2u;
@@ -56366,17 +56390,21 @@ bool ds4_test_dflash_payload_invalidation(void) {
         .cap = sizeof(bad_payload),
     };
     memset(err, 0, sizeof(err));
-    const int snapshot_rc = ds4_session_load_snapshot(
+    snapshot_rc = ds4_session_load_snapshot(
         &session, &snap, err, sizeof(err));
-    const bool snapshot_cleared =
+    snapshot_cleared =
         snapshot_rc != 0 &&
         !session.dflash_synced &&
         session.dflash_deferred_rows == 0u &&
         session.dflash_deferred_pos0 == 0u &&
         !session.dflash_defer_inject;
+
+cleanup:
+    if (payload_fp) fclose(payload_fp);
+    ds4_test_laguna_shape_scope_end(&shape_scope);
     return payload_cleared && snapshot_cleared;
-#endif
 }
+#endif /* !DS4_NO_GPU */
 #endif /* DS4_TEST_HOOKS */
 
 void ds4_engine_dump_tokens(ds4_engine *e, const ds4_tokens *tokens) {
