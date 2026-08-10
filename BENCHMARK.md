@@ -63,12 +63,24 @@ volume with enough model space, missing GitHub authentication when a draft is
 requested, or missing authority to publish the verified draft. Do not weaken
 the protocol to work around any of them.
 
+If `all` exits nonzero or the controlling process is lost, stop and return the
+exact `DS4_BENCH_ROOT`, failing command, exit status, and last phase marker to
+the operator. Do not launch a second expensive `all` invocation without
+explicit approval.
+
 ### End-to-end command sequence
 
 Use a fresh protocol checkout. This avoids relying on remote names or local
-branches configured by a previous agent:
+branches configured by a previous agent. Run the blocks in order and stop on
+the first nonzero command or failed `[[ ... ]]` assertion:
 
 ```zsh
+command -v git
+command -v make
+command -v python3
+command -v gh
+xcode-select -p >/dev/null
+
 export DS4_RUNBOOK_REPO="$(mktemp -d /private/tmp/ds4-finalist-runbook.XXXXXX)"
 git clone --branch laguna-s2.1 --single-branch \
   https://github.com/michaelasper/ds4.git "$DS4_RUNBOOK_REPO"
@@ -102,6 +114,9 @@ if [[ -f "$model" ]]; then
   print -- 'Model present; the runner will verify its pinned SHA-256 once.'
 else
   print -- 'The runner will download the approximately 45 GiB model.'
+  if ! command -v hf >/dev/null 2>&1; then
+    python3 -m pip install --user -U huggingface_hub hf_xet
+  fi
 fi
 
 export DS4_BENCH_ROOT="$(mktemp -d /private/tmp/ds4-laguna-finalists.XXXXXX)"
