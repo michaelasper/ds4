@@ -46,7 +46,7 @@ def make_payload(case, case_number, nonce, stream):
         "Do not quote the filler.\nFILLER:\n%s"
     ) % (nonce, case_number, name, filler)
     payload = {
-        "model": "deepseek-chat",
+        "model": "laguna-s-2.1",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": temperature,

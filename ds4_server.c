@@ -992,6 +992,21 @@ static bool server_model_alias_known(const char *id) {
             !strcmp(id, "poolside/laguna-s-2.1"));
 }
 
+/* A loaded server has one model family.  Keep omitted model fields on the
+ * canonical base id and accept only the aliases advertised by
+ * server_model_alias_known(); forwarding a legacy provider id here would make
+ * the response metadata claim a model that the Laguna runtime never loaded. */
+static bool request_model_is_supported(const request *r,
+                                       char *err, size_t errlen) {
+    if (!r || !r->model_from_request || server_model_alias_known(r->model)) {
+        return true;
+    }
+    snprintf(err, errlen,
+             "unsupported model '%s'; use a Laguna model id",
+             r->model ? r->model : "");
+    return false;
+}
+
 static void stop_list_clear(stop_list *stops) {
     for (int i = 0; i < stops->len; i++) free(stops->v[i]);
     stops->len = 0;
@@ -2682,6 +2697,7 @@ static void anthropic_prepare_live_continuation(request *r,
  * prompt plus the small amount of protocol state needed to translate the reply. */
 static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int def_tokens,
                                int ctx_size, request *r, char *err, size_t errlen) {
+    err[0] = '\0';
     request_init(r, REQ_CHAT, def_tokens);
     const char *p = body;
     bool got_messages = false;
@@ -2739,6 +2755,10 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
                 goto bad;
             }
             r->model_from_request = true;
+            if (!request_model_is_supported(r, err, errlen)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "max_tokens") || !strcmp(key, "max_completion_tokens")) {
             if (!json_int(&p, &r->max_tokens)) {
                 free(key);
@@ -2849,13 +2869,14 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
 bad:
     chat_msgs_free(&msgs);
     free(tool_schemas);
-    snprintf(err, errlen, "invalid JSON request");
+    if (!err[0]) snprintf(err, errlen, "invalid JSON request");
     request_free(r);
     return false;
 }
 
 static bool parse_anthropic_request(ds4_engine *e, server *s, const char *body, int def_tokens,
                                     int ctx_size, request *r, char *err, size_t errlen) {
+    err[0] = '\0';
     request_init(r, REQ_CHAT, def_tokens);
     r->api = API_ANTHROPIC;
     const char *p = body;
@@ -2955,6 +2976,10 @@ static bool parse_anthropic_request(ds4_engine *e, server *s, const char *body, 
                 goto bad;
             }
             r->model_from_request = true;
+            if (!request_model_is_supported(r, err, errlen)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "max_tokens")) {
             if (!json_int(&p, &r->max_tokens)) {
                 free(key);
@@ -3065,7 +3090,7 @@ bad:
     chat_msgs_free(&msgs);
     free(system);
     free(tool_schemas);
-    snprintf(err, errlen, "invalid JSON request");
+    if (!err[0]) snprintf(err, errlen, "invalid JSON request");
     request_free(r);
     return false;
 }
@@ -3744,6 +3769,7 @@ static bool parse_responses_reasoning(const char **p, ds4_think_mode *effort,
 
 static bool parse_responses_request(ds4_engine *e, server *s, const char *body, int def_tokens,
                                     int ctx_size, request *r, char *err, size_t errlen) {
+    err[0] = '\0';
     request_init(r, REQ_CHAT, def_tokens);
     r->api = API_RESPONSES;
     const char *p = body;
@@ -3853,6 +3879,10 @@ static bool parse_responses_request(ds4_engine *e, server *s, const char *body, 
                 goto bad;
             }
             r->model_from_request = true;
+            if (!request_model_is_supported(r, err, errlen)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "max_output_tokens") || !strcmp(key, "max_tokens")) {
             if (!json_int(&p, &r->max_tokens)) {
                 free(key);
@@ -4003,7 +4033,7 @@ bad:
     buf_free(&loaded_tool_schemas);
     free(instructions);
     free(tool_schemas);
-    snprintf(err, errlen, "invalid JSON request");
+    if (!err[0]) snprintf(err, errlen, "invalid JSON request");
     request_free(r);
     return false;
 }
@@ -4040,6 +4070,7 @@ static bool parse_prompt(const char **p, char **out) {
 
 static bool parse_completion_request(ds4_engine *e, const char *body, int def_tokens,
                                      int ctx_size, request *r, char *err, size_t errlen) {
+    err[0] = '\0';
     request_init(r, REQ_COMPLETION, def_tokens);
     const char *p = body;
     char *prompt = NULL;
@@ -4075,6 +4106,10 @@ static bool parse_completion_request(ds4_engine *e, const char *body, int def_to
                 goto bad;
             }
             r->model_from_request = true;
+            if (!request_model_is_supported(r, err, errlen)) {
+                free(key);
+                goto bad;
+            }
         } else if (!strcmp(key, "max_tokens")) {
             if (!json_int(&p, &r->max_tokens)) {
                 free(key);
@@ -4186,7 +4221,7 @@ static bool parse_completion_request(ds4_engine *e, const char *body, int def_to
     return true;
 bad:
     free(prompt);
-    snprintf(err, errlen, "invalid JSON request");
+    if (!err[0]) snprintf(err, errlen, "invalid JSON request");
     request_free(r);
     return false;
 }
@@ -5215,9 +5250,9 @@ static bool sse_chat_delta_n(int fd, const request *r, const char *id,
     if (len == 0) return true;
     buf b = {0};
     long now = (long)time(NULL);
-    buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":\"", id, now);
+    buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":", id, now);
     json_escape(&b, r->model);
-    buf_puts(&b, "\",\"choices\":[{\"index\":0,\"delta\":{");
+    buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":{");
     json_escape(&b, field);
     buf_putc(&b, ':');
     json_escape_n(&b, text, len);
@@ -5232,9 +5267,9 @@ static bool sse_chat_tool_call_start_delta(int fd, const request *r, const char 
                                            const char *name) {
     buf b = {0};
     long now = (long)time(NULL);
-    buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":\"", id, now);
+    buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":", id, now);
     json_escape(&b, r->model);
-    buf_puts(&b, "\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":");
+    buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":");
     buf_printf(&b, "%d", index);
     buf_puts(&b, ",\"id\":");
     json_escape(&b, tool_id ? tool_id : "");
@@ -5251,9 +5286,9 @@ static bool sse_chat_tool_call_args_delta_n(int fd, const request *r, const char
     if (len == 0) return true;
     buf b = {0};
     long now = (long)time(NULL);
-    buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":\"", id, now);
+    buf_printf(&b, "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%ld,\"model\":", id, now);
     json_escape(&b, r->model);
-    buf_puts(&b, "\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":");
+    buf_puts(&b, ",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":");
     buf_printf(&b, "%d", index);
     buf_puts(&b, ",\"function\":{\"arguments\":");
     json_escape_n(&b, text, len);
@@ -12980,6 +13015,81 @@ static char *read_socket_text(int fd) {
     return buf_take(&b);
 }
 
+static bool test_sse_json_events_valid(const char *out, int expected) {
+    int found = 0;
+    const char *line = out ? out : "";
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        if (!end) end = line + strlen(line);
+        const size_t line_len = (size_t)(end - line);
+        if (line_len >= 6 && !memcmp(line, "data: ", 6)) {
+            char *payload = xstrndup(line + 6, line_len - 6);
+            if (strcmp(payload, "[DONE]")) {
+                const char *p = payload;
+                bool ok = json_skip_value(&p);
+                json_ws(&p);
+                if (!ok || *p) {
+                    free(payload);
+                    return false;
+                }
+                found++;
+            }
+            free(payload);
+        }
+        if (!*end) break;
+        line = end + 1;
+    }
+    return found == expected;
+}
+
+static void test_openai_stream_model_json_is_valid(void) {
+    request r;
+    request_init(&r, REQ_CHAT, 128);
+    r.api = API_OPENAI;
+    free(r.model);
+    r.model = xstrdup("laguna\\\"quoted\\\\model");
+
+    int sv[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] >= 0 && sv[1] >= 0) {
+        TEST_ASSERT(sse_chat_delta_n(sv[0], &r, "chatcmpl_model", "content",
+                                     "hello", 5));
+        shutdown(sv[0], SHUT_WR);
+        char *out = read_socket_text(sv[1]);
+        TEST_ASSERT(test_sse_json_events_valid(out, 1));
+        free(out);
+        close(sv[0]);
+        close(sv[1]);
+    }
+
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] >= 0 && sv[1] >= 0) {
+        TEST_ASSERT(sse_chat_tool_call_start_delta(sv[0], &r, "chatcmpl_model",
+                                                   0, "call_1", "bash"));
+        shutdown(sv[0], SHUT_WR);
+        char *out = read_socket_text(sv[1]);
+        TEST_ASSERT(test_sse_json_events_valid(out, 1));
+        free(out);
+        close(sv[0]);
+        close(sv[1]);
+    }
+
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    if (sv[0] >= 0 && sv[1] >= 0) {
+        const char *args = "{\"path\":\"README.md\"}";
+        TEST_ASSERT(sse_chat_tool_call_args_delta_n(sv[0], &r,
+                                                    "chatcmpl_model", 0,
+                                                    args, strlen(args)));
+        shutdown(sv[0], SHUT_WR);
+        char *out = read_socket_text(sv[1]);
+        TEST_ASSERT(test_sse_json_events_valid(out, 1));
+        free(out);
+        close(sv[0]);
+        close(sv[1]);
+    }
+    request_free(&r);
+}
+
 static void test_context_length_error_uses_protocol_standard_shape(void) {
     request r;
     request_init(&r, REQ_CHAT, 128);
@@ -13776,6 +13886,80 @@ static void test_model_alias_thinking_controls(void) {
     TEST_ASSERT(model_alias_enables_thinking("laguna-s-2.1-reasoner"));
     TEST_ASSERT(server_model_alias_known("laguna-s-2.1-chat"));
     TEST_ASSERT(server_model_alias_known("laguna-s-2.1-reasoner"));
+}
+
+static void test_request_model_contract(void) {
+    static const char *const laguna_ids[] = {
+        "laguna-s-2.1",
+        "laguna-s-2.1-chat",
+        "laguna-s-2.1-no-think",
+        "laguna-s-2.1-nothink",
+        "laguna-s-2.1-reasoner",
+        "poolside/laguna-s-2.1",
+    };
+    static const char *const rejected_ids[] = {
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "glm-5.2",
+        "glm-5.2-chat",
+        "arbitrary-model",
+    };
+    char body[256];
+    char err[160];
+    request r;
+
+    /* Every retained parser must accept the same documented Laguna aliases.
+     * Stop at the parser's required-field check so this remains a
+     * model-independent unit test and never needs a tokenizer vocabulary. */
+    for (size_t i = 0; i < sizeof(laguna_ids) / sizeof(laguna_ids[0]); i++) {
+        snprintf(body, sizeof(body), "{\"model\":\"%s\"}", laguna_ids[i]);
+
+        bool ok = parse_chat_request(NULL, NULL, body, 1, 100,
+                                     &r, err, sizeof(err));
+        TEST_ASSERT(!ok && !strcmp(err, "missing messages"));
+        if (ok) request_free(&r);
+
+        ok = parse_anthropic_request(NULL, NULL, body, 1, 100,
+                                     &r, err, sizeof(err));
+        TEST_ASSERT(!ok && !strcmp(err, "missing messages"));
+        if (ok) request_free(&r);
+
+        ok = parse_responses_request(NULL, NULL, body, 1, 100,
+                                     &r, err, sizeof(err));
+        TEST_ASSERT(!ok && !strcmp(err, "missing input"));
+        if (ok) request_free(&r);
+
+        ok = parse_completion_request(NULL, body, 1, 100,
+                                      &r, err, sizeof(err));
+        TEST_ASSERT(!ok && !strcmp(err, "missing prompt"));
+        if (ok) request_free(&r);
+    }
+
+    /* Legacy provider ids must fail while the request is still being parsed;
+     * in particular, they must not reach model sampling or prompt rendering. */
+    for (size_t i = 0; i < sizeof(rejected_ids) / sizeof(rejected_ids[0]); i++) {
+        snprintf(body, sizeof(body), "{\"model\":\"%s\"}", rejected_ids[i]);
+
+        bool ok = parse_chat_request(NULL, NULL, body, 1, 100,
+                                     &r, err, sizeof(err));
+        TEST_ASSERT(!ok && strstr(err, "unsupported model") != NULL);
+        if (ok) request_free(&r);
+
+        ok = parse_anthropic_request(NULL, NULL, body, 1, 100,
+                                     &r, err, sizeof(err));
+        TEST_ASSERT(!ok && strstr(err, "unsupported model") != NULL);
+        if (ok) request_free(&r);
+
+        ok = parse_responses_request(NULL, NULL, body, 1, 100,
+                                     &r, err, sizeof(err));
+        TEST_ASSERT(!ok && strstr(err, "unsupported model") != NULL);
+        if (ok) request_free(&r);
+
+        ok = parse_completion_request(NULL, body, 1, 100,
+                                      &r, err, sizeof(err));
+        TEST_ASSERT(!ok && strstr(err, "unsupported model") != NULL);
+        if (ok) request_free(&r);
+    }
 }
 
 static void test_api_thinking_controls_parse(void) {
@@ -16255,6 +16439,7 @@ static void ds4_server_unit_tests_run(void) {
     test_request_defaults_use_min_p_filtering();
     test_reasoning_effort_mapping();
     test_model_alias_thinking_controls();
+    test_request_model_contract();
     test_api_thinking_controls_parse();
     test_render_laguna_chat_prompt_text();
     test_render_laguna_tools_and_reasoning();
@@ -16276,6 +16461,7 @@ static void ds4_server_unit_tests_run(void) {
     test_cors_preflight_response_is_no_content();
     test_cors_sse_headers();
     test_sse_direct_buffer_preserves_bounded_c_string_semantics();
+    test_openai_stream_model_json_is_valid();
     test_anthropic_live_stream_sends_incremental_blocks();
     test_anthropic_stream_reroutes_second_reasoning_pass();
     test_anthropic_usage_reports_cache_details();
