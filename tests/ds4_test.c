@@ -5918,6 +5918,174 @@ static void test_laguna_prefill_direct_kv_ab(void) {
     ds4_gpu_cleanup();
 #endif
 }
+
+/*
+ * Batched fused dense Q8 gate/up+SwiGLU against a double reference.  The
+ * kernel stages activations as half and dequantizes Q8_0 to half exactly
+ * like kernel_mul_mm_q8_0_f32, so the reference rounds both operands the
+ * same way and accumulates in double; the kernel accumulates in float.
+ */
+static void test_laguna_dense_q8_batch_swiglu_case(uint32_t n_tok) {
+    const uint32_t in_dim = 512u;
+    const uint32_t out_dim = 160u;
+    const uint32_t blocks = in_dim / 32u;
+    const uint64_t row_bytes = (uint64_t)blocks * 34u;
+    const uint64_t weight_bytes = (uint64_t)out_dim * row_bytes;
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t gate_offset = 0u;
+    const uint64_t up_offset = test_round_up_u64(weight_bytes, page);
+    const uint64_t model_size = test_round_up_u64(up_offset + weight_bytes,
+                                                  page);
+    const uint64_t x_values = (uint64_t)n_tok * in_dim;
+    const uint64_t mid_values = (uint64_t)n_tok * out_dim;
+
+    void *model = NULL;
+    TEST_ASSERT(posix_memalign(&model, (size_t)page,
+                               (size_t)model_size) == 0);
+    if (!model) return;
+    memset(model, 0, (size_t)model_size);
+    test_fill_q8_0_weights((uint8_t *)model + gate_offset, in_dim, out_dim,
+                           3u);
+    test_fill_q8_0_weights((uint8_t *)model + up_offset, in_dim, out_dim,
+                           17u);
+
+    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_values * sizeof(float));
+    ds4_gpu_tensor *mid = ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    ds4_gpu_tensor *gate = ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    ds4_gpu_tensor *up = ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    ds4_gpu_tensor *mid_stock =
+        ds4_gpu_tensor_alloc(mid_values * sizeof(float));
+    float *x_host = malloc((size_t)x_values * sizeof(float));
+    float *mid_host = malloc((size_t)mid_values * sizeof(float));
+    float *mid_stock_host = malloc((size_t)mid_values * sizeof(float));
+    TEST_ASSERT(x && mid && gate && up && mid_stock && x_host && mid_host &&
+                mid_stock_host);
+    if (!x || !mid || !gate || !up || !mid_stock || !x_host || !mid_host ||
+        !mid_stock_host) {
+        goto cleanup;
+    }
+
+    for (uint64_t i = 0; i < x_values; i++) {
+        const int v = (int)((i * 13u + (i >> 4u) * 7u + 11u) % 61u) - 30;
+        x_host[i] = (float)v / 128.0f;
+    }
+    TEST_ASSERT(ds4_gpu_tensor_write(x, 0, x_host,
+                                     x_values * sizeof(float)) != 0);
+    TEST_ASSERT(ds4_gpu_set_model_map(model, model_size) != 0);
+    TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+                    mid, model, model_size, gate_offset, up_offset,
+                    in_dim, out_dim, x, n_tok) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(mid, 0, mid_host,
+                                    mid_values * sizeof(float)) != 0);
+
+    /* The caller pins quality mode, which keeps the stock prefill matmul on
+     * kernel_mul_mm_q8_0_f32 for these row counts, and the fused kernel
+     * mirrors that kernel tile-for-tile: the two routes must agree bit for
+     * bit. */
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    gate, model, model_size, gate_offset,
+                    in_dim, out_dim, x, n_tok) != 0);
+    TEST_ASSERT(ds4_gpu_matmul_q8_0_tensor(
+                    up, model, model_size, up_offset,
+                    in_dim, out_dim, x, n_tok) != 0);
+    TEST_ASSERT(ds4_gpu_swiglu_tensor(
+                    mid_stock, gate, up,
+                    (uint32_t)mid_values, 0.0f, 1.0f) != 0);
+    TEST_ASSERT(ds4_gpu_tensor_read(mid_stock, 0, mid_stock_host,
+                                    mid_values * sizeof(float)) != 0);
+    TEST_ASSERT(memcmp(mid_host, mid_stock_host,
+                       (size_t)mid_values * sizeof(float)) == 0);
+
+    {
+        const uint8_t *gate_w = (const uint8_t *)model + gate_offset;
+        const uint8_t *up_w = (const uint8_t *)model + up_offset;
+        double sum_squared = 0.0;
+        double max_abs = 0.0;
+        size_t nonfinite = 0u;
+        for (uint32_t t = 0; t < n_tok; t++) {
+            for (uint32_t o = 0; o < out_dim; o++) {
+                double gate = 0.0;
+                double up = 0.0;
+                for (uint32_t b = 0; b < blocks; b++) {
+                    uint16_t gate_bits;
+                    uint16_t up_bits;
+                    memcpy(&gate_bits,
+                           gate_w + (uint64_t)o * row_bytes + b * 34u,
+                           sizeof(gate_bits));
+                    memcpy(&up_bits,
+                           up_w + (uint64_t)o * row_bytes + b * 34u,
+                           sizeof(up_bits));
+                    const float gate_d = test_f16_to_f32(gate_bits);
+                    const float up_d = test_f16_to_f32(up_bits);
+                    const int8_t *gate_qs = (const int8_t *)(
+                        gate_w + (uint64_t)o * row_bytes + b * 34u + 2u);
+                    const int8_t *up_qs = (const int8_t *)(
+                        up_w + (uint64_t)o * row_bytes + b * 34u + 2u);
+                    for (uint32_t i = 0; i < 32u; i++) {
+                        const double xv = (double)test_f16_to_f32(
+                            test_float_to_f16(
+                                x_host[(uint64_t)t * in_dim + b * 32u + i]));
+                        const double gw = (double)test_f16_to_f32(
+                            test_float_to_f16((float)gate_qs[i] * gate_d));
+                        const double uw = (double)test_f16_to_f32(
+                            test_float_to_f16((float)up_qs[i] * up_d));
+                        gate += xv * gw;
+                        up += xv * uw;
+                    }
+                }
+                const double reference =
+                    gate / (1.0 + exp(-gate)) * up;
+                const float got = mid_host[(uint64_t)t * out_dim + o];
+                if (!isfinite(got)) {
+                    nonfinite++;
+                    continue;
+                }
+                const double error = fabs((double)got - reference);
+                if (error > max_abs) max_abs = error;
+                sum_squared += error * error;
+            }
+        }
+        const double rms = sqrt(sum_squared / (double)mid_values);
+        fprintf(stderr,
+                "ds4-test: Laguna batched fused Q8 gate/up+SwiGLU "
+                "numeric rows=%u max_abs=%g rms=%g nonfinite=%zu\n",
+                n_tok, max_abs, rms, nonfinite);
+        TEST_ASSERT(nonfinite == 0u);
+        TEST_ASSERT(max_abs < 5.0e-3);
+        TEST_ASSERT(rms < 1.0e-3);
+    }
+
+cleanup:
+    free(mid_stock_host);
+    free(mid_host);
+    free(x_host);
+    ds4_gpu_tensor_free(mid_stock);
+    ds4_gpu_tensor_free(up);
+    ds4_gpu_tensor_free(gate);
+    ds4_gpu_tensor_free(mid);
+    ds4_gpu_tensor_free(x);
+    free(model);
+}
+
+static void test_laguna_dense_q8_batch_swiglu(void) {
+#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    TEST_ASSERT(ds4_gpu_init() != 0);
+#endif
+    /* Quality mode disables the TensorOps prefill matmuls so the stock
+     * route is the generic tiled kernel on every part. */
+    ds4_gpu_set_quality(true);
+    /* Full 32-wide tiles, ragged tails, and a sub-tile row block.  Row
+     * counts stay above the mv_ext small-batch ceiling so the stock route
+     * is the tiled kernel the fused pass mirrors. */
+    test_laguna_dense_q8_batch_swiglu_case(64u);
+    test_laguna_dense_q8_batch_swiglu_case(48u);
+    test_laguna_dense_q8_batch_swiglu_case(33u);
+    test_laguna_dense_q8_batch_swiglu_case(17u);
+    ds4_gpu_set_quality(false);
+#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    ds4_gpu_cleanup();
+#endif
+}
 #endif
 
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
@@ -11361,6 +11529,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-prefill-direct-kv-ab", "laguna-prefill-direct-kv-ab",
      "bit-exact A/B of the opt-in direct non-SWA prefill KV store",
      test_laguna_prefill_direct_kv_ab, false},
+    {"--laguna-dense-q8-batch-swiglu", "laguna-dense-q8-batch-swiglu",
+     "batched fused dense Q8 gate/up+SwiGLU against a double reference",
+     test_laguna_dense_q8_batch_swiglu, false},
 #if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
     {"--cuda-laguna-moe", "cuda-laguna-moe",
      "CUDA Laguna Q8 signal and Q4/Q3 MoE prefill/decode numerics",

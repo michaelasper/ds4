@@ -20926,6 +20926,118 @@ int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
                                                    0);
 }
 
+/* Batched sibling of the decode-only fused dense Q8 gate/up+SwiGLU: one
+ * tiled pass computes both projections for all rows and applies SwiGLU in
+ * the tile epilogue, so the normed rows are read once and the gate/up rows
+ * never reach device memory.  The kernel mirrors kernel_mul_mm_q8_0_f32
+ * tile-for-tile, which is the kernel ordinary prefill uses while TensorOps
+ * is suppressed. */
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available(void) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    @autoreleasepool {
+        id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mm_pipeline(
+            "kernel_mul_mm_q8_0_f32_pair_swiglu", false, true);
+        if (!pipeline || pipeline.threadExecutionWidth != 32u ||
+            pipeline.maxTotalThreadsPerThreadgroup < 128u ||
+            (NSUInteger)(4u * 64u * 32u * sizeof(uint16_t)) >
+                [g_device maxThreadgroupMemoryLength]) {
+            return 0;
+        }
+        return 1;
+    }
+}
+
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+        ds4_gpu_tensor       *mid,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                gate_offset,
+        uint64_t                up_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t                n_tok) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    if (!mid || !x || !model_map ||
+        n_tok == 0 || n_tok > UINT32_MAX ||
+        in_dim == 0 || (in_dim & 31u) != 0 ||
+        out_dim == 0 || in_dim > UINT32_MAX || out_dim > UINT32_MAX) {
+        return 0;
+    }
+    if (n_tok > UINT64_MAX / in_dim || n_tok > UINT64_MAX / out_dim ||
+        n_tok * in_dim > UINT64_MAX / sizeof(float) ||
+        n_tok * out_dim > UINT64_MAX / sizeof(float)) {
+        return 0;
+    }
+
+    @autoreleasepool {
+        id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
+        id<MTLBuffer> midbuf = ds4_gpu_tensor_buffer(mid);
+        const uint64_t x_bytes = n_tok * in_dim * sizeof(float);
+        const uint64_t mid_bytes = n_tok * out_dim * sizeof(float);
+        if (!xbuf || !midbuf ||
+            ds4_gpu_tensor_bytes(x) < x_bytes ||
+            ds4_gpu_tensor_bytes(mid) < mid_bytes) {
+            fprintf(stderr, "ds4: Metal batched fused Q8_0 gate/up SwiGLU received undersized activation buffers\n");
+            return 0;
+        }
+
+        const uint64_t blocks = in_dim / 32;
+        if (blocks > UINT64_MAX / 34u) return 0;
+        const uint64_t row_bytes = blocks * 34;
+        if (row_bytes != 0 && out_dim > UINT64_MAX / row_bytes) return 0;
+        const uint64_t weight_bytes = out_dim * row_bytes;
+        if (gate_offset > model_size ||
+            weight_bytes > model_size - gate_offset ||
+            up_offset > model_size ||
+            weight_bytes > model_size - up_offset) {
+            fprintf(stderr, "ds4: Metal batched fused Q8_0 gate/up SwiGLU range is outside the mapped model\n");
+            return 0;
+        }
+
+        uint64_t gate_inner = 0;
+        uint64_t up_inner = 0;
+        id<MTLBuffer> gate_wbuf =
+            ds4_gpu_wrap_model_range(model_map, model_size, gate_offset, weight_bytes, &gate_inner);
+        id<MTLBuffer> up_wbuf =
+            ds4_gpu_wrap_model_range(model_map, model_size, up_offset, weight_bytes, &up_inner);
+        if (!gate_wbuf || !up_wbuf) return 0;
+
+        const bool bc_out = (out_dim % 64u) != 0 || (n_tok % 32u) != 0;
+        id<MTLComputePipelineState> pipeline = ds4_gpu_get_mul_mm_pipeline(
+            "kernel_mul_mm_q8_0_f32_pair_swiglu", false, bc_out);
+        if (!pipeline) return 0;
+
+        ds4_gpu_mul_mm_args args =
+            ds4_gpu_make_mm_args(in_dim, out_dim, n_tok, row_bytes);
+
+        int owned = 0;
+        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+        if (!cb) return 0;
+        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        [enc setComputePipelineState:pipeline];
+        [enc setBytes:&args length:sizeof(args) atIndex:0];
+        [enc setBuffer:gate_wbuf offset:(NSUInteger)gate_inner atIndex:1];
+        [enc setBuffer:up_wbuf offset:(NSUInteger)up_inner atIndex:2];
+        [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:3];
+        [enc setBuffer:midbuf offset:ds4_gpu_tensor_offset(mid) atIndex:4];
+        [enc setThreadgroupMemoryLength:4u * 64u * 32u * sizeof(uint16_t)
+                                atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake(((NSUInteger)n_tok + 31u) / 32u,
+                                              ((NSUInteger)out_dim + 63u) / 64u,
+                                              1)
+             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        ds4_gpu_end_compute_encoder(cb, enc);
+
+        if (!ds4_gpu_finish_command_buffer(cb, owned,
+                                           "Laguna batched fused Q8_0 gate/up SwiGLU")) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 int ds4_gpu_shared_gate_up_swiglu_q8_0_model_view_tensor(
         ds4_gpu_tensor       *gate,
         ds4_gpu_tensor       *up,

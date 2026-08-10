@@ -975,6 +975,20 @@ int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
         const ds4_gpu_tensor *x,
         float                   clamp);
 
+/* Opt-in batched prefill sibling of the fused dense Q8 gate/up+SwiGLU: one
+ * tiled pass over all rows, emitting only the SwiGLU mid. */
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available(void);
+int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+        ds4_gpu_tensor       *mid,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                gate_offset,
+        uint64_t                up_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t                n_tok);
+
 int ds4_gpu_shared_gate_up_swiglu_q8_0_model_view_tensor(
         ds4_gpu_tensor       *gate,
         ds4_gpu_tensor       *up,
