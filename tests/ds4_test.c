@@ -9947,6 +9947,40 @@ static void test_laguna_moe_abi_contract(void) {
         TEST_ASSERT(strstr(header, removed_public[i]) == NULL);
     }
 
+    /* The legacy decode-MPP, scalar-row, and half-output matmul names were
+     * uncalled declaration/implementation residue.  Keep both source sides
+     * free of those public names while pinning the neighboring Laguna/DFlash
+     * projection entry points that remain reachable. */
+    static const char *const removed_matmul_public[] = {
+        "ds4_gpu_matmul_q8_0_decode_mpp_tensor",
+        "ds4_gpu_matmul_q8_0_decode_mpp_model_view_tensor",
+        "ds4_gpu_matmul_q8_0_rows_scalar_tensor",
+        "ds4_gpu_matmul_quant_decode_mpp_model_view_tensor",
+        "ds4_gpu_matmul_quant_rows_scalar_tensor",
+        "ds4_gpu_matmul_q8_0_f16_out_tensor",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_matmul_public) / sizeof(removed_matmul_public[0]); i++) {
+        TEST_ASSERT(strstr(header, removed_matmul_public[i]) == NULL);
+        TEST_ASSERT(strstr(host, removed_matmul_public[i]) == NULL);
+    }
+
+    static const char *const retained_matmul_public[] = {
+        "int ds4_gpu_matmul_q8_0_tensor(",
+        "int ds4_gpu_matmul_q8_0_dflash_tensor(",
+        "int ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(",
+        "int ds4_gpu_matmul_quant_tensor(",
+        "int ds4_gpu_matmul_q6_K_tensor(",
+        "int ds4_gpu_matmul_q8_0_pair_tensor(",
+        "int ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(",
+        "int ds4_gpu_matmul_f32_decode_rows_exact_tensor(",
+    };
+    for (size_t i = 0;
+         i < sizeof(retained_matmul_public) / sizeof(retained_matmul_public[0]); i++) {
+        TEST_ASSERT(strstr(header, retained_matmul_public[i]) != NULL);
+        TEST_ASSERT(strstr(host, retained_matmul_public[i]) != NULL);
+    }
+
     /* The ordinary serial command batch, pending-buffer evidence, diagnostic
      * getter, and active shared FFN kernels are still part of the supported
      * Metal surface after the dead overlap lifecycles are gone. */
