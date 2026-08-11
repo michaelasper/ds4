@@ -317,8 +317,10 @@ that are not part of the current lgn2 interface.
 
 ## Attribution and license
 
-LagoonNebula is released under the [MIT License](LICENSE). It exists thanks to
-the [llama.cpp](https://github.com/ggml-org/llama.cpp) and
+LagoonNebula is a DS4-derived project released under the [MIT License](LICENSE);
+the retained `ds4.c` copyright notice acknowledges that origin while the
+supported public product surface is LagoonNebula/lgn2. It exists thanks to the
+[llama.cpp](https://github.com/ggml-org/llama.cpp) and
 [GGML](https://github.com/ggerganov/ggml) projects. The runtime and tools build
 on that ecosystem's code, kernels, quantization formats, GGUF conventions, and
 engineering; retained upstream notices and license terms must remain with any
