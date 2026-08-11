@@ -43547,6 +43547,38 @@ static bool ds4_session_eval_argmax_uses_laguna_path(const ds4_session *s) {
     return ds4_session_is_laguna(s);
 }
 
+#ifdef DS4_TEST_HOOKS
+typedef int (*ds4_test_argmax_eval_fn)(
+        ds4_session *s, int token, char *err, size_t errlen);
+static ds4_test_argmax_eval_fn g_ds4_test_argmax_eval_fn;
+static uint32_t g_ds4_test_argmax_laguna_eval_calls;
+#ifndef DS4_NO_GPU
+static uint32_t g_ds4_test_argmax_raw_eval_calls;
+#endif
+#endif
+
+/* Keep the public argmax boundary intact while letting model-independent
+ * tests substitute only the selected session evaluator.  The production path
+ * remains a direct call to ds4_session_eval(). */
+static int ds4_session_eval_argmax_dispatch_eval(
+        ds4_session *s,
+        int           token,
+        char         *err,
+        size_t        errlen,
+        bool          laguna_path) {
+#ifdef DS4_TEST_HOOKS
+    if (laguna_path) {
+        g_ds4_test_argmax_laguna_eval_calls++;
+        if (g_ds4_test_argmax_eval_fn) {
+            return g_ds4_test_argmax_eval_fn(s, token, err, errlen);
+        }
+    }
+#else
+    (void)laguna_path;
+#endif
+    return ds4_session_eval(s, token, err, errlen);
+}
+
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
@@ -43554,9 +43586,10 @@ int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen)
             s->engine, "session argmax", err, errlen)) return -1;
 #endif
     ds4_session_note_logits_dirty(s);
-    if (ds4_session_is_cpu(s) ||
-        ds4_session_eval_argmax_uses_laguna_path(s)) {
-        if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
+    const bool laguna_path = ds4_session_eval_argmax_uses_laguna_path(s);
+    if (ds4_session_is_cpu(s) || laguna_path) {
+        if (ds4_session_eval_argmax_dispatch_eval(
+                s, token, err, errlen, laguna_path) != 0) return -1;
         return ds4_session_argmax(s);
     }
 #ifdef DS4_NO_GPU
@@ -43564,6 +43597,9 @@ int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen)
     snprintf(err, errlen, "GPU support is not compiled in");
     return -1;
 #else
+#ifdef DS4_TEST_HOOKS
+    g_ds4_test_argmax_raw_eval_calls++;
+#endif
     ds4_engine *e = s->engine;
     int top = -1;
     const uint32_t pos = (uint32_t)s->checkpoint.len;
@@ -48394,6 +48430,24 @@ static int ds4_sessions_eval_batch_metal(
     return 0;
 }
 
+#ifdef DS4_TEST_HOOKS
+static bool g_ds4_test_raw_graph_access_forbidden;
+static uint32_t g_ds4_test_raw_graph_access_count;
+
+/* All raw-graph admission reads pass through this seam.  The test can make a
+ * Laguna admission fail closed and count any attempted access; production
+ * keeps the same pointer operation as a private, zero-cost helper. */
+static ds4_gpu_graph *ds4_session_batch_admission_graph(ds4_session *s) {
+    g_ds4_test_raw_graph_access_count++;
+    if (g_ds4_test_raw_graph_access_forbidden) return NULL;
+    return s ? &s->graph : NULL;
+}
+#else
+static ds4_gpu_graph *ds4_session_batch_admission_graph(ds4_session *s) {
+    return s ? &s->graph : NULL;
+}
+#endif
+
 static bool ds4_sessions_eval_batch_with_prefill_metal_supported(
         ds4_decode_item *items,
         int count,
@@ -48408,7 +48462,6 @@ static bool ds4_sessions_eval_batch_with_prefill_metal_supported(
         e->support_kind != DS4_SUPPORT_NONE ||
         ds4_session_is_cpu(prefill_session) ||
         ds4_session_is_laguna(prefill_session) ||
-        prefill_session->graph.ssd_streaming ||
         ds4_session_cancelled(prefill_session) ||
         getenv("DS4_METAL_GRAPH_DUMP_PREFIX") != NULL ||
         getenv("DS4_METAL_GRAPH_PREFILL_SPLIT_PROFILE") != NULL ||
@@ -48416,9 +48469,11 @@ static bool ds4_sessions_eval_batch_with_prefill_metal_supported(
         return false;
     }
 
+    ds4_gpu_graph *g = ds4_session_batch_admission_graph(prefill_session);
+    if (!g || g->ssd_streaming) return false;
+
     const uint32_t start = (uint32_t)prefill_session->checkpoint.len;
     const uint32_t rows = (uint32_t)prefill_prompt->len - start;
-    ds4_gpu_graph *g = &prefill_session->graph;
     if (rows < metal_graph_resume_prefill_min_tokens() ||
         rows > g->prefill_cap || rows > g->raw_cap ||
         (start % g->prefill_cap) + rows > g->prefill_cap) {
@@ -48430,9 +48485,11 @@ static bool ds4_sessions_eval_batch_with_prefill_metal_supported(
         if (!s || s->engine != e || s == prefill_session ||
             ds4_session_is_cpu(s) ||
             !s->checkpoint_valid ||
-            s->graph.ssd_streaming || ds4_session_cancelled(s)) {
+            ds4_session_cancelled(s)) {
             return false;
         }
+        ds4_gpu_graph *sg = ds4_session_batch_admission_graph(s);
+        if (!sg || sg->ssd_streaming) return false;
     }
     return true;
 }
@@ -53312,39 +53369,84 @@ int ds4_session_prefill_cap(ds4_session *s) {
 
 #ifdef DS4_TEST_HOOKS
 #ifndef DS4_NO_GPU
+static int ds4_test_laguna_argmax_eval_stub(
+        ds4_session *s, int token, char *err, size_t errlen) {
+    if (!s || !s->logits || token != 23 || DS4_N_VOCAB <= 37u) {
+        if (err && errlen) snprintf(err, errlen, "invalid Laguna test eval");
+        return 1;
+    }
+    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) s->logits[i] = -2.0f;
+    s->logits[37] = 9.0f;
+    return 0;
+}
+
 /* Keep the session-routing checkpoint model-independent.  A zeroed fake
  * engine/session is enough because the family gate is compile-time Laguna;
  * the mixed-prefill predicate must short-circuit before it inspects the raw
- * graph, while argmax must select the Laguna evaluator. */
+ * graph, while the public argmax entry must select the Laguna evaluator. */
 bool ds4_test_laguna_session_routes(void) {
     ds4_test_laguna_shape_scope shape_scope;
     ds4_test_laguna_shape_scope_begin(&shape_scope);
+
+    const char *saved_swa_env = getenv("DS4_METAL_LAGUNA_SWA_GQA9");
+    char *saved_swa_value = NULL;
+    if (saved_swa_env) {
+        const size_t n = strlen(saved_swa_env) + 1u;
+        saved_swa_value = malloc(n);
+        if (saved_swa_value) memcpy(saved_swa_value, saved_swa_env, n);
+    }
+    bool env_ready = true;
+    if (!saved_swa_env || saved_swa_value) {
+        env_ready = setenv("DS4_METAL_LAGUNA_SWA_GQA9", "0", 1) == 0;
+    }
 
     ds4_engine engine;
     memset(&engine, 0, sizeof(engine));
     engine.backend = DS4_BACKEND_METAL;
     engine.support_kind = DS4_SUPPORT_NONE;
+    engine.metal_ready = true;
 
     ds4_session session;
     memset(&session, 0, sizeof(session));
     session.engine = &engine;
-    memset(&session.graph, 0xa5, sizeof(session.graph));
-    const ds4_gpu_graph graph_before = session.graph;
+    session.logits = calloc(DS4_N_VOCAB, sizeof(session.logits[0]));
 
     ds4_decode_item item = { .session = &session, .token = 0 };
     const ds4_tokens prompt = { .v = NULL, .len = 1, .cap = 0 };
     const bool laguna_session = ds4_session_is_laguna(&session);
-    const bool laguna_argmax =
-        ds4_session_eval_argmax_uses_laguna_path(&session);
+    g_ds4_test_argmax_eval_fn = ds4_test_laguna_argmax_eval_stub;
+    g_ds4_test_argmax_laguna_eval_calls = 0;
+    g_ds4_test_argmax_raw_eval_calls = 0;
+    g_ds4_test_raw_graph_access_forbidden = true;
+    g_ds4_test_raw_graph_access_count = 0;
     const bool mixed_rejected =
         !ds4_sessions_eval_batch_with_prefill_metal_supported(
             &item, 1, &session, &prompt);
-    const bool raw_graph_untouched =
-        memcmp(&session.graph, &graph_before, sizeof(session.graph)) == 0;
+    char err[128] = {0};
+    const int argmax = ds4_session_eval_argmax(
+        &session, 23, err, sizeof(err));
+    const bool route_ok =
+        env_ready && laguna_session && session.logits && mixed_rejected &&
+        argmax == 37 &&
+        g_ds4_test_argmax_laguna_eval_calls == 1u &&
+        g_ds4_test_argmax_raw_eval_calls == 0u &&
+        g_ds4_test_raw_graph_access_count == 0u && err[0] == '\0';
+
+    g_ds4_test_argmax_eval_fn = NULL;
+    g_ds4_test_argmax_laguna_eval_calls = 0;
+    g_ds4_test_argmax_raw_eval_calls = 0;
+    g_ds4_test_raw_graph_access_forbidden = false;
+    g_ds4_test_raw_graph_access_count = 0;
+    free(session.logits);
+    if (saved_swa_value) {
+        (void)setenv("DS4_METAL_LAGUNA_SWA_GQA9", saved_swa_value, 1);
+    } else if (!saved_swa_env) {
+        (void)unsetenv("DS4_METAL_LAGUNA_SWA_GQA9");
+    }
+    free(saved_swa_value);
 
     ds4_test_laguna_shape_scope_end(&shape_scope);
-    return laguna_session && laguna_argmax && mixed_rejected &&
-           raw_graph_untouched;
+    return route_ok;
 }
 
 /* Exercise both sides of the storage boundary.  The direct lgn_* leg proves
