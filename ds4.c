@@ -86,27 +86,8 @@ static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
 
 enum {
     DS4_MAX_LAYER            = 79,
-    DS4_MAX_EMBD             = 7168,
-    DS4_MAX_VOCAB            = 154880,
-    DS4_MAX_HEAD             = 128,
-    DS4_MAX_HEAD_KV          = 8,
-    DS4_MAX_HEAD_DIM         = 576,
-    DS4_MAX_VALUE_DIM        = 512,
-    DS4_MAX_ROT              = 128,
-    DS4_MAX_OUT_GROUP        = 16,
-    DS4_MAX_LORA_Q           = 2048,
-    DS4_MAX_LORA_O           = 1024,
     DS4_MAX_EXPERT           = 384,
     DS4_MAX_EXPERT_USED      = 10,
-    DS4_MAX_EXPERT_SHARED    = 1,
-    DS4_MAX_FF_EXP           = 3072,
-    DS4_MAX_HASH_LAYER       = 3,
-    DS4_MAX_SWA              = 512,
-    DS4_MAX_INDEXER_HEAD     = 64,
-    DS4_MAX_INDEXER_HEAD_DIM = 128,
-    DS4_MAX_INDEXER_TOP_K    = 2048,
-    DS4_MAX_HC               = 4,
-    DS4_MAX_HC_SINKHORN_ITER = 20,
 };
 
 static ds4_shape g_ds4_shape = {
@@ -121,28 +102,17 @@ static ds4_shape g_ds4_shape = {
     .n_head_dim = 128,
     .n_value_dim = 128,
     .n_rot = 64,
-    .n_out_group = 0,
-    .n_lora_q = 0,
-    .n_lora_o = 0,
     .n_expert = 256,
     .n_expert_used = 10,
     .n_expert_shared = 1,
     .n_ff_exp = 1024,
     .n_ff_shared = 1024,
     .n_ff_dense = 12288,
-    .n_hash_layer = 0,
     .n_swa = 512,
-    .n_indexer_head = 0,
-    .n_indexer_head_dim = 0,
-    .n_indexer_top_k = 0,
-    .n_hc = 0,
-    .n_hc_sinkhorn_iter = 0,
     .n_leading_dense = 1,
     .n_rot_swa = 128,
     .rms_eps = 1.0e-6f,
-    .hc_eps = 0.0f,
     .expert_weight_scale = 2.5f,
-    .swiglu_clamp_exp = 0.0f,
     .rope_freq_base = 500000.0f,
     .rope_scale_factor = 32.0f,
     .rope_yarn_beta_fast = 32.0f,
@@ -164,39 +134,23 @@ static ds4_shape g_ds4_shape = {
 #define DS4_N_HEAD_DIM                (g_ds4_shape.n_head_dim)
 #define DS4_N_VALUE_DIM               (g_ds4_shape.n_value_dim)
 #define DS4_N_ROT                     (g_ds4_shape.n_rot)
-#define DS4_N_OUT_GROUP               (g_ds4_shape.n_out_group)
-#define DS4_N_LORA_Q                  (g_ds4_shape.n_lora_q)
-#define DS4_N_LORA_O                  (g_ds4_shape.n_lora_o)
 #define DS4_N_EXPERT                  (g_ds4_shape.n_expert)
 #define DS4_N_EXPERT_USED             (g_ds4_shape.n_expert_used)
 #define DS4_N_EXPERT_SHARED           (g_ds4_shape.n_expert_shared)
 #define DS4_N_FF_EXP                  (g_ds4_shape.n_ff_exp)
 #define DS4_N_FF_SHARED               (g_ds4_shape.n_ff_shared)
 #define DS4_N_FF_DENSE                (g_ds4_shape.n_ff_dense)
-#define DS4_N_HASH_LAYER              (g_ds4_shape.n_hash_layer)
 #define DS4_N_SWA                     (g_ds4_shape.n_swa)
-#define DS4_N_INDEXER_HEAD            (g_ds4_shape.n_indexer_head)
-#define DS4_N_INDEXER_HEAD_DIM        (g_ds4_shape.n_indexer_head_dim)
-#define DS4_N_INDEXER_TOP_K           (g_ds4_shape.n_indexer_top_k)
-#define DS4_N_HC                      (g_ds4_shape.n_hc)
-#define DS4_N_HC_SINKHORN_ITER        (g_ds4_shape.n_hc_sinkhorn_iter)
-#define DS4_N_NEXTN_PREDICT           (g_ds4_shape.n_nextn_predict)
 #define DS4_N_LEADING_DENSE           (g_ds4_shape.n_leading_dense)
-#define DS4_N_KV_LORA                 (g_ds4_shape.n_kv_lora)
-#define DS4_N_KEY_MLA                 (g_ds4_shape.n_key_mla)
-#define DS4_N_VALUE_MLA               (g_ds4_shape.n_value_mla)
 #define DS4_N_ROT_SWA                 (g_ds4_shape.n_rot_swa)
 #define DS4_RMS_EPS                   (g_ds4_shape.rms_eps)
-#define DS4_HC_EPS                    (g_ds4_shape.hc_eps)
 #define DS4_EXPERT_WEIGHT_SCALE       (g_ds4_shape.expert_weight_scale)
-#define DS4_SWIGLU_CLAMP_EXP          (g_ds4_shape.swiglu_clamp_exp)
 #define DS4_ROPE_FREQ_BASE            (g_ds4_shape.rope_freq_base)
 #define DS4_ROPE_SCALE_FACTOR         (g_ds4_shape.rope_scale_factor)
 #define DS4_ROPE_YARN_BETA_FAST       (g_ds4_shape.rope_yarn_beta_fast)
 #define DS4_ROPE_YARN_BETA_SLOW       (g_ds4_shape.rope_yarn_beta_slow)
 #define DS4_ROPE_YARN_ATTN_FACTOR     (g_ds4_shape.rope_yarn_attn_factor)
 #define DS4_ROPE_FREQ_BASE_SWA        (g_ds4_shape.rope_freq_base_swa)
-#define DS4_COMPRESS_ROPE_FREQ_BASE   (g_ds4_shape.compress_rope_freq_base)
 #define DS4_CONTEXT_LENGTH            (g_ds4_shape.context_length)
 #define DS4_ROPE_ORIG_CTX             (g_ds4_shape.rope_orig_ctx)
 
