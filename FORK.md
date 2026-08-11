@@ -63,6 +63,12 @@ The refactor branch already:
 - fences Laguna session synchronization, argmax, and mixed-batch admission
   away from the legacy GLM/raw graphs, using the serial public fallback where
   the generic optimized prefill path does not own the Laguna graph;
+- deletes the unreachable standalone GLM/DSA graph, session, diagnostics, and
+  CLI reasoning-prefix orchestration while preserving the generic raw graph as
+  a separate, temporary deletion boundary; six GLM-named Metal router/MoE
+  helpers remain because Laguna decode, prefill, and DFlash verification still
+  call them, and the Q2/Q3 exactness fixture continues to cover that retained
+  kernel surface;
 - fixes the product name as **LagoonNebula** and the eventual repository name
   as **`lgn2`**, while deliberately postponing the mechanical identifier
   rename until unsupported implementation paths are gone;
@@ -70,10 +76,12 @@ The refactor branch already:
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.
 
-Low-level CUDA-oriented tensor-parallel/tier-aware graph helpers, SSD expert
-streaming, legacy model helpers, and broad shared-backend Metal code still
-remain internally. Graph scalarization is not complete. Their presence is
-transitional and must not be interpreted as supported behavior.
+The separate generic raw graph, low-level CUDA-oriented tensor-parallel and
+tier-aware helpers, SSD expert streaming, legacy model helpers, and broad
+shared-backend Metal code still remain internally. Graph scalarization is not
+complete. Their presence is transitional and must not be interpreted as
+supported behavior. A `glm_` name on one of the six retained router/MoE Metal
+helpers describes inherited implementation naming, not GLM product support.
 
 ## Staged deletion and extraction order
 
