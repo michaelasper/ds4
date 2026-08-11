@@ -266,10 +266,9 @@ static void test_weight_table_contract(void) {
           "legacy 79-layer model capacity stays absent");
     CHECK(strstr(engine, "DS4_MAX_LAYER            = 48") != NULL,
           "engine layer capacity matches Laguna");
-    CHECK(strstr(engine, "DS4_MAX_EXPERT           = 256") != NULL,
-          "engine expert capacity matches Laguna");
-    CHECK(strstr(engine, "DS4_MAX_EXPERT_USED      = 10") != NULL,
-          "selected-expert capacity remains ten");
+    CHECK(strstr(engine, "DS4_MAX_EXPERT") == NULL &&
+              strstr(engine, "DS4_MAX_EXPERT_USED") == NULL,
+          "orphaned engine expert capacity constants stay absent");
     CHECK(strstr(engine, "DS4_MAX_LAYER            = 79") == NULL &&
               strstr(engine, "DS4_MAX_EXPERT           = 384") == NULL,
           "legacy engine capacities stay absent");
