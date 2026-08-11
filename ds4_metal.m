@@ -686,6 +686,7 @@ typedef enum {
 } ds4_gpu_test_init_failpoint;
 
 static ds4_gpu_test_init_failpoint g_test_init_failpoint;
+static int g_test_synchronize_fail_once;
 
 static int ds4_gpu_test_init_should_fail(
         ds4_gpu_test_init_failpoint failpoint) {
@@ -694,6 +695,12 @@ static int ds4_gpu_test_init_should_fail(
      * never influenced by the injected failure. */
     g_test_init_failpoint = DS4_GPU_TEST_INIT_FAIL_NONE;
     return 1;
+}
+
+static int ds4_gpu_test_synchronize_result(int result) {
+    if (!g_test_synchronize_fail_once) return result;
+    g_test_synchronize_fail_once = 0;
+    return 0;
 }
 #endif
 static int g_quality_mode;
@@ -12029,18 +12036,40 @@ static int ds4_gpu_flash_attn_stage_profile_boundary(
 
 int ds4_gpu_synchronize(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
-    if (g_batch_cb) return ds4_gpu_end_commands();
+    if (g_batch_cb) {
+        const int result = ds4_gpu_end_commands();
+#ifdef DS4_TEST_HOOKS
+        return ds4_gpu_test_synchronize_result(result);
+#else
+        return result;
+#endif
+    }
     ds4_gpu_parallel_ffn_reset_state(YES);
     if ([g_pending_cbs count] != 0) {
         int ok = ds4_gpu_wait_pending_command_buffers("synchronize");
         [g_transient_buffers removeAllObjects];
         ds4_gpu_model_buffer_cache_maybe_evict("synchronize");
+#ifdef DS4_TEST_HOOKS
+        return ds4_gpu_test_synchronize_result(ok);
+#else
         return ok;
+#endif
     }
 
     id<MTLCommandBuffer> cb = ds4_gpu_new_command_buffer();
-    if (!cb) return 0;
-    return ds4_gpu_finish_command_buffer(cb, 1, "synchronize");
+    if (!cb) {
+#ifdef DS4_TEST_HOOKS
+        return ds4_gpu_test_synchronize_result(0);
+#else
+        return 0;
+#endif
+    }
+    const int result = ds4_gpu_finish_command_buffer(cb, 1, "synchronize");
+#ifdef DS4_TEST_HOOKS
+    return ds4_gpu_test_synchronize_result(result);
+#else
+    return result;
+#endif
 }
 
 void ds4_gpu_cleanup(void) {
@@ -12515,6 +12544,7 @@ void ds4_gpu_cleanup(void) {
         g_laguna_staged_swa_mode = 0;
         g_laguna_swa_selectors_snapshot_valid = 0;
 #ifdef DS4_TEST_HOOKS
+        g_test_synchronize_fail_once = 0;
         g_laguna_test_route_hooks = 0;
         g_laguna_test_direct_kv_count = 0;
         g_laguna_test_wrap_kv_count = 0;
@@ -13639,7 +13669,20 @@ static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_owned(
 }
 
 #ifdef DS4_TEST_HOOKS
-static int ds4_gpu_test_cleanup_state_is_clean(void) {
+void ds4_gpu_test_inject_synchronize_failure(void) {
+    g_test_synchronize_fail_once = 1;
+}
+
+int ds4_gpu_test_tensor_tracking_state(uint64_t *live_handles,
+                                       uint64_t *live_bytes) {
+    pthread_mutex_lock(&g_tensor_mu);
+    if (live_handles) *live_handles = (uint64_t)g_tensor_live_count;
+    if (live_bytes) *live_bytes = g_tensor_alloc_live_bytes;
+    pthread_mutex_unlock(&g_tensor_mu);
+    return 1;
+}
+
+int ds4_gpu_test_cleanup_state_is_clean(void) {
     pthread_mutex_lock(&g_tensor_mu);
     const int tensors_clean =
         g_tensor_live_slots == NULL && g_tensor_live_cap == 0 &&
@@ -13691,6 +13734,7 @@ static int ds4_gpu_test_cleanup_state_is_clean(void) {
            g_laguna_rope_atlas_plan_mode == -2 &&
            g_laguna_rope_atlas_trace_mode == -1 &&
            g_test_init_failpoint == DS4_GPU_TEST_INIT_FAIL_NONE &&
+           g_test_synchronize_fail_once == 0 &&
            tensors_clean;
 }
 

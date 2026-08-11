@@ -36277,6 +36277,8 @@ typedef struct {
     bool aliases_cleared_before_unmap;
     bool dflash_shadow_unmapped_first;
     bool model_maps_unmapped;
+    bool workspace_tracking_clean_at_release;
+    bool gpu_drain_reported_failure;
 } ds4_test_engine_close_trace;
 
 static ds4_test_engine_close_trace *g_ds4_test_engine_close_trace;
@@ -36303,6 +36305,17 @@ static void ds4_engine_close_note(ds4_engine *e,
             trace->maps_live_through_gpu &&
             e->model.map != NULL && e->mtp_model.map != NULL &&
             e->dflash_model.map != NULL && e->dflash_f16_map != NULL;
+        if (phase == DS4_ENGINE_CLOSE_SHARED_WORKSPACE_RELEASED) {
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+            uint64_t live_handles = UINT64_MAX;
+            uint64_t live_bytes = UINT64_MAX;
+            if (ds4_gpu_test_tensor_tracking_state(&live_handles,
+                                                   &live_bytes)) {
+                trace->workspace_tracking_clean_at_release =
+                    live_handles == 0 && live_bytes == 0;
+            }
+#endif
+        }
     } else if (phase == DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED) {
         trace->aliases_cleared_before_unmap =
             e->model.map != NULL && e->mtp_model.map != NULL &&
@@ -36326,8 +36339,21 @@ static void ds4_engine_close_note(ds4_engine *e,
             e->dflash_model.map == NULL;
     }
 }
+
+#if !defined(DS4_NO_GPU)
+static void ds4_engine_close_note_drain_result(ds4_engine *e, bool drained) {
+    ds4_test_engine_close_trace *trace = g_ds4_test_engine_close_trace;
+    if (!trace || trace->engine != e) return;
+    trace->gpu_drain_reported_failure = !drained;
+}
+#else
+#define ds4_engine_close_note_drain_result(engine, drained) \
+    ((void)(engine), (void)(drained))
+#endif
 #else
 #define ds4_engine_close_note(engine, phase) ((void)(engine))
+#define ds4_engine_close_note_drain_result(engine, drained) \
+    ((void)(engine), (void)(drained))
 #endif
 
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
@@ -59709,25 +59735,25 @@ void ds4_engine_close(ds4_engine *e) {
         /* metal_ready proves initialization, so this guard prevents the
          * synchronize API from initializing a backend during teardown. */
         gpu_drained = ds4_gpu_synchronize() != 0;
+        ds4_engine_close_note_drain_result(e, gpu_drained);
         if (!gpu_drained) {
             fprintf(stderr,
                     "ds4: warning: GPU drain failed during engine close; "
-                    "backend cleanup will perform the terminal wait\n");
+                    "the terminal wait completed and workspace cleanup "
+                    "will continue\n");
         }
+    } else {
+        ds4_engine_close_note_drain_result(e, true);
     }
 #endif
     ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_DRAINED);
 #ifndef DS4_NO_GPU
     if (e->shared_prefill_workspace_ready) {
-        if (e->metal_ready && gpu_drained) {
-            /* Tensor handles must be retired before ds4_gpu_cleanup resets
-             * the backend's live-handle tracking table. */
-            metal_graph_free_prefill_workspace(&e->shared_prefill_workspace);
-        } else {
-            fprintf(stderr,
-                    "ds4: warning: shared prefill workspace could not be "
-                    "retired before GPU cleanup\n");
-        }
+        /* ds4_gpu_synchronize is a terminal wait even when it reports a
+         * command-buffer error.  Retire tensor handles after that wait,
+         * while Metal tracking is still live; ds4_gpu_cleanup resets the
+         * tracker and cannot be the owner-release path. */
+        metal_graph_free_prefill_workspace(&e->shared_prefill_workspace);
         e->shared_prefill_workspace_ready = false;
     }
 #endif
@@ -60352,6 +60378,117 @@ bool ds4_test_engine_close_order(void) {
     }
     return ok;
 }
+
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+static bool ds4_test_engine_close_workspace_case(bool inject_failure) {
+    const long page_long = sysconf(_SC_PAGESIZE);
+    if (page_long <= 0) return false;
+    const size_t page = (size_t)page_long;
+#if defined(MAP_ANONYMOUS)
+    const int anonymous = MAP_ANONYMOUS;
+#else
+    const int anonymous = MAP_ANON;
+#endif
+
+    ds4_gpu_cleanup();
+    if (!ds4_gpu_test_cleanup_state_is_clean() || !ds4_gpu_init()) {
+        ds4_gpu_cleanup();
+        return false;
+    }
+
+    void *maps[4] = {0};
+    ds4_engine *e = xcalloc(1, sizeof(*e));
+    e->model.fd = -1;
+    e->mtp_model.fd = -1;
+    e->dflash_model.fd = -1;
+    e->backend = DS4_BACKEND_METAL;
+    e->metal_ready = true;
+    e->share_session_prefill_workspace = true;
+
+    bool setup_ok = true;
+    for (size_t i = 0; i < sizeof(maps) / sizeof(maps[0]); i++) {
+        maps[i] = mmap(NULL, page, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | anonymous, -1, 0);
+        if (maps[i] == MAP_FAILED) {
+            maps[i] = NULL;
+            setup_ok = false;
+            break;
+        }
+        memset(maps[i], 0x5a, page);
+    }
+    e->model.map = maps[0];
+    e->model.size = page;
+    e->mtp_model.map = maps[1];
+    e->mtp_model.size = page;
+    e->dflash_model.map = maps[2];
+    e->dflash_model.size = page;
+    e->dflash_f16_map = maps[3];
+    e->dflash_f16_map_size = page;
+
+    ds4_gpu_tensor *src = ds4_gpu_tensor_alloc(64);
+    ds4_gpu_tensor *dst = ds4_gpu_tensor_alloc(64);
+    e->shared_prefill_workspace.batch_cur_hc_by_tier[0] = src;
+    e->shared_prefill_workspace.batch_next_hc_by_tier[0] = dst;
+    e->shared_prefill_workspace.owns_prefill_workspace = true;
+    e->shared_prefill_workspace_ready = true;
+
+    setup_ok = setup_ok && maps[0] != NULL && maps[1] != NULL &&
+               maps[2] != NULL && maps[3] != NULL &&
+               ds4_gpu_set_model_map_range(maps[0], (uint64_t)page,
+                                           0, (uint64_t)page,
+                                           (uint64_t)page) != 0 &&
+               src != NULL && dst != NULL &&
+               ds4_gpu_begin_commands() != 0 &&
+               ds4_gpu_tensor_copy(dst, 0, src, 0, 64) != 0;
+
+    uint64_t live_handles = 0;
+    uint64_t live_bytes = 0;
+    setup_ok = setup_ok &&
+               ds4_gpu_test_tensor_tracking_state(&live_handles,
+                                                  &live_bytes) != 0 &&
+               live_handles >= 2 && live_bytes >= 128;
+
+    ds4_test_engine_close_trace trace = {
+        .engine = e,
+        .maps_live_through_gpu = true,
+    };
+    ds4_test_engine_close_trace *previous = g_ds4_test_engine_close_trace;
+    g_ds4_test_engine_close_trace = &trace;
+    if (setup_ok && inject_failure) {
+        ds4_gpu_test_inject_synchronize_failure();
+    }
+    ds4_engine_close(e);
+    g_ds4_test_engine_close_trace = previous;
+
+    /* ds4_engine_close owns and unmaps all four model mappings above; do not
+     * touch the stale local addresses after the engine has been freed. */
+    ds4_gpu_cleanup();
+
+    const bool close_ok =
+        setup_ok &&
+        trace.gpu_drain_reported_failure == inject_failure &&
+        trace.workspace_tracking_clean_at_release &&
+        trace.maps_live_through_gpu && trace.model_maps_unmapped &&
+        ds4_gpu_test_cleanup_state_is_clean();
+    if (!close_ok) {
+        fprintf(stderr,
+                "ds4: engine close workspace test failed (inject=%d setup=%d "
+                "drain_failure=%d tracking=%d gpu_maps=%d model_maps=%d)\n",
+                inject_failure,
+                setup_ok,
+                trace.gpu_drain_reported_failure,
+                trace.workspace_tracking_clean_at_release,
+                trace.maps_live_through_gpu,
+                trace.model_maps_unmapped);
+    }
+    return close_ok;
+}
+
+bool ds4_test_engine_close_workspace_lifecycle(void) {
+    return ds4_test_engine_close_workspace_case(false) &&
+           ds4_test_engine_close_workspace_case(true);
+}
+#endif
 #endif
 
 int ds4_session_power(ds4_session *s) {

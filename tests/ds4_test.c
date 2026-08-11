@@ -14559,6 +14559,7 @@ static void test_engine_lifecycle(void) {
     TEST_ASSERT(ds4_test_engine_session_lifecycle());
     TEST_ASSERT(ds4_test_engine_close_order());
 #ifndef DS4_NO_GPU
+    TEST_ASSERT(ds4_test_engine_close_workspace_lifecycle());
     TEST_ASSERT(ds4_gpu_test_lifecycle_cleanup());
 #endif
 }

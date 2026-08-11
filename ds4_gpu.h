@@ -265,6 +265,14 @@ int ds4_gpu_parallel_ffn_test_state_is_clean(void);
 /* Exercise real Metal partial-init failure unwinds, successful retry, command
  * drain, workspace tracking, and mmap-backed view/cache cleanup. */
 int ds4_gpu_test_lifecycle_cleanup(void);
+/* Inject a one-shot synchronize result failure after the command boundary has
+ * waited for all submitted work.  This exercises engine-close cleanup after a
+ * reported drain failure without leaving GPU work in flight. */
+void ds4_gpu_test_inject_synchronize_failure(void);
+/* Diagnostics used by engine-close ownership tests. */
+int ds4_gpu_test_tensor_tracking_state(uint64_t *live_handles,
+                                       uint64_t *live_bytes);
+int ds4_gpu_test_cleanup_state_is_clean(void);
 #endif
 int ds4_gpu_parallel_ffn_start(
         ds4_gpu_tensor       *gate,
@@ -296,6 +304,8 @@ int ds4_gpu_tensor_read_after_selected_event(const ds4_gpu_tensor *tensor,
                                              const char *label);
 #endif
 int ds4_gpu_end_commands(void);
+/* Terminal boundary: a zero result reports command-buffer/backend failure,
+ * but submitted work has still been waited before returning. */
 int ds4_gpu_synchronize(void);
 
 int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size);
