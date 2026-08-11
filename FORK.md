@@ -152,8 +152,8 @@ deleted. The dormant generic matvec/sum6 family and its coupled Q4 expert
 table/address/cache lifecycle are deleted as well. The active `mul_mm_id`
 family, Laguna shared/exact Q2/Q3/Q4 routes, dense Q4/MXFP4 math, dequant
 helpers, and whole-model residency remain. A smaller set of shared
-FlashAttention, parallel-FFN, quantized-MoE, and source-override internals
-still remains for later low-level cleanup; no public engine, session,
+FlashAttention, quantized-MoE, and source-override internals remains for
+later low-level cleanup; no public engine, session,
 diagnostic, imatrix, or support-model route owns them. Their presence is
 transitional and must not be interpreted as supported behavior. A `glm_` name
 on one of the retained router/MoE Metal helpers describes inherited

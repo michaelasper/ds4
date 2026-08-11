@@ -51,9 +51,7 @@ static id<MTLCommandQueue> g_queue;
 static id<MTLLibrary> g_library;
 static id<MTLCommandBuffer> g_batch_cb;
 static id<MTLComputeCommandEncoder> g_batch_enc;
-static BOOL g_batch_encoder_concurrent;
 static BOOL g_batch_has_work;
-static void ds4_gpu_parallel_ffn_reset_state(BOOL close_encoder);
 /* Monotonic identity for the caller-owned command-batch session.  Flushes
  * may replace the underlying command buffer, but do not create a new public
  * batch; only a successful begin advances this epoch. */
@@ -83,8 +81,6 @@ static NSMutableArray<NSNumber *> *g_pending_glm_grouped_moe_evidence;
 #endif
 static ds4_gpu_laguna_atlas_cb_evidence g_batch_laguna_atlas_evidence;
 static ds4_gpu_laguna_atlas_cb_evidence g_owned_laguna_atlas_evidence;
-static id<MTLSharedEvent> g_selected_readback_event;
-static uint64_t g_selected_readback_event_value;
 static id<MTLComputePipelineState> g_get_rows_f32_pipeline;
 static id<MTLComputePipelineState> g_get_rows_i32_pipeline;
 static id<MTLComputePipelineState> g_get_rows_q8_0_pipeline;
@@ -679,9 +675,7 @@ static id<MTLComputeCommandEncoder> ds4_gpu_compute_encoder(id<MTLCommandBuffer>
     if (g_batch_cb && cb == g_batch_cb) {
         g_batch_has_work = YES;
         if (!g_batch_enc) {
-            g_batch_enc = g_batch_encoder_concurrent
-                ? [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]
-                : [cb computeCommandEncoder];
+            g_batch_enc = [cb computeCommandEncoder];
         }
         return g_batch_enc;
     }
@@ -874,8 +868,8 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     [g_pending_glm_grouped_moe_evidence removeAllObjects];
 #endif
 #ifdef DS4_TEST_HOOKS
-    /* These command buffers were already committed by flush/submit (or by a
-     * shared-event path).  Count them only after their completion wait, and
+    /* These command buffers were already committed by flush/submit.  Count
+     * them only after their completion wait, and
      * drop the evidence on an error or timeout. */
     if (ok) {
         g_laguna_router_fused_completed_dispatches +=
@@ -5621,8 +5615,6 @@ int ds4_gpu_pack_slot_rows_f32_tensor(
 
 int ds4_gpu_begin_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
-    /* A failed concurrent FFN must never affect the next command batch. */
-    ds4_gpu_parallel_ffn_reset_state(YES);
     if (g_batch_cb) return 0;
     g_batch_cb = ds4_gpu_new_command_buffer();
     g_batch_has_work = NO;
@@ -5635,7 +5627,6 @@ int ds4_gpu_begin_commands(void) {
 
 int ds4_gpu_flush_encoder(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
-    ds4_gpu_parallel_ffn_reset_state(YES);
     if (!g_batch_cb) return 0;
     ds4_gpu_close_batch_encoder();
     return 1;
@@ -5643,7 +5634,6 @@ int ds4_gpu_flush_encoder(void) {
 
 int ds4_gpu_flush_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
-    ds4_gpu_parallel_ffn_reset_state(YES);
     if (!g_batch_cb) return 0;
 
     ds4_gpu_close_batch_encoder();
@@ -5672,10 +5662,6 @@ int ds4_gpu_flush_commands(void) {
 
 int ds4_gpu_submit_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
-    /* A parallel FFN may have left a concurrent encoder or staged Q8 work
-     * armed.  Close it before this command buffer becomes terminal so the
-     * next batch cannot inherit partially encoded state. */
-    ds4_gpu_parallel_ffn_reset_state(YES);
     if (!g_batch_cb) return 0;
 
     ds4_gpu_close_batch_encoder();
@@ -5702,9 +5688,6 @@ int ds4_gpu_wait_submitted_commands(void) {
 
 int ds4_gpu_discard_commands(void) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
-    /* Discard is also a terminal boundary: no parallel FFN encoder or
-     * staging flags may survive it, even when the batch is empty. */
-    ds4_gpu_parallel_ffn_reset_state(YES);
     if (!g_batch_cb) return 0;
     ds4_gpu_close_batch_encoder();
     g_batch_cb = nil;
@@ -5734,261 +5717,6 @@ int ds4_gpu_commands_active(void) {
     return g_batch_cb != nil;
 }
 
-/* Exact M5 full-FFN overlap inside one concurrent compute encoder.  Shared
- * gate/up and routed IQ2 pair-SwiGLU launch together; explicit level barriers
- * precede the routed Q2 and shared Q8 down consumers. */
-static id<MTLComputePipelineState> g_parallel_q8_pipeline;
-static id<MTLBuffer> g_parallel_q8_weight;
-static id<MTLBuffer> g_parallel_q8_x;
-static id<MTLBuffer> g_parallel_q8_out;
-static NSUInteger g_parallel_q8_weight_offset;
-static NSUInteger g_parallel_q8_x_offset;
-static NSUInteger g_parallel_q8_out_offset;
-static ds4_gpu_q8_0_matvec_args g_parallel_q8_args;
-static id<MTLComputePipelineState> g_parallel_gate_up_pipeline;
-static id<MTLBuffer> g_parallel_gate_weight;
-static id<MTLBuffer> g_parallel_up_weight;
-static id<MTLBuffer> g_parallel_gate_x;
-static id<MTLBuffer> g_parallel_gate_out;
-static id<MTLBuffer> g_parallel_up_out;
-static id<MTLBuffer> g_parallel_mid_out;
-static NSUInteger g_parallel_gate_weight_offset;
-static NSUInteger g_parallel_up_weight_offset;
-static NSUInteger g_parallel_gate_x_offset;
-static NSUInteger g_parallel_gate_out_offset;
-static NSUInteger g_parallel_up_out_offset;
-static NSUInteger g_parallel_mid_out_offset;
-static ds4_gpu_q8_0_matvec_args g_parallel_gate_up_args;
-static float g_parallel_gate_up_clamp;
-static NSUInteger g_parallel_gate_up_nsg;
-static NSUInteger g_parallel_gate_up_nr0;
-static NSUInteger g_parallel_gate_up_smem;
-static int g_parallel_ffn_mode; /* 2: gate/up + down */
-static int g_parallel_ffn_stage;
-static BOOL g_parallel_q8_pending;
-static BOOL g_parallel_q8_encoded;
-
-/* Reset is deliberately idempotent. Closing the concurrent encoder preserves
- * work already encoded, while clearing every admission/reference field keeps
- * a failed FFN path from turning later ordinary dispatches concurrent. */
-static void ds4_gpu_parallel_ffn_reset_state(BOOL close_encoder) {
-    if (close_encoder &&
-        (g_batch_encoder_concurrent || g_parallel_q8_pending ||
-         g_parallel_q8_encoded || g_parallel_ffn_mode != 0 ||
-         g_parallel_ffn_stage != 0)) {
-        ds4_gpu_close_batch_encoder();
-    }
-
-    g_batch_encoder_concurrent = NO;
-    g_parallel_q8_pending = NO;
-    g_parallel_q8_encoded = NO;
-    g_parallel_ffn_mode = 0;
-    g_parallel_ffn_stage = 0;
-
-    g_parallel_q8_pipeline = nil;
-    g_parallel_q8_weight = nil;
-    g_parallel_q8_x = nil;
-    g_parallel_q8_out = nil;
-    g_parallel_q8_weight_offset = 0;
-    g_parallel_q8_x_offset = 0;
-    g_parallel_q8_out_offset = 0;
-    g_parallel_q8_args = (ds4_gpu_q8_0_matvec_args){0};
-
-    g_parallel_gate_up_pipeline = nil;
-    g_parallel_gate_weight = nil;
-    g_parallel_up_weight = nil;
-    g_parallel_gate_x = nil;
-    g_parallel_gate_out = nil;
-    g_parallel_up_out = nil;
-    g_parallel_mid_out = nil;
-    g_parallel_gate_weight_offset = 0;
-    g_parallel_up_weight_offset = 0;
-    g_parallel_gate_x_offset = 0;
-    g_parallel_gate_out_offset = 0;
-    g_parallel_up_out_offset = 0;
-    g_parallel_mid_out_offset = 0;
-    g_parallel_gate_up_args = (ds4_gpu_q8_0_matvec_args){0};
-    g_parallel_gate_up_clamp = 0.0f;
-    g_parallel_gate_up_nsg = 0;
-    g_parallel_gate_up_nr0 = 0;
-    g_parallel_gate_up_smem = 0;
-}
-
-#ifdef DS4_TEST_HOOKS
-int ds4_gpu_parallel_ffn_test_arm_state(void) {
-    if (!g_batch_cb) return 0;
-    /* Synthetic state only: terminal-boundary tests use this to prove that
-     * submit/discard invoke the production reset, rather than calling reset
-     * directly and making the assertion tautological. */
-    g_batch_encoder_concurrent = YES;
-    g_parallel_q8_pending = YES;
-    g_parallel_q8_encoded = YES;
-    g_parallel_ffn_mode = 2;
-    g_parallel_ffn_stage = 2;
-    return 1;
-}
-
-int ds4_gpu_parallel_ffn_test_state_is_clean(void) {
-    const ds4_gpu_q8_0_matvec_args zero_args = {0};
-    return !g_batch_encoder_concurrent &&
-           !g_parallel_q8_pending &&
-           !g_parallel_q8_encoded &&
-           g_parallel_ffn_mode == 0 &&
-           g_parallel_ffn_stage == 0 &&
-           !g_parallel_q8_pipeline &&
-           !g_parallel_q8_weight &&
-           !g_parallel_q8_x &&
-           !g_parallel_q8_out &&
-           g_parallel_q8_weight_offset == 0 &&
-           g_parallel_q8_x_offset == 0 &&
-           g_parallel_q8_out_offset == 0 &&
-           memcmp(&g_parallel_q8_args, &zero_args, sizeof(zero_args)) == 0 &&
-           !g_parallel_gate_up_pipeline &&
-           !g_parallel_gate_weight &&
-           !g_parallel_up_weight &&
-           !g_parallel_gate_x &&
-           !g_parallel_gate_out &&
-           !g_parallel_up_out &&
-           !g_parallel_mid_out &&
-           g_parallel_gate_weight_offset == 0 &&
-           g_parallel_up_weight_offset == 0 &&
-           g_parallel_gate_x_offset == 0 &&
-           g_parallel_gate_out_offset == 0 &&
-           g_parallel_up_out_offset == 0 &&
-           g_parallel_mid_out_offset == 0 &&
-           memcmp(&g_parallel_gate_up_args,
-                  &zero_args,
-                  sizeof(zero_args)) == 0 &&
-           g_parallel_gate_up_clamp == 0.0f &&
-           g_parallel_gate_up_nsg == 0 &&
-           g_parallel_gate_up_nr0 == 0 &&
-           g_parallel_gate_up_smem == 0;
-}
-#endif
-
-void ds4_gpu_parallel_ffn_abort(void) {
-    ds4_gpu_parallel_ffn_reset_state(YES);
-}
-
-int ds4_gpu_parallel_ffn_start(
-        ds4_gpu_tensor       *gate,
-        ds4_gpu_tensor       *up,
-        ds4_gpu_tensor       *mid,
-        ds4_gpu_tensor       *shared_out,
-        const void           *model_map,
-        uint64_t              model_size,
-        uint64_t              gate_offset,
-        uint64_t              up_offset,
-        uint64_t              down_offset,
-        uint32_t              model_dim,
-        uint32_t              shared_dim,
-        const ds4_gpu_tensor *x,
-        float                 clamp) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    if (!g_batch_cb || g_parallel_q8_pending || g_batch_encoder_concurrent ||
-        !gate || !up || !mid || !shared_out || !x || !model_map ||
-        model_dim == 0 || shared_dim == 0 ||
-        (model_dim & 31u) != 0 || (shared_dim & 31u) != 0 ||
-        !isfinite(clamp) || clamp < 0.0f) {
-        return 0;
-    }
-
-    id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
-    id<MTLBuffer> gatebuf = ds4_gpu_tensor_buffer(gate);
-    id<MTLBuffer> upbuf = ds4_gpu_tensor_buffer(up);
-    id<MTLBuffer> midbuf = ds4_gpu_tensor_buffer(mid);
-    id<MTLBuffer> outbuf = ds4_gpu_tensor_buffer(shared_out);
-    if (!xbuf || !gatebuf || !upbuf || !midbuf || !outbuf ||
-        ds4_gpu_tensor_bytes(x) < (uint64_t)model_dim * sizeof(float) ||
-        ds4_gpu_tensor_bytes(gate) < (uint64_t)shared_dim * sizeof(float) ||
-        ds4_gpu_tensor_bytes(up) < (uint64_t)shared_dim * sizeof(float) ||
-        ds4_gpu_tensor_bytes(mid) < (uint64_t)shared_dim * sizeof(float) ||
-        ds4_gpu_tensor_bytes(shared_out) < (uint64_t)model_dim * sizeof(float)) {
-        return 0;
-    }
-
-    const uint64_t gate_row_bytes = ((uint64_t)model_dim / 32u) * 34u;
-    const uint64_t gate_weight_bytes = (uint64_t)shared_dim * gate_row_bytes;
-    const uint64_t down_row_bytes = ((uint64_t)shared_dim / 32u) * 34u;
-    const uint64_t down_weight_bytes = (uint64_t)model_dim * down_row_bytes;
-    if (gate_offset > model_size || gate_weight_bytes > model_size - gate_offset ||
-        up_offset > model_size || gate_weight_bytes > model_size - up_offset ||
-        down_offset > model_size || down_weight_bytes > model_size - down_offset) {
-        return 0;
-    }
-
-    uint64_t gate_inner = 0, up_inner = 0, down_inner = 0;
-    id<MTLBuffer> gate_wbuf = ds4_gpu_wrap_model_range(
-        model_map, model_size, gate_offset, gate_weight_bytes, &gate_inner);
-    id<MTLBuffer> up_wbuf = ds4_gpu_wrap_model_range(
-        model_map, model_size, up_offset, gate_weight_bytes, &up_inner);
-    id<MTLBuffer> down_wbuf = ds4_gpu_wrap_model_range(
-        model_map, model_size, down_offset, down_weight_bytes, &down_inner);
-    if (!gate_wbuf || !up_wbuf || !down_wbuf) return 0;
-
-    ds4_gpu_mv_dispatch gate_dispatch = ds4_gpu_make_q8_0_mv_dispatch();
-    const char *gate_fn = "kernel_dsv4_shared_gate_up_swiglu_q8_0";
-    id<MTLComputePipelineState> gate_pipeline =
-        ds4_gpu_get_mul_mv_pipeline(gate_fn, gate_dispatch.nsg);
-    id<MTLComputePipelineState> down_pipeline =
-        ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_q8_0_f32", 4);
-    if (!gate_pipeline || !down_pipeline ||
-        down_pipeline.maxTotalThreadsPerThreadgroup < 128u) {
-        return 0;
-    }
-
-    ds4_gpu_close_batch_encoder();
-    g_batch_encoder_concurrent = YES;
-
-    g_parallel_gate_up_pipeline = gate_pipeline;
-    g_parallel_gate_weight = gate_wbuf;
-    g_parallel_up_weight = up_wbuf;
-    g_parallel_gate_x = xbuf;
-    g_parallel_gate_out = gatebuf;
-    g_parallel_up_out = upbuf;
-    g_parallel_mid_out = midbuf;
-    g_parallel_gate_weight_offset = (NSUInteger)gate_inner;
-    g_parallel_up_weight_offset = (NSUInteger)up_inner;
-    g_parallel_gate_x_offset = ds4_gpu_tensor_offset(x);
-    g_parallel_gate_out_offset = ds4_gpu_tensor_offset(gate);
-    g_parallel_up_out_offset = ds4_gpu_tensor_offset(up);
-    g_parallel_mid_out_offset = ds4_gpu_tensor_offset(mid);
-    g_parallel_gate_up_args =
-        ds4_gpu_make_q8_0_mv_args(model_dim, shared_dim);
-    g_parallel_gate_up_args.nr0 = gate_dispatch.nr0;
-    g_parallel_gate_up_clamp = clamp;
-    g_parallel_gate_up_nsg = gate_dispatch.nsg;
-    g_parallel_gate_up_nr0 = gate_dispatch.nr0;
-    g_parallel_gate_up_smem = gate_dispatch.smem;
-
-    g_parallel_q8_pipeline = down_pipeline;
-    g_parallel_q8_weight = down_wbuf;
-    g_parallel_q8_x = midbuf;
-    g_parallel_q8_out = outbuf;
-    g_parallel_q8_weight_offset = (NSUInteger)down_inner;
-    g_parallel_q8_x_offset = ds4_gpu_tensor_offset(mid);
-    g_parallel_q8_out_offset = ds4_gpu_tensor_offset(shared_out);
-    g_parallel_q8_args =
-        ds4_gpu_make_q8_0_mv_args(shared_dim, model_dim);
-    g_parallel_q8_args.nr0 = 2;
-
-    g_parallel_ffn_mode = 2;
-    g_parallel_ffn_stage = 0;
-    g_parallel_q8_pending = YES;
-    g_parallel_q8_encoded = NO;
-    return 1;
-}
-
-int ds4_gpu_parallel_ffn_finish(void) {
-    const int completed =
-        g_parallel_q8_pending && g_parallel_q8_encoded &&
-        g_parallel_ffn_stage == 2 && g_batch_encoder_concurrent;
-    /* Reset even on an incomplete join. This makes the error path just as
-     * safe and idempotent as an explicit abort. */
-    ds4_gpu_parallel_ffn_reset_state(YES);
-    return completed;
-}
-
 #ifdef DS4_TEST_HOOKS
 /* Diagnostics/tests only.  Read the existing pending-command array directly;
  * do not add hot-path bookkeeping merely to support this getter. */
@@ -5999,120 +5727,8 @@ uint32_t ds4_gpu_diagnostic_pending_command_buffer_count(void) {
 }
 #endif
 
-int ds4_gpu_signal_selected_readback_ready(uint64_t *event_value) {
-    if (!event_value) return 0;
-    *event_value = 0;
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    ds4_gpu_parallel_ffn_reset_state(YES);
-    if (!g_batch_cb) return 0;
-
-    if (@available(macOS 12.0, *)) {
-        if (!g_selected_readback_event) {
-            g_selected_readback_event = [g_device newSharedEvent];
-            if (!g_selected_readback_event) {
-                fprintf(stderr, "ds4: failed to create Metal shared event for selected-id overlap\n");
-                return 0;
-            }
-        }
-
-        ds4_gpu_close_batch_encoder();
-        const uint64_t value = ++g_selected_readback_event_value;
-        [g_batch_cb encodeSignalEvent:g_selected_readback_event value:value];
-        g_batch_has_work = YES;
-        *event_value = value;
-        return 1;
-    }
-
-    fprintf(stderr, "ds4: selected-id overlap requires MTLSharedEvent support\n");
-    return 0;
-}
-
-int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *label) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    ds4_gpu_parallel_ffn_reset_state(YES);
-    if (!g_batch_cb || event_value == 0) return 0;
-
-    if (@available(macOS 12.0, *)) {
-        if (!g_selected_readback_event) return 0;
-
-        ds4_gpu_close_batch_encoder();
-        id<MTLCommandBuffer> cb = g_batch_cb;
-        g_batch_cb = nil;
-        g_batch_has_work = NO;
-#ifdef DS4_TEST_HOOKS
-        g_laguna_router_fused_pending_dispatches +=
-            g_laguna_router_fused_batch_dispatches;
-        g_laguna_router_fused_batch_dispatches = 0;
-        ds4_gpu_laguna_test_decode_route_batch_committed();
-#endif
-        [cb commit];
-        ds4_gpu_laguna_atlas_register_pending(cb, &g_batch_laguna_atlas_evidence);
-        ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
-
-        const char *what = label ? label : "selected-id overlap";
-        const BOOL signaled =
-            [g_selected_readback_event waitUntilSignaledValue:event_value timeoutMS:60000];
-        if (!signaled) {
-            fprintf(stderr, "ds4: timeout waiting for Metal shared event in %s\n", what);
-            (void)ds4_gpu_wait_pending_command_buffers(what);
-            return 0;
-        }
-        if (cb.status == MTLCommandBufferStatusError) {
-            fprintf(stderr, "ds4: Metal %s failed: %s\n",
-                    what,
-                    [[cb.error localizedDescription] UTF8String]);
-            (void)ds4_gpu_wait_pending_command_buffers(what);
-            return 0;
-        }
-#ifdef DS4_TEST_HOOKS
-        /* The shared event wait above is the completion boundary for this
-         * command buffer.  Promote route evidence here; the pending-array
-         * cleanup below must not be the only place a successful event path
-         * becomes visible. */
-        ds4_gpu_laguna_test_decode_route_batch_completed(1);
-#endif
-
-        g_batch_cb = ds4_gpu_new_command_buffer();
-        g_batch_has_work = NO;
-        ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
-        if (!g_batch_cb) {
-            (void)ds4_gpu_wait_pending_command_buffers(what);
-            return 0;
-        }
-        return 1;
-    }
-
-    fprintf(stderr, "ds4: selected-id overlap requires MTLSharedEvent support\n");
-    return 0;
-}
-
-int ds4_gpu_wait_selected_readback_ready(uint64_t event_value, const char *label) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    if (event_value == 0) return 0;
-
-    if (@available(macOS 12.0, *)) {
-        if (!g_selected_readback_event) return 0;
-
-        const char *what = label ? label : "selected-id readback";
-        const BOOL signaled =
-            [g_selected_readback_event waitUntilSignaledValue:event_value timeoutMS:60000];
-        if (!signaled) {
-            fprintf(stderr, "ds4: timeout waiting for Metal shared event in %s\n", what);
-            return 0;
-        }
-        return 1;
-    }
-
-    fprintf(stderr, "ds4: selected-id overlap requires MTLSharedEvent support\n");
-    return 0;
-}
-
 int ds4_gpu_end_commands(void) {
-    if (!g_batch_cb) {
-        ds4_gpu_parallel_ffn_reset_state(YES);
-        return 0;
-    }
-    ds4_gpu_parallel_ffn_reset_state(YES);
+    if (!g_batch_cb) return 0;
     ds4_gpu_close_batch_encoder();
     id<MTLCommandBuffer> cb = g_batch_cb;
     g_batch_cb = nil;
@@ -6143,7 +5759,6 @@ int ds4_gpu_synchronize(void) {
         return result;
 #endif
     }
-    ds4_gpu_parallel_ffn_reset_state(YES);
     if ([g_pending_cbs count] != 0) {
         int ok = ds4_gpu_wait_pending_command_buffers("synchronize");
         ds4_gpu_model_buffer_cache_maybe_evict("synchronize");
@@ -6175,7 +5790,6 @@ void ds4_gpu_cleanup(void) {
         /* Partial initialization owns the same globals as a complete
          * lifecycle.  Objective-C nil messaging and the idempotent helpers
          * below make this one unwind safe before, during, and after init. */
-        ds4_gpu_parallel_ffn_reset_state(YES);
         if (g_batch_cb) {
             ds4_gpu_close_batch_encoder();
             [g_batch_cb commit];
@@ -6184,14 +5798,11 @@ void ds4_gpu_cleanup(void) {
         }
         g_batch_cb = nil;
         g_batch_enc = nil;
-        g_batch_encoder_concurrent = NO;
         g_batch_has_work = NO;
         ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
         ds4_gpu_laguna_atlas_evidence_zero(&g_owned_laguna_atlas_evidence);
         g_command_batch_epoch = 0;
         (void)ds4_gpu_wait_pending_command_buffers("cleanup");
-        g_selected_readback_event = nil;
-        g_selected_readback_event_value = 0;
         g_get_rows_f32_pipeline = nil;
         g_get_rows_i32_pipeline = nil;
         g_get_rows_q8_0_pipeline = nil;
@@ -7130,14 +6741,12 @@ int ds4_gpu_test_cleanup_state_is_clean(void) {
            !g_metal4_tensor_api_enabled &&
            !g_metal4_tensor_api_compile_supported &&
            g_metal_device_name[0] == '\0' &&
-           !g_batch_cb && !g_batch_enc && !g_batch_encoder_concurrent &&
+           !g_batch_cb && !g_batch_enc &&
            !g_batch_has_work && g_command_batch_epoch == 0 &&
            !g_pending_cbs && !g_pending_laguna_atlas_evidence &&
 #ifdef DS4_TEST_HOOKS
            !g_pending_glm_grouped_moe_evidence &&
 #endif
-           !g_selected_readback_event &&
-           g_selected_readback_event_value == 0 &&
            !g_model_buffer_cache &&
            !g_pipeline_cache &&
            g_model_buffer_cache_bytes == 0 &&

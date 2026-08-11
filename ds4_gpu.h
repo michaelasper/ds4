@@ -253,13 +253,7 @@ int ds4_gpu_wait_submitted_commands(void);
 int ds4_gpu_discard_commands(void);
 int ds4_gpu_commands_active(void);
 #ifdef __APPLE__
-int ds4_gpu_parallel_ffn_finish(void);
-void ds4_gpu_parallel_ffn_abort(void);
 #ifdef DS4_TEST_HOOKS
-/* Test-only synthetic arm used to exercise terminal command-boundary
- * cleanup without requiring a model-shaped concurrent FFN dispatch. */
-int ds4_gpu_parallel_ffn_test_arm_state(void);
-int ds4_gpu_parallel_ffn_test_state_is_clean(void);
 /* Exercise real Metal partial-init failure unwinds, successful retry, command
  * drain, workspace tracking, and mmap-backed view/cache cleanup. */
 int ds4_gpu_test_lifecycle_cleanup(void);
@@ -275,29 +269,12 @@ int ds4_gpu_test_tensor_tracking_state(uint64_t *live_handles,
                                        uint64_t *live_bytes);
 int ds4_gpu_test_cleanup_state_is_clean(void);
 #endif
-int ds4_gpu_parallel_ffn_start(
-        ds4_gpu_tensor       *gate,
-        ds4_gpu_tensor       *up,
-        ds4_gpu_tensor       *mid,
-        ds4_gpu_tensor       *shared_out,
-        const void           *model_map,
-        uint64_t              model_size,
-        uint64_t              gate_offset,
-        uint64_t              up_offset,
-        uint64_t              down_offset,
-        uint32_t              model_dim,
-        uint32_t              shared_dim,
-        const ds4_gpu_tensor *x,
-        float                 clamp);
 #ifdef DS4_TEST_HOOKS
 /* Diagnostics/tests only: read the pending Metal command-buffer array.
  * Inference hot paths must not use this getter or add a counter for it. */
 uint32_t ds4_gpu_diagnostic_pending_command_buffer_count(void);
 #endif
 #endif
-int ds4_gpu_signal_selected_readback_ready(uint64_t *event_value);
-int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *label);
-int ds4_gpu_wait_selected_readback_ready(uint64_t event_value, const char *label);
 int ds4_gpu_end_commands(void);
 /* Terminal boundary: a zero result reports command-buffer/backend failure,
  * but all submitted work, if any, has still been waited before returning. */

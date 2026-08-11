@@ -9528,71 +9528,6 @@ cleanup:
     ds4_gpu_tensor_free(a);
 }
 
-static void test_metal_parallel_ffn_terminal_lifecycle(void) {
-    enum { n = 64 };
-    const uint64_t bytes = (uint64_t)n * sizeof(float);
-    float a_host[n];
-    float b_host[n];
-    float expected[n];
-    float poison[n];
-    for (uint32_t i = 0; i < n; i++) {
-        a_host[i] = (float)((int)i - 21) * 0.125f;
-        b_host[i] = (float)((int)(i * 3u) - 17) * 0.0625f;
-        expected[i] = a_host[i] + b_host[i];
-        poison[i] = -777.0f;
-    }
-
-    ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(bytes);
-    ds4_gpu_tensor *b = ds4_gpu_tensor_alloc(bytes);
-    ds4_gpu_tensor *out = ds4_gpu_tensor_alloc(bytes);
-    TEST_ASSERT(a && b && out);
-    if (!a || !b || !out) goto cleanup;
-    TEST_ASSERT(ds4_gpu_tensor_write(a, 0, a_host, bytes) != 0);
-    TEST_ASSERT(ds4_gpu_tensor_write(b, 0, b_host, bytes) != 0);
-
-    /* submit_commands() must reset the armed state before the command buffer
-     * becomes terminal; query it before begin_commands() can reset anything. */
-    TEST_ASSERT(ds4_gpu_tensor_write(out, 0, poison, bytes) != 0);
-    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
-    TEST_ASSERT(ds4_gpu_parallel_ffn_test_arm_state() != 0);
-    TEST_ASSERT(ds4_gpu_submit_commands() != 0);
-    TEST_ASSERT(ds4_gpu_parallel_ffn_test_state_is_clean() != 0);
-    TEST_ASSERT(!ds4_gpu_commands_active());
-    TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
-
-    /* A real ordinary batch after submit proves no concurrent encoder or
-     * stale stage metadata leaks into the next command sequence. */
-    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
-    TEST_ASSERT(ds4_gpu_add_tensor(out, a, b, n) != 0);
-    TEST_ASSERT(ds4_gpu_end_commands() != 0);
-    TEST_ASSERT(ds4_gpu_tensor_read(out, 0, poison, bytes) != 0);
-    TEST_ASSERT(memcmp(poison, expected, (size_t)bytes) == 0);
-
-    /* Repeat through discard, including its empty/aborted encoder boundary. */
-    TEST_ASSERT(ds4_gpu_tensor_write(out, 0, poison, bytes) != 0);
-    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
-    TEST_ASSERT(ds4_gpu_parallel_ffn_test_arm_state() != 0);
-    TEST_ASSERT(ds4_gpu_discard_commands() != 0);
-    TEST_ASSERT(ds4_gpu_parallel_ffn_test_state_is_clean() != 0);
-    TEST_ASSERT(!ds4_gpu_commands_active());
-    TEST_ASSERT(ds4_gpu_wait_submitted_commands() != 0);
-
-    TEST_ASSERT(ds4_gpu_begin_commands() != 0);
-    TEST_ASSERT(ds4_gpu_add_tensor(out, a, b, n) != 0);
-    TEST_ASSERT(ds4_gpu_end_commands() != 0);
-    TEST_ASSERT(ds4_gpu_tensor_read(out, 0, poison, bytes) != 0);
-    TEST_ASSERT(memcmp(poison, expected, (size_t)bytes) == 0);
-
-cleanup:
-    if (ds4_gpu_commands_active()) {
-        (void)ds4_gpu_discard_commands();
-    } else {
-        (void)ds4_gpu_wait_submitted_commands();
-    }
-    ds4_gpu_tensor_free(out);
-    ds4_gpu_tensor_free(b);
-    ds4_gpu_tensor_free(a);
-}
 #endif
 
 static void test_dflash_capture_nonfinite_sanitize(void) {
@@ -9675,7 +9610,6 @@ static void test_metal_kernel_group(void) {
     test_metal_laguna_decode_ladder_ordering_exact();
     test_metal_laguna_q8_lmhead_screen_gates();
     test_metal_laguna_q8_lmhead_screen();
-    test_metal_parallel_ffn_terminal_lifecycle();
     test_metal_laguna_dense_q8_gate_up_swiglu();
     test_metal_laguna_staged_swa_exact();
     test_metal_glm_qmv_r1_exact();
@@ -9934,6 +9868,14 @@ static void test_laguna_moe_abi_contract(void) {
         "DS4_METAL_ENABLE_PRO_Q4_EXPERT_ADDRESS_AUTO",
         "DS4_METAL_DISABLE_PRO_Q4_EXPERT_ADDRESS_AUTO",
         "DS4_METAL_Q4_EXPERT_TABLE_PROFILE",
+        "g_batch_encoder_concurrent",
+        "ds4_gpu_parallel_ffn_reset_state",
+        "g_parallel_",
+        "g_selected_readback_event",
+        "g_selected_readback_event_value",
+        "ds4_gpu_signal_selected_readback_ready",
+        "ds4_gpu_commit_and_wait_selected_readback",
+        "ds4_gpu_wait_selected_readback_ready",
     };
     for (size_t i = 0;
          i < sizeof(removed_host) / sizeof(removed_host[0]); i++) {
@@ -9949,6 +9891,14 @@ static void test_laguna_moe_abi_contract(void) {
         "DS4_METAL_ENABLE_PRO_Q4_EXPERT_ADDRESS_AUTO",
         "DS4_METAL_ENABLE_Q4_EXPERT_TABLE",
         "DS4_METAL_ENABLE_Q4_EXPERT_ADDRESS_TABLE",
+        "ds4_gpu_parallel_ffn_start",
+        "ds4_gpu_parallel_ffn_finish",
+        "ds4_gpu_parallel_ffn_abort",
+        "ds4_gpu_parallel_ffn_test_arm_state",
+        "ds4_gpu_parallel_ffn_test_state_is_clean",
+        "ds4_gpu_signal_selected_readback_ready",
+        "ds4_gpu_commit_and_wait_selected_readback",
+        "ds4_gpu_wait_selected_readback_ready",
     };
     for (size_t i = 0;
          i < sizeof(removed_engine) / sizeof(removed_engine[0]); i++) {
@@ -9983,10 +9933,64 @@ static void test_laguna_moe_abi_contract(void) {
         "ds4_gpu_pro_q4_expert_table_auto_available",
         "ds4_gpu_preload_q4_expert_tables",
         "ds4_gpu_set_glm_model",
+        "ds4_gpu_parallel_ffn_start",
+        "ds4_gpu_parallel_ffn_finish",
+        "ds4_gpu_parallel_ffn_abort",
+        "ds4_gpu_parallel_ffn_test_arm_state",
+        "ds4_gpu_parallel_ffn_test_state_is_clean",
+        "ds4_gpu_signal_selected_readback_ready",
+        "ds4_gpu_commit_and_wait_selected_readback",
+        "ds4_gpu_wait_selected_readback_ready",
     };
     for (size_t i = 0;
          i < sizeof(removed_public) / sizeof(removed_public[0]); i++) {
         TEST_ASSERT(strstr(header, removed_public[i]) == NULL);
+    }
+
+    /* The ordinary serial command batch, pending-buffer evidence, diagnostic
+     * getter, and active shared FFN kernels are still part of the supported
+     * Metal surface after the dead overlap lifecycles are gone. */
+    static const char *const retained_host[] = {
+        "static id<MTLCommandBuffer> g_batch_cb;",
+        "static id<MTLComputeCommandEncoder> g_batch_enc;",
+        "static NSMutableArray<id<MTLCommandBuffer>> *g_pending_cbs;",
+        "g_pending_laguna_atlas_evidence",
+        "int ds4_gpu_begin_commands(void)",
+        "int ds4_gpu_flush_encoder(void)",
+        "int ds4_gpu_flush_commands(void)",
+        "int ds4_gpu_submit_commands(void)",
+        "int ds4_gpu_wait_submitted_commands(void)",
+        "int ds4_gpu_discard_commands(void)",
+        "int ds4_gpu_end_commands(void)",
+        "int ds4_gpu_synchronize(void)",
+        "void ds4_gpu_cleanup(void)",
+        "ds4_gpu_diagnostic_pending_command_buffer_count",
+        "kernel_dsv4_shared_gate_up_swiglu_q8_0",
+        "kernel_dsv4_shared_mid_swiglu_q8_0",
+    };
+    for (size_t i = 0;
+         i < sizeof(retained_host) / sizeof(retained_host[0]); i++) {
+        TEST_ASSERT(strstr(host, retained_host[i]) != NULL);
+    }
+
+    static const char *const retained_public[] = {
+        "int ds4_gpu_begin_commands(void)",
+        "int ds4_gpu_flush_encoder(void)",
+        "int ds4_gpu_flush_commands(void)",
+        "int ds4_gpu_submit_commands(void)",
+        "int ds4_gpu_wait_submitted_commands(void)",
+        "int ds4_gpu_discard_commands(void)",
+        "int ds4_gpu_end_commands(void)",
+        "int ds4_gpu_synchronize(void)",
+        "void ds4_gpu_cleanup(void)",
+        "uint32_t ds4_gpu_diagnostic_pending_command_buffer_count(void)",
+        "int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(",
+        "int ds4_gpu_shared_mid_swiglu_q8_0_tensor(",
+        "int ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(",
+    };
+    for (size_t i = 0;
+         i < sizeof(retained_public) / sizeof(retained_public[0]); i++) {
+        TEST_ASSERT(strstr(header, retained_public[i]) != NULL);
     }
 
     TEST_ASSERT(strstr(host,
@@ -10796,9 +10800,6 @@ static const ds4_test_entry test_entries[] = {
     {"--metal-glm-router-simd-topk", "metal-glm-router-simd-topk",
      "exact finite-domain GLM/Laguna router SIMD top-k selector",
      test_metal_glm_router_simd_topk_exact, true},
-    {"--metal-parallel-ffn-lifecycle", "metal-parallel-ffn-lifecycle",
-     "submit/discard parallel-FFN lifecycle cleanup and follow-up batch",
-     test_metal_parallel_ffn_terminal_lifecycle, true},
 #endif
     {"--dflash-verify-depth", "dflash-verify-depth", "DFlash speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dflash_verify_depth, false},
 #endif
