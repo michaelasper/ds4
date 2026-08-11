@@ -46971,6 +46971,9 @@ static bool laguna_graph_spec_snapshot(
     return ok;
 }
 
+/* Low-level restore ownership is intentionally nonblocking on Apple: callers
+ * that need a host-state certification must wait its submitted CB before
+ * publishing state.  The DFlash product boundary below provides that proof. */
 static bool laguna_graph_spec_restore(
         ds4_laguna_gpu_graph *g,
         uint32_t              pos0,
@@ -60319,10 +60322,19 @@ static bool ds4_session_dflash_restore_snapshot(
         uint32_t     n_rows) {
     if (!snapshot_completed) return true;
     if (!s) return false;
-    return laguna_graph_spec_restore(&s->laguna_graph,
-                                     pos0,
-                                     accepted_rows,
-                                     n_rows);
+    if (!laguna_graph_spec_restore(&s->laguna_graph,
+                                   pos0,
+                                   accepted_rows,
+                                   n_rows)) {
+        return false;
+    }
+#ifdef __APPLE__
+    /* laguna_graph_spec_restore submits the Apple rollback CB and leaves it
+     * pending.  Do not let the caller append checkpoint tokens or mark
+     * DFlash synchronized until this exact CB has completed successfully. */
+    if (ds4_gpu_wait_submitted_commands() == 0) return false;
+#endif
+    return true;
 }
 
 static bool ds4_session_dflash_finish_capture(
@@ -67151,8 +67163,11 @@ static int ds4_session_eval_dflash_speculative_argmax(
     if (!verify_ok || !inject_ok || !target_read_ok || !draft_read_ok) {
         ds4_session_dflash_quarantine(s);
         if (snapshot_completed) {
-            (void)ds4_session_dflash_restore_snapshot(
+            const bool repair_ok = ds4_session_dflash_restore_snapshot(
                 s, snapshot_completed, pos0, 0, n_rows);
+            /* This is best-effort repair after a terminal verifier failure;
+             * neither repair outcome may re-certify the host checkpoint. */
+            if (!repair_ok) ds4_session_dflash_quarantine(s);
         }
         if (errlen) snprintf(err, errlen,
                              "%s DFlash target verification failed",
@@ -68632,6 +68647,75 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
         !ds4_gpu_tensor_read(target.value_cache[chosen], 0,
                              readback, test_row_bytes) ||
         memcmp(readback, value_host, test_row_bytes) != 0) {
+        goto cleanup;
+    }
+
+    /* The accepted-prefix product boundary must certify the restore CB
+     * before it publishes checkpoint/DFlash state.  Put real atlas evidence
+     * in an earlier pending CB, then inject a post-completion wait failure
+     * while the accepted-prefix restore is submitted behind it. */
+    if (!ds4_gpu_tensor_write(target.key_cache[chosen], 0,
+                              cache_host, sizeof(cache_host)) ||
+        !ds4_gpu_tensor_write(target.value_cache[chosen], 0,
+                              value_host, sizeof(value_host)) ||
+        !laguna_graph_spec_snapshot(&target, 1u, 1u) ||
+        !ds4_gpu_commands_active() ||
+        ds4_gpu_flush_commands() != 1 ||
+        !ds4_gpu_commands_active() ||
+        ds4_gpu_discard_commands() != 1 ||
+        ds4_gpu_commands_active() ||
+        ds4_gpu_wait_submitted_commands() != 1 ||
+        !ds4_gpu_tensor_write(target.key_cache[chosen], test_row_bytes,
+                              mutated_key, test_row_bytes) ||
+        !ds4_gpu_tensor_write(target.value_cache[chosen], test_row_bytes,
+                              mutated_value, test_row_bytes)) {
+        goto cleanup;
+    }
+    const uint64_t restore_target_generated_before =
+        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+    const uint64_t restore_target_consumed_before =
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+    const uint64_t restore_target_family0_before =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+    const uint64_t restore_target_family1_before =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+    const uint64_t restore_support_generated_before =
+        ds4_gpu_laguna_rope_support_atlas_completed_generated_count();
+    const uint64_t restore_support_consumed_before =
+        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
+    if (ds4_gpu_begin_commands() != 1 ||
+        !ds4_gpu_laguna_rope_atlas_generate(1u, 1u) ||
+        ds4_gpu_submit_commands() != 1 ||
+        ds4_gpu_commands_active()) {
+        goto cleanup;
+    }
+    ds4_session accepted_wait_state;
+    memset(&accepted_wait_state, 0, sizeof(accepted_wait_state));
+    accepted_wait_state.laguna_graph = target;
+    accepted_wait_state.checkpoint_valid = true;
+    accepted_wait_state.dflash_synced = true;
+    ds4_gpu_test_inject_wait_submitted_failure();
+    const bool accepted_restore_ok =
+        ds4_session_dflash_restore_snapshot(
+            &accepted_wait_state, true, 1u, 0u, 1u);
+    if (accepted_restore_ok) goto cleanup;
+    ds4_session_dflash_quarantine(&accepted_wait_state);
+    if (accepted_wait_state.checkpoint_valid ||
+        accepted_wait_state.dflash_synced ||
+        ds4_gpu_commands_active() ||
+        ds4_gpu_wait_submitted_commands() != 1 ||
+        ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+            restore_target_generated_before ||
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+            restore_target_consumed_before ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+            restore_target_family0_before ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+            restore_target_family1_before ||
+        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+            restore_support_generated_before ||
+        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+            restore_support_consumed_before) {
         goto cleanup;
     }
     ok = true;
