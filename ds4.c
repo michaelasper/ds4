@@ -68583,6 +68583,7 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
         ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
     if (!laguna_graph_spec_snapshot(&target, 1u, 1u) ||
         !ds4_gpu_commands_active() ||
+        !ds4_gpu_laguna_rope_atlas_generate(1u, 1u) ||
         ds4_gpu_flush_commands() != 1 ||
         !ds4_gpu_commands_active()) {
         goto cleanup;
