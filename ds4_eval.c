@@ -1195,7 +1195,6 @@ typedef struct {
     const char *trace_path;
     const char *regrade_trace_path;
     const char *case_sequence;
-    ds4_backend backend;
     int threads;
     int ctx_size;
     int max_tokens;
@@ -1490,18 +1489,6 @@ static void eval_reject_unsupported_option(const char *arg) {
     exit(2);
 }
 
-static ds4_backend parse_backend(const char *s, const char *opt) {
-    if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
-    fprintf(stderr,
-            "ds4-eval: unsupported option %s %s; this product supports Laguna S2.1 on Apple Metal only\n",
-            opt, s);
-    exit(2);
-}
-
-static ds4_backend default_backend(void) {
-    return DS4_BACKEND_METAL;
-}
-
 static void usage(FILE *fp, const char *topic) {
     ds4_help_print(fp, DS4_HELP_EVAL, topic);
 }
@@ -1509,7 +1496,6 @@ static void usage(FILE *fp, const char *topic) {
 static eval_config parse_options(int argc, char **argv) {
     eval_config c = {
         .model_path = "ds4flash.gguf",
-        .backend = default_backend(),
         .max_tokens = 16000,
         .top_p = DS4_DEFAULT_TOP_P,
         .min_p = DS4_DEFAULT_MIN_P,
@@ -1573,9 +1559,9 @@ static eval_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.threads = parse_int_arg(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--backend")) {
-            c.backend = parse_backend(need_arg(&i, argc, argv, arg), arg);
+            eval_reject_unsupported_option(arg);
         } else if (!strcmp(arg, "--metal")) {
-            c.backend = DS4_BACKEND_METAL;
+            /* Retain the explicit product spelling as a harmless assertion. */
         } else if (!strcmp(arg, "--quality")) {
             c.quality = true;
         } else if (!strcmp(arg, "--warm-weights")) {
@@ -2486,7 +2472,7 @@ static void trace_write_header(FILE *trace, const eval_config *cfg,
             "started_unix: %lld\n"
             "model: %s\n"
             "model_shape: %s\n"
-            "backend: %s\n"
+            "backend: metal\n"
             "ctx: %d\n"
             "max_tokens: %d\n"
             "max_prompt_tokens: %d\n"
@@ -2503,7 +2489,6 @@ static void trace_write_header(FILE *trace, const eval_config *cfg,
             (long long)time(NULL),
             cfg->model_path,
             model_name ? model_name : "unknown",
-            ds4_backend_name(cfg->backend),
             cfg->ctx_size,
             cfg->max_tokens,
             max_prompt_tokens,
@@ -3952,13 +3937,12 @@ static int parse_case_sequence(const char *arg, int ncases, int **seq_out, int *
     return 0;
 }
 
-static void log_context_memory(ds4_backend backend, int ctx_size) {
-    ds4_context_memory m = ds4_context_memory_estimate(backend, ctx_size);
+static void log_context_memory(int ctx_size) {
+    ds4_context_memory m = ds4_context_memory_estimate(ctx_size);
     fprintf(stderr,
-            "ds4-eval: context buffers %.2f MiB (ctx=%d, backend=%s, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
+            "ds4-eval: Metal context buffers %.2f MiB (ctx=%d, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
             (double)m.total_bytes / (1024.0 * 1024.0),
             ctx_size,
-            ds4_backend_name(backend),
             m.raw_cap,
             m.comp_cap);
 }
@@ -4041,7 +4025,6 @@ int main(int argc, char **argv) {
     ds4_engine_options opt = {
         .model_path = cfg.model_path,
         .dflash_path = cfg.dflash_path,
-        .backend = cfg.backend,
         .n_threads = cfg.threads,
         .context_size = cfg.ctx_size > 0 ? cfg.ctx_size : 0,
         .dflash_draft_tokens = cfg.dflash_draft_tokens,
@@ -4080,7 +4063,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "ds4-eval: model shape %s\n", ds4_engine_model_name(engine));
     eval_warn_think_max_downgraded(&cfg);
     trace_write_header(trace, &cfg, ds4_engine_model_name(engine), ncases, max_prompt_tokens);
-    log_context_memory(cfg.backend, cfg.ctx_size);
+    log_context_memory(cfg.ctx_size);
 
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, cfg.ctx_size) != 0) {

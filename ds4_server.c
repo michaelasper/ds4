@@ -12186,19 +12186,12 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
     return argv[++(*i)];
 }
 
-static void log_context_memory(ds4_backend backend, int ctx_size,
-                               uint32_t prefill_chunk,
-                               int session_count) {
-    ds4_context_memory m =
-        ds4_context_memory_estimate_with_prefill(backend,
-                                                 ctx_size,
-                                                 prefill_chunk);
+static void log_context_memory(int ctx_size, int session_count) {
+    ds4_context_memory m = ds4_context_memory_estimate(ctx_size);
     server_log(DS4_LOG_DEFAULT,
-               "ds4-server: context buffers %.2f MiB (ctx=%d, backend=%s, prefill_chunk=%u, raw_kv_rows=%u, compressed_kv_rows=%u)",
+               "ds4-server: Metal context buffers %.2f MiB (ctx=%d, raw_kv_rows=%u, compressed_kv_rows=%u)",
                (double)m.total_bytes / (1024.0 * 1024.0),
                ctx_size,
-               ds4_backend_name(backend),
-               m.prefill_cap,
                m.raw_cap,
                m.comp_cap);
     if (session_count > 1) {
@@ -12271,24 +12264,10 @@ static void server_reject_unsupported_option(const char *arg) {
     exit(2);
 }
 
-static ds4_backend parse_backend_arg(const char *s, const char *arg) {
-    if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
-    (void)arg;
-    server_log(DS4_LOG_DEFAULT,
-               "ds4-server: unsupported option --backend %s; this product supports Laguna S2.1 on Apple Metal only",
-               s);
-    exit(2);
-}
-
-static ds4_backend default_server_backend(void) {
-    return DS4_BACKEND_METAL;
-}
-
 static server_config parse_options(int argc, char **argv) {
     server_config c = {
         .engine = {
             .model_path = "ds4flash.gguf",
-            .backend = default_server_backend(),
             .dflash_draft_tokens = 0,
         },
         .host = "127.0.0.1",
@@ -12370,9 +12349,9 @@ static server_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--warm-weights")) {
             c.engine.warm_weights = true;
         } else if (!strcmp(arg, "--metal")) {
-            c.engine.backend = DS4_BACKEND_METAL;
+            /* Retain the explicit product spelling as a harmless assertion. */
         } else if (!strcmp(arg, "--backend")) {
-            c.engine.backend = parse_backend_arg(need_arg(&i, argc, argv, arg), arg);
+            server_reject_unsupported_option(arg);
         } else {
             server_log(DS4_LOG_DEFAULT, "ds4-server: unknown option: %s", arg);
             usage(stderr, NULL);
@@ -12429,10 +12408,7 @@ int main(int argc, char **argv) {
     }
 
     const int slot_count = cfg.batched_sessions > 0 ? cfg.batched_sessions : 1;
-    log_context_memory(cfg.engine.backend,
-                       cfg.ctx_size,
-                       ds4_engine_prefill_chunk(engine),
-                       slot_count);
+    log_context_memory(cfg.ctx_size, slot_count);
 
     server s = {0};
     s.engine = engine;
@@ -12472,8 +12448,8 @@ int main(int argc, char **argv) {
         slot->id = i;
         if (ds4_session_create(&slot->session, engine, cfg.ctx_size) != 0) {
             server_log(DS4_LOG_DEFAULT,
-                       "ds4-server: failed to create %s session %d/%d",
-                       ds4_backend_name(cfg.engine.backend), i + 1, slot_count);
+                       "ds4-server: failed to create Metal session %d/%d",
+                       i + 1, slot_count);
             server_close_resources(&s);
             return 1;
         }

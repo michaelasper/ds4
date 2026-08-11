@@ -141,16 +141,16 @@ else
     sed -n '1,80p' "$server_parser_out" >&2
 fi
 
-# --backend is intentionally hidden, but its retained Metal spelling must
-# still parse without attempting to open a model.  DFlash options must likewise
-# parse through their normal value checks before --help exits.
+# The executable is Metal-only, so there is no backend selector.  The explicit
+# --metal spelling remains a harmless product assertion.  DFlash options must
+# likewise parse through their normal value checks before --help exits.
 for spec_name in ds4 ds4-server; do
     bin=./$spec_name
     out="$test_tmp_dir/${spec_name}.positive"
-    if "$bin" --backend metal --metal \
+    if "$bin" --metal \
         --dflash /tmp/laguna-dflash.gguf --dflash-draft 3 \
         --dflash-p-min 0.4 --help >"$out" 2>&1; then
-        pass "$spec_name accepts hidden Metal backend and DFlash options"
+        pass "$spec_name accepts Metal assertion and DFlash options"
     else
         fail "$spec_name rejected retained Metal/DFlash parser contract"
         sed -n '1,80p' "$out" >&2

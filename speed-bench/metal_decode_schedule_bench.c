@@ -369,10 +369,7 @@ int main(int argc, char **argv) {
 
     ds4_engine_options opt = {
         .model_path = cfg.model_path,
-        .backend = DS4_BACKEND_METAL,
         .context_size = cfg.ctx,
-        .prefill_chunk = 4096,
-        .power_percent = 100,
         .warm_weights = true,
     };
     ds4_engine *engine = NULL;

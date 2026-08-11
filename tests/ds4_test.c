@@ -345,21 +345,10 @@ static test_laguna_source_mode test_laguna_source_mode_from_env(void) {
     return TEST_LAGUNA_SOURCE_INVALID;
 }
 
-static ds4_backend test_model_backend(void) {
-    const char *backend = getenv("DS4_TEST_BACKEND");
-    if (backend && !strcmp(backend, "cpu")) return DS4_BACKEND_CPU;
-#ifdef __APPLE__
-    return DS4_BACKEND_METAL;
-#else
-    return DS4_BACKEND_CUDA;
-#endif
-}
-
 static ds4_engine *test_open_engine(bool quality) {
     ds4_engine *engine = NULL;
     ds4_engine_options opt = {
         .model_path = test_model_path(),
-        .backend = test_model_backend(),
         .quality = quality,
     };
     TEST_ASSERT(ds4_engine_open(&engine, &opt) == 0);
@@ -14541,11 +14530,6 @@ static ds4_engine *test_open_dflash_engine(const char *support_path) {
     ds4_engine *engine = NULL;
     ds4_engine_options opt = {
         .model_path = test_model_path(),
-#ifdef __APPLE__
-        .backend = DS4_BACKEND_METAL,
-#else
-        .backend = DS4_BACKEND_CUDA,
-#endif
         .quality = false,
         .dflash_path = support_path,
         .dflash_draft_tokens = 4,
@@ -14777,7 +14761,6 @@ static void test_print_help(const char *prog) {
     puts("      Show this help.");
     puts("\nEnvironment:");
     puts("  DS4_TEST_MODEL=FILE        Model path. Default: ds4flash.gguf");
-    puts("  DS4_TEST_BACKEND=cpu       Run model tests on CPU instead of Metal/CUDA.");
     puts("  DS4_METAL_GLM_QMV_R1=1  Enable resident decode-only one-row-per-SIMD GLM QMV.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK=1  Enable exact finite-domain Laguna router top-k SIMD selector.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE=1  Collect optimized/fallback selector row counters.");

@@ -57,10 +57,7 @@ TEST_CORE_OBJS := $(filter-out ds4.o ds4_metal.o,$(CORE_OBJS)) $(DS4_TEST_DS4_OB
 
 METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 
-UNSUPPORTED_TARGETS := cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm \
-	test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch
-
-.PHONY: all help clean test test-legacy test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dflash-verify-depth $(UNSUPPORTED_TARGETS)
+.PHONY: all help clean test test-legacy test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dflash-verify-depth
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -95,12 +92,7 @@ help:
 	@echo "  make check-mxfp4-half-lut  Verify the checked-in MXFP4 half LUT matches the generator"
 	@echo "  make test-mxfp4-metal  Check the MXFP4 half LUT, then run Metal MXFP4 exactness tests"
 	@echo "  make dflash-verify-depth  Run DFlash speculative verification smoke if support GGUF is present"
-	@echo "  CPU/CUDA/ROCm targets are unsupported in this Darwin/Apple Metal-only fork"
 	@echo "  make clean        Remove build outputs"
-
-$(UNSUPPORTED_TARGETS):
-	@echo "error: make $@ is unsupported; this build requires Darwin/Apple Metal" >&2
-	@exit 2
 
 ds4: ds4_cli.o ds4_help.o linenoise.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ ds4_cli.o ds4_help.o linenoise.o $(CORE_OBJS) $(METAL_LDLIBS)
@@ -273,7 +265,6 @@ test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-
 	}
 	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" ./ds4 --metal --model "$(LAGUNA_TEST_MODEL)" --inspect
 	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" \
-	DS4_TEST_BACKEND=metal \
 	./tests/test_metal_session_batch
 
 dflash-verify-depth: ds4_test

@@ -144,25 +144,8 @@ static void cli_reject_unsupported_option(const char *arg) {
     exit(2);
 }
 
-static ds4_backend parse_backend(const char *s) {
-    if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
-    fprintf(stderr,
-            "ds4: unsupported option --backend %s; this product supports Laguna S2.1 on Apple Metal only\n",
-            s);
-    exit(2);
-}
-
-static ds4_backend default_backend(void) {
-    return DS4_BACKEND_METAL;
-}
-
-static void log_context_memory(ds4_backend backend,
-                               int         ctx_size,
-                               uint32_t    prefill_chunk) {
-    ds4_context_memory m =
-        ds4_context_memory_estimate_with_prefill(backend,
-                                                 ctx_size,
-                                                 prefill_chunk);
+static void log_context_memory(int ctx_size) {
+    ds4_context_memory m = ds4_context_memory_estimate(ctx_size);
     const uint64_t kv_bytes = m.raw_bytes + m.compressed_bytes;
     const uint64_t total_bytes = kv_bytes + m.scratch_bytes;
     const bool color = ds4_log_is_tty(stderr);
@@ -182,13 +165,12 @@ static void log_context_memory(ds4_backend backend,
             reset);
     fprintf(stderr,
             "%sds4: memory detail: ctx=%d prefill_cap=%u raw_kv_rows=%u "
-            "compressed_kv_rows=%u backend=%s%s\n",
+            "compressed_kv_rows=%u backend=metal%s\n",
             green,
             ctx_size,
             m.prefill_cap,
             m.raw_cap,
             m.comp_cap,
-            ds4_backend_name(backend),
             reset);
 }
 
@@ -438,7 +420,7 @@ static void cli_apply_model_sampling_defaults(
 static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, const ds4_tokens *prompt) {
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, cfg->gen.ctx_size) != 0) {
-        fprintf(stderr, "ds4: sampled CLI generation requires a session backend\n");
+        fprintf(stderr, "ds4: sampled CLI generation requires a Metal session\n");
         return 1;
     }
     ds4_session_gpu_warmup(session);
@@ -646,7 +628,7 @@ static void json_write_token(FILE *fp, ds4_engine *engine, int token) {
 static int run_logits_dump(ds4_engine *engine, const cli_config *cfg, const ds4_tokens *prompt) {
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, cfg->gen.ctx_size) != 0) {
-        fprintf(stderr, "ds4: --dump-logits requires a graph session backend\n");
+        fprintf(stderr, "ds4: --dump-logits requires a Metal session\n");
         return 1;
     }
 
@@ -694,9 +676,8 @@ static int run_logits_dump(ds4_engine *engine, const cli_config *cfg, const ds4_
     fprintf(fp, "{\n  \"source\":\"ds4\",\n  \"model\":");
     json_write_string(fp, cfg->engine.model_path, strlen(cfg->engine.model_path));
     fprintf(fp,
-            ",\n  \"backend\":\"%s\",\n  \"quant_bits\":%d,\n"
+            ",\n  \"backend\":\"metal\",\n  \"quant_bits\":%d,\n"
             "  \"prompt_tokens\":%d,\n  \"ctx\":%d,\n  \"vocab\":%d,\n",
-            ds4_backend_name(cfg->engine.backend),
             ds4_engine_routed_quant_bits(engine),
             prompt->len,
             cfg->gen.ctx_size,
@@ -730,7 +711,7 @@ static int run_logits_dump(ds4_engine *engine, const cli_config *cfg, const ds4_
 static int run_logprob_dump(ds4_engine *engine, const cli_config *cfg, const ds4_tokens *prompt) {
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, cfg->gen.ctx_size) != 0) {
-        fprintf(stderr, "ds4: --dump-logprobs requires a graph session backend\n");
+        fprintf(stderr, "ds4: --dump-logprobs requires a Metal session\n");
         return 1;
     }
 
@@ -853,7 +834,7 @@ static int run_decode_consistency(ds4_engine *engine, const cli_config *cfg,
     ds4_session *live = NULL;
     char err[160];
     if (ds4_session_create(&live, engine, cfg->gen.ctx_size) != 0) {
-        fprintf(stderr, "ds4: --decode-consistency requires a graph session backend\n");
+        fprintf(stderr, "ds4: --decode-consistency requires a Metal session\n");
         ds4_tokens_free(&prefix);
         free(live_logits);
         free(fresh_logits);
@@ -1005,7 +986,7 @@ static int run_perplexity_file(ds4_engine *engine, const cli_config *cfg) {
 
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, cfg->gen.ctx_size) != 0) {
-        fprintf(stderr, "ds4: --perplexity-file requires a graph session backend\n");
+        fprintf(stderr, "ds4: --perplexity-file requires a Metal session\n");
         ds4_tokens_free(&tokens);
         return 1;
     }
@@ -1085,8 +1066,7 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
 
     if (diagnostic) {
         if (rc == 0) {
-            fprintf(stderr, "ds4: diagnostic run completed on the native %s path.\n",
-                    ds4_backend_name(cfg->engine.backend));
+            fprintf(stderr, "ds4: diagnostic run completed on the native Metal path.\n");
         }
     } else {
         if (getenv("DS4_CLI_FORCE_SESSION") != NULL ||
@@ -1218,7 +1198,7 @@ static void repl_chat_apply_think_prefix(ds4_engine *engine,
 static int repl_chat_create_session(ds4_engine *engine, repl_chat *chat, int ctx_size) {
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, ctx_size) != 0) {
-        fprintf(stderr, "ds4: interactive chat KV cache requires a session backend\n");
+        fprintf(stderr, "ds4: interactive chat KV cache requires a Metal session\n");
         return 1;
     }
     if (chat->session) ds4_session_free(chat->session);
@@ -1477,9 +1457,7 @@ static int run_repl(ds4_engine *engine, cli_config *cfg) {
                 fprintf(stderr, "ds4: /ctx needs a positive integer\n");
             } else {
                 cfg->gen.ctx_size = parse_int(arg, "/ctx");
-                log_context_memory(cfg->engine.backend,
-                                   cfg->gen.ctx_size,
-                                   ds4_engine_prefill_chunk(engine));
+                log_context_memory(cfg->gen.ctx_size);
                 rc = repl_chat_set_ctx(engine, &chat, cfg->gen.ctx_size);
                 if (rc != 0) {
                     linenoiseFree(line);
@@ -1576,7 +1554,6 @@ static cli_config parse_options(int argc, char **argv) {
     cli_config c = {
         .engine = {
             .model_path = "ds4flash.gguf",
-            .backend = default_backend(),
             .dflash_draft_tokens = 0,
         },
         .gen = {
@@ -1657,9 +1634,10 @@ static cli_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--backend")) {
-            c.engine.backend = parse_backend(need_arg(&i, argc, argv, arg));
+            /* Backend selection was removed: the executable is Metal-only. */
+            cli_reject_unsupported_option(arg);
         } else if (!strcmp(arg, "--metal")) {
-            c.engine.backend = DS4_BACKEND_METAL;
+            /* Retain the explicit product spelling as a harmless assertion. */
         } else if (!strcmp(arg, "--dump-tokens")) {
             c.gen.dump_tokens = true;
         } else if (!strcmp(arg, "--dump-logits")) {
@@ -1729,9 +1707,7 @@ int main(int argc, char **argv) {
         cfg.gen.system = ds4_engine_default_system_prompt(engine);
     }
     if (!cfg.inspect) {
-        log_context_memory(cfg.engine.backend,
-                           cfg.gen.ctx_size,
-                           ds4_engine_prefill_chunk(engine));
+        log_context_memory(cfg.gen.ctx_size);
         cli_warn_think_max_downgraded(&cfg.gen, "--think-max");
     }
     int rc = 0;

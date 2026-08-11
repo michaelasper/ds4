@@ -94,7 +94,6 @@ int main(void) {
 
     ds4_engine_options opt = {
         .model_path = model,
-        .backend = DS4_BACKEND_METAL,
         .n_threads = 1,
         .context_size = TEST_CTX,
     };

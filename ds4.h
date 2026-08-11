@@ -15,12 +15,6 @@
  * header narrow so HTTP/CLI code does not depend on tensor internals. */
 
 typedef enum {
-    DS4_BACKEND_METAL,
-    DS4_BACKEND_CUDA,
-    DS4_BACKEND_CPU,
-} ds4_backend;
-
-typedef enum {
     DS4_THINK_NONE,
     DS4_THINK_HIGH,
     DS4_THINK_MAX,
@@ -73,16 +67,10 @@ typedef bool (*ds4_session_cancel_fn)(void *ud);
 typedef struct {
     const char *model_path;
     const char *dflash_path;
-    ds4_backend backend;
     int n_threads;
     int context_size;
-    uint32_t prefill_chunk;
     int dflash_draft_tokens;
     float dflash_p_min;
-    const char *directional_steering_file;
-    float directional_steering_attn;
-    float directional_steering_ffn;
-    int power_percent;
     bool warm_weights;
     bool quality;
     bool dflash_p_min_set;
@@ -124,10 +112,6 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt);
 void ds4_engine_close(ds4_engine *e);
 void ds4_engine_summary(ds4_engine *e);
 int ds4_engine_vocab_size(ds4_engine *e);
-uint32_t ds4_engine_prefill_chunk(ds4_engine *e);
-int ds4_engine_power(ds4_engine *e);
-/* Laguna currently accepts only the full-power setting (100). */
-int ds4_engine_set_power(ds4_engine *e, int power_percent);
 const char *ds4_engine_model_name(ds4_engine *e);
 int ds4_engine_layer_count(ds4_engine *e);
 uint32_t ds4_engine_layer_compress_ratio(ds4_engine *e, uint32_t layer);
@@ -140,7 +124,6 @@ bool ds4_engine_is_laguna(ds4_engine *e);
 const char *ds4_engine_default_system_prompt(ds4_engine *e);
 void ds4_engine_sampling_defaults(ds4_engine *e, float *temperature,
                                   int *top_k, float *top_p, float *min_p);
-const char *ds4_backend_name(ds4_backend backend);
 bool ds4_think_mode_enabled(ds4_think_mode mode);
 const char *ds4_think_mode_name(ds4_think_mode mode);
 const char *ds4_think_max_prefix(void);
@@ -150,11 +133,7 @@ ds4_think_mode ds4_think_mode_for_context(ds4_think_mode mode, int ctx_size);
  * optional DFlash/speculative/session allocations are not included.  A
  * non-positive context or one beyond Laguna's trained context length returns
  * a zeroed estimate, matching lgn_graph_alloc()'s admission policy. */
-ds4_context_memory ds4_context_memory_estimate(ds4_backend backend, int ctx_size);
-ds4_context_memory ds4_context_memory_estimate_with_prefill(
-        ds4_backend backend,
-        int ctx_size,
-        uint32_t prefill_chunk);
+ds4_context_memory ds4_context_memory_estimate(int ctx_size);
 bool ds4_log_is_tty(FILE *fp);
 void ds4_log(FILE *fp, ds4_log_type type, const char *fmt, ...);
 int ds4_engine_generate_argmax(ds4_engine *e, const ds4_tokens *prompt,
@@ -202,8 +181,6 @@ int ds4_token_assistant(ds4_engine *e);
 
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size);
 void ds4_session_free(ds4_session *s);
-int ds4_session_power(ds4_session *s);
-int ds4_session_set_power(ds4_session *s, int power_percent);
 void ds4_session_set_progress(ds4_session *s, ds4_session_progress_fn fn, void *ud);
 /* UI-only progress. It may report fine-grained progress inside a prefill chunk;
  * callers must not treat it as a durable KV checkpoint boundary. */
@@ -220,13 +197,13 @@ void ds4_session_report_progress(ds4_session *s, const char *event, int current,
 typedef enum {
     DS4_SESSION_REWRITE_ERROR = -1,
     DS4_SESSION_REWRITE_OK = 0,
-    /* The live backend state cannot be rewritten safely in place.  The caller should
+    /* The live Metal graph state cannot be rewritten safely in place.  The caller should
      * restore an older checkpoint if it has one, then sync to the prompt. */
     DS4_SESSION_REWRITE_REBUILD_NEEDED = 1,
 } ds4_session_rewrite_result;
 
 /* Synchronize the live session to a full prompt token prefix.  If the current
- * checkpoint is a prefix, only the suffix is evaluated; otherwise the backend
+ * checkpoint is a prefix, only the suffix is evaluated; otherwise the Metal graph
  * state is refilled from scratch. */
 #define DS4_SESSION_SYNC_INTERRUPTED 2
 int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen);
@@ -286,8 +263,7 @@ typedef struct {
 } ds4_decode_item;
 
 /* Advance independent sessions by one token each. Batch size one is exactly
- * ds4_session_eval(). Backends without native batching use a correctness-first
- * sequential fallback. */
+ * ds4_session_eval(); retained host scheduling remains serialized when needed. */
 int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
                             char *err, size_t errlen);
 /* Advance one resumed prefill suffix and an independent decode batch as one

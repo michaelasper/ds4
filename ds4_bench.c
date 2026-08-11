@@ -30,7 +30,6 @@ typedef struct {
     const char *chat_prompt_path;
     const char *system;
     const char *csv_path;
-    ds4_backend backend;
     int threads;
     int ctx_start;
     int ctx_max;
@@ -145,19 +144,6 @@ static void bench_reject_unsupported_option(const char *arg) {
     exit(2);
 }
 
-static ds4_backend parse_backend(const char *s, const char *opt) {
-    if (!strcmp(s, "metal")) return DS4_BACKEND_METAL;
-    fprintf(stderr,
-            "ds4-bench: unsupported option %s %s; this product supports Laguna S2.1 on Apple Metal only\n",
-            opt,
-            s);
-    exit(2);
-}
-
-static ds4_backend default_backend(void) {
-    return DS4_BACKEND_METAL;
-}
-
 static char *read_file(const char *path) {
     FILE *fp = fopen(path, "rb");
     if (!fp) {
@@ -201,7 +187,6 @@ static bench_config parse_options(int argc, char **argv) {
     bench_config c = {
         .model_path = "ds4flash.gguf",
         .system = "You are a helpful assistant.",
-        .backend = default_backend(),
         .ctx_start = 2048,
         .ctx_max = 32768,
         .step_incr = 2048,
@@ -250,9 +235,9 @@ static bench_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.threads = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--backend")) {
-            c.backend = parse_backend(need_arg(&i, argc, argv, arg), arg);
+            bench_reject_unsupported_option(arg);
         } else if (!strcmp(arg, "--metal")) {
-            c.backend = DS4_BACKEND_METAL;
+            /* Retain the explicit product spelling as a harmless assertion. */
         } else if (!strcmp(arg, "--quality")) {
             c.quality = true;
         } else if (!strcmp(arg, "--warm-weights")) {
@@ -469,12 +454,11 @@ static int write_frontier_logits_json(
     fprintf(fp, "{\n  \"source\":\"ds4-bench\",\n  \"model\":");
     json_write_string(fp, cfg->model_path);
     fprintf(fp,
-            ",\n  \"backend\":\"%s\",\n  \"quality\":%s,\n"
+            ",\n  \"backend\":\"metal\",\n  \"quality\":%s,\n"
             "  \"quant_bits\":%d,\n  \"prompt_tokens\":%d,\n"
             "  \"frontier_tokens\":%d,\n  \"prefill_tokens\":%d,\n"
             "  \"ctx\":%d,\n  \"vocab\":%d,\n"
             "  \"argmax_id\":%d,\n  \"argmax_logit\":%.9g,\n  \"logits\":[",
-            ds4_backend_name(cfg->backend),
             cfg->quality ? "true" : "false",
             ds4_engine_routed_quant_bits(engine),
             frontier,
@@ -515,19 +499,12 @@ static int next_frontier(const bench_config *c, int cur) {
     return next;
 }
 
-static void log_context_memory(ds4_backend backend,
-                               int         ctx_size,
-                               uint32_t    prefill_chunk) {
-    ds4_context_memory m =
-        ds4_context_memory_estimate_with_prefill(backend,
-                                                 ctx_size,
-                                                 prefill_chunk);
+static void log_context_memory(int ctx_size) {
+    ds4_context_memory m = ds4_context_memory_estimate(ctx_size);
     fprintf(stderr,
-            "ds4-bench: context buffers %.2f MiB (ctx=%d, backend=%s, prefill_chunk=%u, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
+            "ds4-bench: Metal context buffers %.2f MiB (ctx=%d, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
             (double)m.total_bytes / (1024.0 * 1024.0),
             ctx_size,
-            ds4_backend_name(backend),
-            m.prefill_cap,
             m.raw_cap,
             m.comp_cap);
 }
@@ -537,7 +514,6 @@ int main(int argc, char **argv) {
 
     ds4_engine_options opt = {
         .model_path = cfg.model_path,
-        .backend = cfg.backend,
         .n_threads = cfg.threads,
         .context_size = cfg.ctx_alloc,
         .warm_weights = cfg.warm_weights,
@@ -547,9 +523,7 @@ int main(int argc, char **argv) {
     if (ds4_engine_open(&engine, &opt) != 0) {
         return 1;
     }
-    log_context_memory(opt.backend,
-                       cfg.ctx_alloc,
-                       ds4_engine_prefill_chunk(engine));
+    log_context_memory(cfg.ctx_alloc);
 
     char *text = read_file(cfg.prompt_path ? cfg.prompt_path : cfg.chat_prompt_path);
     ds4_tokens prompt = {0};
