@@ -286,7 +286,6 @@ int lgn2_session_pos(lgn2_session *s);
 int lgn2_session_ctx(lgn2_session *s);
 int lgn2_session_prefill_cap(lgn2_session *s);
 int lgn2_engine_routed_quant_bits(lgn2_engine *e);
-bool lgn2_engine_has_output_head(lgn2_engine *e);
 bool lgn2_engine_has_dflash(lgn2_engine *e);
 int lgn2_engine_dflash_draft_tokens(lgn2_engine *e);
 const lgn2_tokens *lgn2_session_tokens(lgn2_session *s);
@@ -296,6 +295,8 @@ const lgn2_tokens *lgn2_session_tokens(lgn2_session *s);
 #define LGN2_SESSION_PAYLOAD_MAGIC UINT32_C(0x34565344) /* "DSV4" */
 #define LGN2_SESSION_PAYLOAD_VERSION UINT32_C(2)
 #define LGN2_SESSION_PAYLOAD_U32_FIELDS 13u
+/* Reserved DSVL wire identifiers. LagoonNebula recognizes the historical
+ * format boundary but exposes no per-layer snapshot API for Laguna. */
 #define LGN2_SESSION_LAYER_PAYLOAD_MAGIC UINT32_C(0x4c565344) /* "DSVL" */
 #define LGN2_SESSION_LAYER_PAYLOAD_VERSION UINT32_C(1)
 #define LGN2_SESSION_LAYER_PAYLOAD_U32_FIELDS 14u
@@ -311,17 +312,5 @@ int lgn2_session_load_payload(lgn2_session *s, FILE *fp, uint64_t payload_bytes,
 int lgn2_session_save_snapshot(lgn2_session *s, lgn2_session_snapshot *snap, char *err, size_t errlen);
 int lgn2_session_load_snapshot(lgn2_session *s, const lgn2_session_snapshot *snap, char *err, size_t errlen);
 void lgn2_session_snapshot_free(lgn2_session_snapshot *snap);
-
-uint64_t lgn2_session_layer_payload_bytes(lgn2_session *s,
-                                         uint32_t layer_start,
-                                         uint32_t layer_end);
-int lgn2_session_save_layer_payload(lgn2_session *s, FILE *fp,
-                                   uint32_t layer_start, uint32_t layer_end,
-                                   char *err, size_t errlen);
-int lgn2_session_load_layer_payload(lgn2_session *s, FILE *fp,
-                                   uint64_t payload_bytes,
-                                   const int *tokens, uint32_t n_tokens,
-                                   uint32_t layer_start, uint32_t layer_end,
-                                   char *err, size_t errlen);
 
 #endif

@@ -19,7 +19,7 @@ enum {
  * byte span because GGUF strings are not NUL-terminated. */
 bool lgn_architecture_is_supported(const char *value, size_t value_len);
 
-/* Callback used by the Laguna GPT-2/GLM4 pre-tokenizer.  Each callback span
+/* Callback used by the Laguna Unicode-aware BPE pre-tokenizer. Each callback span
  * is a non-empty borrowed slice of the input, delivered in source order.  The
  * slice remains valid only until the callback returns.  Returning false stops
  * tokenization and makes lgn_bpe_pretokenize return false. */

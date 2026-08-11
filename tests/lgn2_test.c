@@ -10155,6 +10155,10 @@ static void test_laguna_session_surface_contract(void) {
     static const char *const removed_public[] = {
         "lgn2_engine_layer_compress_ratio",
         "lgn2_engine_hidden_f32_values",
+        "lgn2_engine_has_output_head",
+        "lgn2_session_layer_payload_bytes",
+        "lgn2_session_save_layer_payload",
+        "lgn2_session_load_layer_payload",
     };
     for (size_t i = 0;
          i < sizeof(removed_public) / sizeof(removed_public[0]); i++) {

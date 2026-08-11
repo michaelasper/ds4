@@ -3,12 +3,10 @@
 
 /* Private Laguna model boundary.
  *
- * This header is intentionally not included by lgn.h.  It is the temporary
- * facade shared by the GGUF loader in lgn2_engine.c and the Laguna S2.1 model module;
+ * This header is intentionally not included by lgn.h.  It is the facade
+ * shared by the GGUF loader in lgn2_engine.c and the Laguna S2.1 model module;
  * keeping these declarations private prevents tensor/GGUF details from
- * becoming part of the public Laguna API.  The lgn2_* names remain as
- * compatibility aliases for the existing engine structures while the
- * model-specific policy lives in lgn_model.c.
+ * becoming part of the public LagoonNebula API.
  */
 
 #include <stdbool.h>
@@ -74,17 +72,14 @@ enum {
 };
 
 typedef enum {
-    /* Keep the historical numeric space stable for private callers that
-     * inspect rejected model identities.  Admission accepts Laguna only. */
-    LGN2_MODEL_FAMILY_DEEPSEEK4 = 0,
+    /* Zero is a deliberately invalid sentinel.  Laguna keeps its explicit
+     * serialized identity value; no other model family is admitted. */
+    LGN2_MODEL_FAMILY_UNSUPPORTED = 0,
     LGN2_MODEL_FAMILY_LAGUNA    = 2,
 } lgn2_model_family;
 
 typedef enum {
-    /* The legacy values remain reserved so Laguna's KVC identity stays the
-     * explicit value 3 rather than being renumbered during the fork. */
-    LGN2_VARIANT_FLASH = 0,
-    LGN2_VARIANT_PRO   = 1,
+    /* Laguna's KVC identity remains the explicit value 3. */
     LGN2_VARIANT_LAGUNA_S21 = 3,
 } lgn2_variant;
 

@@ -72,7 +72,9 @@ The refactor branch already:
 - removes the remaining public raw-graph, first-token, output-head, and
   imatrix diagnostic APIs and CLI switches. Removed switches now fail during
   option parsing, before model I/O, and no deleted generic-graph entry point is
-  left reachable from Laguna;
+  left reachable from Laguna; the always-true output-head query and the
+  always-rejecting per-layer payload API are removed as part of the same clean
+  public boundary, while the versioned DSVL identifiers remain reserved;
 - contracts the public engine and session runtime to the Laguna target graph
   plus optional DFlash support: generic graph workspaces, MTP/DSpark support
   loading, native/backend batch dispatch, and legacy speculative schedulers no
@@ -92,6 +94,12 @@ The refactor branch already:
   drain-failure coverage;
 - fixes the product name as **LagoonNebula** and records **`lgn2`** as the
   repository, tool, API, environment, and local-state namespace;
+- removes the final private `ds4` probe label, neutralizes the rejected-family
+  sentinel, names Laguna's tokenizer policy directly, and drops an unreferenced
+  256-wide GLM FlashAttention specialization while preserving the active
+  router/MoE entry-point ABI;
+- pins the canonical model download to the immutable Hugging Face revision
+  that publishes the recorded SHA-256 instead of resolving mutable `main`;
 - retains only Laguna quality fixtures and tooling under `quality/`;
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.

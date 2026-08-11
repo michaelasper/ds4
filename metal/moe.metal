@@ -2791,8 +2791,8 @@ void kernel_mul_mv_q4_K_f32_impl(
     (void)shmem;
 }
 // Plain dense Q4_K matvec on the classic impl. The mul_mv_ext family used
-// by the generic dense path tops out around 220 GB/s on M5 for the GLM
-// DenseQ4 decode shapes; this impl streams the same rows at 530-650 GB/s.
+// by the generic dense path tops out around 220 GB/s on M5 for Laguna's
+// DenseQ4 decode shape; this impl streams the same rows at 530-650 GB/s.
 kernel void kernel_mul_mv_q4_K_dense_f32(
         constant lgn2_metal_args_mul_mv & args,
         device const char * src0,

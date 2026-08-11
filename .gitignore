@@ -5,6 +5,7 @@
 /lgn2_test
 /quality/score_official
 /lgn2.gguf
+# Migration hygiene only; LagoonNebula never consults this legacy model path.
 /ds4flash.gguf
 /TODO.md
 /gguf/

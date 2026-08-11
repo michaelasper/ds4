@@ -212,6 +212,20 @@ for symbol in "${legacy_symbols[@]}"; do
         pass "legacy public symbol $symbol absent"
     fi
 done
+removed_symbols=(
+    _lgn2_engine_has_output_head
+    _lgn2_session_layer_payload_bytes
+    _lgn2_session_save_layer_payload
+    _lgn2_session_load_layer_payload
+)
+for symbol in "${removed_symbols[@]}"; do
+    if nm -gU ./lgn2 | grep -F -- "$symbol" >/dev/null ||
+       nm -gU ./lgn2-server | grep -F -- "$symbol" >/dev/null; then
+        fail "removed public symbol $symbol is still exported"
+    else
+        pass "removed public symbol $symbol absent"
+    fi
+done
 legacy_spec_disable_env="LGN2""_MTP""_SPEC_DISABLE"
 if grep -Fq -- 'LGN2_DFLASH_SPEC_DISABLE' lgn2_cli.c lgn2_server.c &&
    ! grep -Fq -- "$legacy_spec_disable_env" lgn2_cli.c lgn2_server.c; then

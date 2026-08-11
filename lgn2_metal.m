@@ -1205,8 +1205,8 @@ static int lgn2_gpu_add_model_view_range(
         /*
          * Very large no-copy buffers can make Metal's VM validation dominate
          * startup or the first graph command on multi-hundred-GiB slices. Keep
-         * ordinary contiguous model mappings unchanged, but let distributed
-         * span maps use smaller overlapping views when a range already has to
+         * ordinary contiguous model mappings unchanged, but let split or
+         * overlapping span maps use smaller views when a range already has to
          * be split.
          */
         const uint64_t default_limit = 128ull * 1024ull * 1024ull * 1024ull;
@@ -2518,7 +2518,7 @@ static int lgn2_gpu_compile_tensor_probe(void) {
             "#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
             "using namespace metal;\n"
             "using namespace mpp::tensor_ops;\n"
-            "kernel void ds4_tensor_probe(\n"
+            "kernel void lgn2_tensor_probe(\n"
             "        tensor<device half,  dextents<int32_t, 2>> A [[buffer(0)]],\n"
             "        tensor<device half,  dextents<int32_t, 2>> B [[buffer(1)]],\n"
             "        device float *C [[buffer(2)]],\n"
@@ -2542,7 +2542,7 @@ static int lgn2_gpu_compile_tensor_probe(void) {
                     error ? [[error localizedDescription] UTF8String] : "(unknown)");
             return 0;
         }
-        id<MTLFunction> fn = [probe_library newFunctionWithName:@"ds4_tensor_probe"];
+        id<MTLFunction> fn = [probe_library newFunctionWithName:@"lgn2_tensor_probe"];
         if (!fn) {
             fprintf(stderr, "lgn2: Metal 4 tensor API probe function missing\n");
             return 0;
@@ -8290,8 +8290,8 @@ static int lgn2_gpu_matmul_quant_impl_tensor(
 
         /*
          * Small-batch Q4_K goes to the classic (llama.cpp-style) matvec:
-         * the mul_mv_ext family tops out around 220 GB/s on M5 for the GLM
-         * DenseQ4 decode shapes while this impl streams 530-650 GB/s
+         * the mul_mv_ext family tops out around 220 GB/s on M5 for Laguna's
+         * DenseQ4 decode shape while this impl streams 530-650 GB/s
          * (misc/q4mv_bench.m). Falls through to ext when unavailable.
          */
         if (weight_type == LGN2_METAL_TENSOR_Q4_K &&
@@ -9644,7 +9644,7 @@ int lgn2_gpu_matmul_f32_tensor(
             return 1;
         }
 
-        /* Generic multi-row path (GLM prefill shapes: one grid row per
+        /* Generic multi-row path (Laguna prefill shapes: one grid row per
          * token through the plain matvec pipeline). */
         {
             lgn2_gpu_q8_0_matvec_args mv_args = lgn2_gpu_make_f32_mv_args(in_dim, out_dim, n_tok);

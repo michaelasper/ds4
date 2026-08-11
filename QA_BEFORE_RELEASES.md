@@ -17,6 +17,11 @@ Record the commit, macOS/Xcode versions, hardware, GGUF filename and SHA-256,
 context size, and non-default selectors for every model-backed run. Never run
 two large model processes concurrently during correctness or performance work.
 
+The repository currently has no hosted Apple-silicon Metal CI. These are
+manual release gates: the release owner must run them on supported hardware,
+retain the logs, and treat an unavailable or skipped command as not run rather
+than as a passing check.
+
 ## 1. Repository and build sanity
 
 Start from the exact release commit in a clean checkout:

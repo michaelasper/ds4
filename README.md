@@ -317,10 +317,11 @@ that are not part of the current lgn2 interface.
 
 ## Attribution and license
 
-LagoonNebula is a DS4-derived project released under the [MIT License](LICENSE);
-the retained `ds4.c` copyright notice acknowledges that origin while the
-supported public product surface is LagoonNebula/lgn2. It exists thanks to the
-[llama.cpp](https://github.com/ggml-org/llama.cpp) and
+LagoonNebula is derived from [DS4](https://github.com/antirez/ds4) and released
+under the [MIT License](LICENSE);
+the retained “ds4.c authors” copyright notice in that license acknowledges the
+origin, while the supported public product surface is LagoonNebula/lgn2. It
+exists thanks to the [llama.cpp](https://github.com/ggml-org/llama.cpp) and
 [GGML](https://github.com/ggerganov/ggml) projects. The runtime and tools build
 on that ecosystem's code, kernels, quantization formats, GGUF conventions, and
 engineering; retained upstream notices and license terms must remain with any
@@ -347,4 +348,4 @@ Crafted with [Readme Craft](https://github.com/motiful/readme-craft).
 
 [license-shield]: https://img.shields.io/badge/License-MIT-yellow.svg
 [license-url]: LICENSE
-[model-url]: https://huggingface.co/antirez/Laguna-S-2.1-GGUF/resolve/main/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
+[model-url]: https://huggingface.co/antirez/Laguna-S-2.1-GGUF/resolve/5a540e517c09877fc7370a4ba2b375829c76fa3b/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf

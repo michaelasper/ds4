@@ -1260,10 +1260,6 @@ static double lgn2_bytes_to_gib(uint64_t bytes) {
     return (double)bytes / 1073741824.0;
 }
 
-static bool weights_have_output_head(const lgn2_weights *w) {
-    return lgn_weights_have_output_head(w);
-}
-
 static void weights_validate_laguna_layout(
         const lgn2_weights *w,
         uint32_t           layer_start,
@@ -7728,65 +7724,6 @@ static void lgn2_session_dflash_invalidate(lgn2_session *s) {
 
 #endif
 
-static uint32_t lgn2_model_normal_layer_count(void) {
-    return LGN2_N_LAYER <= LGN2_MAX_LAYER ? (uint32_t)LGN2_N_LAYER : 0;
-}
-
-static bool lgn2_layer_payload_range_valid(uint32_t layer_start, uint32_t layer_end) {
-    const uint32_t n_layers = lgn2_model_normal_layer_count();
-    return n_layers != 0 && layer_start <= layer_end && layer_end < n_layers;
-}
-
-uint64_t lgn2_session_layer_payload_bytes(lgn2_session *s,
-                                         uint32_t layer_start,
-                                         uint32_t layer_end) {
-    if (!s || !s->checkpoint_valid ||
-        !lgn2_layer_payload_range_valid(layer_start, layer_end))
-        return 0;
-    if (lgn2_session_is_laguna(s)) return 0;
-    return 0;
-}
-
-int lgn2_session_save_layer_payload(lgn2_session *s, FILE *fp,
-                                   uint32_t layer_start, uint32_t layer_end,
-                                   char *err, size_t errlen) {
-    if (!s || !fp || !s->checkpoint_valid ||
-        !lgn2_layer_payload_range_valid(layer_start, layer_end)) {
-        payload_set_err(err, errlen, "invalid session layer payload save");
-        return 1;
-    }
-    if (lgn2_session_is_laguna(s)) {
-        payload_set_err(err, errlen,
-                        "Laguna layer snapshots are not supported");
-        return 1;
-    }
-    payload_set_err(err, errlen, "generic graph layer payloads are unsupported");
-    return 1;
-}
-
-int lgn2_session_load_layer_payload(lgn2_session *s, FILE *fp,
-                                   uint64_t payload_bytes,
-                                   const int *tokens, uint32_t n_tokens,
-                                   uint32_t layer_start, uint32_t layer_end,
-                                   char *err, size_t errlen) {
-    if (!s || !fp || !tokens ||
-        !lgn2_layer_payload_range_valid(layer_start, layer_end)) {
-        payload_set_err(err, errlen, "invalid session layer payload load");
-        return 1;
-    }
-    if (lgn2_session_is_laguna(s)) {
-        payload_set_err(err, errlen,
-                        "Laguna layer restores are not supported");
-        return 1;
-    }
-    (void)fp;
-    (void)payload_bytes;
-    (void)tokens;
-    (void)n_tokens;
-    payload_set_err(err, errlen, "generic graph layer payloads are unsupported");
-    return 1;
-}
-
 int lgn2_engine_routed_quant_bits(lgn2_engine *e) {
     if (!e) return 0;
     for (uint32_t il = 0; il < LGN2_N_LAYER; il++) {
@@ -7795,10 +7732,6 @@ int lgn2_engine_routed_quant_bits(lgn2_engine *e) {
         return gate->type == LGN2_TENSOR_Q4_K ? 4 : 2;
     }
     return 0;
-}
-
-bool lgn2_engine_has_output_head(lgn2_engine *e) {
-    return e && weights_have_output_head(&e->weights);
 }
 
 bool lgn2_engine_has_dflash(lgn2_engine *e) {
@@ -11166,7 +11099,7 @@ bool lgn2_test_laguna_graph_lifecycle(void) {
     bool ok = true;
     lgn_gpu_graph direct = {0};
     lgn2_shape wrong_family = g_lgn2_shape;
-    wrong_family.family = LGN2_MODEL_FAMILY_DEEPSEEK4;
+    wrong_family.family = LGN2_MODEL_FAMILY_UNSUPPORTED;
     direct.dense_q8_fusion_enabled = true;
     direct.dense_q8_pending.decode_mid_fused = 77u;
     int32_t shared_id = -1;
@@ -11326,7 +11259,7 @@ bool lgn2_test_laguna_dflash_graph_lifecycle(void) {
 
     lgn2_dflash_gpu_graph wrapped = {0};
     lgn2_shape wrong_family = g_lgn2_shape;
-    wrong_family.family = LGN2_MODEL_FAMILY_DEEPSEEK4;
+    wrong_family.family = LGN2_MODEL_FAMILY_UNSUPPORTED;
     g_lgn2_shape = wrong_family;
     if (dflash_graph_alloc(&wrapped)) ok = false;
     for (size_t i = 0; i < sizeof(wrapped); i++) {

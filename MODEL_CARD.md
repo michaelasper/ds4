@@ -10,8 +10,8 @@ SHA-256:  61fc66596597985cb9408a8530de6322d9e0d5b1d2ad4ed6503938018e0ce903
 
 The model is approximately 45 GiB, so the benchmark runbook asks for at least
 55 GiB free on the model volume. The downloader fetches the file from the
-locally recorded Hugging Face source
-`https://huggingface.co/antirez/Laguna-S-2.1-GGUF/resolve/main/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf`
+locally recorded, immutable Hugging Face revision
+`https://huggingface.co/antirez/Laguna-S-2.1-GGUF/resolve/5a540e517c09877fc7370a4ba2b375829c76fa3b/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf`
 and verifies the pinned SHA-256 before installing it.
 
 ```sh

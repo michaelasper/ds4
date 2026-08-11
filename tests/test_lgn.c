@@ -278,8 +278,8 @@ static void test_weight_table_contract(void) {
     CHECK(lgn_model_shape()->n_layer == LGN_LAYER_COUNT &&
               lgn_model_shape()->n_expert == 256u,
           "runtime model profile matches contracted capacities");
-    CHECK(strstr(engine, "return lgn_weights_have_output_head(w);") != NULL,
-          "engine output-head check uses the Laguna contract");
+    CHECK(strstr(engine, "static bool weights_have_output_head") == NULL,
+          "dead engine output-head wrapper stays absent");
 
     free(engine);
     free(model_header);

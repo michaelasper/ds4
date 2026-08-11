@@ -71,9 +71,9 @@ typedef struct {
     bool is_letter;
     bool is_number;
     bool is_whitespace;
-} lgn_glm4_char_info;
+} lgn_bpe_char_info;
 
-static bool lgn_glm4_unicode_whitespace(uint32_t cp) {
+static bool lgn_unicode_whitespace(uint32_t cp) {
     if (cp < 128) return lgn_ascii_space((uint8_t)cp);
     return cp == 0x0085 ||
            cp == 0x00a0 ||
@@ -86,7 +86,7 @@ static bool lgn_glm4_unicode_whitespace(uint32_t cp) {
            cp == 0x3000;
 }
 
-static bool lgn_glm4_unicode_number(uint32_t cp) {
+static bool lgn_unicode_number(uint32_t cp) {
     if (cp < 128) return lgn_ascii_digit((uint8_t)cp);
     return (cp >= 0x0660 && cp <= 0x0669) ||
            (cp >= 0x06f0 && cp <= 0x06f9) ||
@@ -111,7 +111,7 @@ static bool lgn_glm4_unicode_number(uint32_t cp) {
            (cp >= 0xff10 && cp <= 0xff19);
 }
 
-static bool lgn_glm4_unicode_punct_symbol(uint32_t cp) {
+static bool lgn_unicode_punct_symbol(uint32_t cp) {
     if (cp < 128) return lgn_ascii_punct_symbol((uint8_t)cp);
     return (cp >= 0x00a1 && cp <= 0x00a9) ||
            (cp >= 0x00ab && cp <= 0x00ac) ||
@@ -158,24 +158,24 @@ static bool lgn_glm4_unicode_punct_symbol(uint32_t cp) {
            (cp >= 0x1f000 && cp <= 0x1faff);
 }
 
-static lgn_glm4_char_info lgn_glm4_char_at(const char *s,
-                                            uint64_t    len,
-                                            uint64_t    pos) {
-    lgn_glm4_char_info info;
+static lgn_bpe_char_info lgn_bpe_char_at(const char *s,
+                                         uint64_t    len,
+                                         uint64_t    pos) {
+    lgn_bpe_char_info info;
     memset(&info, 0, sizeof(info));
     if (pos >= len) return info;
 
     info.valid = true;
     info.cp = lgn_utf8_peek_one(s, len, pos, &info.next);
-    info.is_whitespace = lgn_glm4_unicode_whitespace(info.cp);
-    info.is_number = lgn_glm4_unicode_number(info.cp);
+    info.is_whitespace = lgn_unicode_whitespace(info.cp);
+    info.is_number = lgn_unicode_number(info.cp);
     if (info.cp < 128) {
         info.is_letter = lgn_ascii_alpha((uint8_t)info.cp);
     } else {
         info.is_letter =
             !info.is_whitespace &&
             !info.is_number &&
-            !lgn_glm4_unicode_punct_symbol(info.cp);
+            !lgn_unicode_punct_symbol(info.cp);
     }
     return info;
 }
@@ -193,23 +193,23 @@ static bool lgn_emit_span(const char       *text,
     return emit(text + start, (size_t)(end - start), userdata);
 }
 
-/* ChatGLM4/GLM pre-tokenization.  Laguna uses max_digits=1 and applies this
- * policy independently to each non-LF/LF span in lgn_bpe_pretokenize(). */
-static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
-                                               uint64_t          len,
-                                               int               max_digits,
-                                               lgn_bpe_piece_fn  emit,
-                                               void             *userdata) {
+/* Laguna uses max_digits=1 and applies this segmentation policy independently
+ * to each non-LF/LF span in lgn_bpe_pretokenize(). */
+static bool lgn_bpe_tokenize_text_segment(const char       *text,
+                                          uint64_t          len,
+                                          int               max_digits,
+                                          lgn_bpe_piece_fn  emit,
+                                          void             *userdata) {
     uint64_t pos = 0;
 
     while (pos < len) {
         uint64_t start = pos;
-        lgn_glm4_char_info cur = lgn_glm4_char_at(text, len, pos);
+        lgn_bpe_char_info cur = lgn_bpe_char_at(text, len, pos);
 
         if (!cur.valid) break;
 
         if (cur.cp == '\'' && cur.next < len) {
-            lgn_glm4_char_info next = lgn_glm4_char_at(text, len, cur.next);
+            lgn_bpe_char_info next = lgn_bpe_char_at(text, len, cur.next);
             uint32_t n1 = lgn_ascii_tolower_cp(next.cp);
             if (n1 == 's' || n1 == 't' || n1 == 'm' || n1 == 'd') {
                 pos = next.next;
@@ -217,7 +217,7 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
                 continue;
             }
             if (next.valid && next.next < len) {
-                lgn_glm4_char_info next2 = lgn_glm4_char_at(text, len, next.next);
+                lgn_bpe_char_info next2 = lgn_bpe_char_at(text, len, next.next);
                 uint32_t n2 = lgn_ascii_tolower_cp(next2.cp);
                 if ((n1 == 'r' && n2 == 'e') ||
                     (n1 == 'v' && n2 == 'e') ||
@@ -230,11 +230,11 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
         }
 
         if (!(cur.cp == '\r' || cur.cp == '\n' || cur.is_number)) {
-            lgn_glm4_char_info next = lgn_glm4_char_at(text, len, cur.next);
+            lgn_bpe_char_info next = lgn_bpe_char_at(text, len, cur.next);
             if (cur.is_letter || next.is_letter) {
                 pos = cur.next;
                 while (pos < len) {
-                    lgn_glm4_char_info scan = lgn_glm4_char_at(text, len, pos);
+                    lgn_bpe_char_info scan = lgn_bpe_char_at(text, len, pos);
                     if (!scan.valid || !scan.is_letter) break;
                     pos = scan.next;
                 }
@@ -246,7 +246,7 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
         if (cur.is_number) {
             int ndigits = 0;
             while (pos < len && ndigits < max_digits) {
-                lgn_glm4_char_info scan = lgn_glm4_char_at(text, len, pos);
+                lgn_bpe_char_info scan = lgn_bpe_char_at(text, len, pos);
                 if (!scan.valid || !scan.is_number) break;
                 pos = scan.next;
                 ndigits++;
@@ -255,11 +255,11 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
             continue;
         }
 
-        lgn_glm4_char_info punct = cur;
+        lgn_bpe_char_info punct = cur;
         uint64_t punct_pos = pos;
         if (cur.cp == ' ') {
             punct_pos = cur.next;
-            punct = lgn_glm4_char_at(text, len, punct_pos);
+            punct = lgn_bpe_char_at(text, len, punct_pos);
         }
         if (punct.valid &&
             !punct.is_whitespace &&
@@ -267,7 +267,7 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
             !punct.is_number) {
             pos = punct_pos;
             while (pos < len) {
-                lgn_glm4_char_info scan = lgn_glm4_char_at(text, len, pos);
+                lgn_bpe_char_info scan = lgn_bpe_char_at(text, len, pos);
                 if (!scan.valid ||
                     scan.is_whitespace ||
                     scan.is_letter ||
@@ -277,7 +277,7 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
                 pos = scan.next;
             }
             while (pos < len) {
-                lgn_glm4_char_info scan = lgn_glm4_char_at(text, len, pos);
+                lgn_bpe_char_info scan = lgn_bpe_char_at(text, len, pos);
                 if (!scan.valid || !(scan.cp == '\r' || scan.cp == '\n')) break;
                 pos = scan.next;
             }
@@ -291,7 +291,7 @@ static bool lgn_bpe_tokenize_text_glm4_segment(const char       *text,
             uint64_t last_ws_start = pos;
             int nspace = 0;
             while (p < len) {
-                lgn_glm4_char_info scan = lgn_glm4_char_at(text, len, p);
+                lgn_bpe_char_info scan = lgn_bpe_char_at(text, len, p);
                 if (!scan.valid || !scan.is_whitespace) break;
                 last_ws_start = p;
                 if (scan.cp == '\r' || scan.cp == '\n') last_newline_end = scan.next;
@@ -334,11 +334,11 @@ static bool lgn_bpe_tokenize_text_laguna(const char       *text,
         } else {
             while (pos < len && text[pos] != '\n') pos++;
         }
-        if (!lgn_bpe_tokenize_text_glm4_segment(text + start,
-                                                pos - start,
-                                                1,
-                                                emit,
-                                                userdata)) {
+        if (!lgn_bpe_tokenize_text_segment(text + start,
+                                           pos - start,
+                                           1,
+                                           emit,
+                                           userdata)) {
             return false;
         }
     }
