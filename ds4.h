@@ -114,8 +114,6 @@ void ds4_engine_summary(ds4_engine *e);
 int ds4_engine_vocab_size(ds4_engine *e);
 const char *ds4_engine_model_name(ds4_engine *e);
 int ds4_engine_layer_count(ds4_engine *e);
-uint32_t ds4_engine_layer_compress_ratio(ds4_engine *e, uint32_t layer);
-uint64_t ds4_engine_hidden_f32_values(ds4_engine *e);
 /* Stable id for cache compatibility.  Laguna S2.1 deliberately keeps the
  * explicit private identity value 3; KVC/KV headers continue to serialize
  * this byte in place without changing their wire layout. */

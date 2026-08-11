@@ -10113,6 +10113,89 @@ static void test_laguna_moe_abi_contract(void) {
     free(header);
 }
 
+/* The supported session owns only Laguna's Metal graph state.  Keep this
+ * source-level fence alongside the ABI contract so a future compatibility
+ * edit cannot quietly restore the unreachable host CPU/compressed/indexer
+ * cache or its public inspection APIs.  The retained strings pin the active
+ * DSV4 payload and DFlash restore boundary at the same time. */
+static void test_laguna_session_surface_contract(void) {
+    char *engine = test_read_file("ds4.c");
+    char *header = test_read_file("ds4.h");
+    if (!engine) engine = test_read_file("../ds4.c");
+    if (!header) header = test_read_file("../ds4.h");
+    TEST_ASSERT(engine != NULL);
+    TEST_ASSERT(header != NULL);
+    if (!engine || !header) {
+        free(engine);
+        free(header);
+        return;
+    }
+
+    static const char *const removed_engine[] = {
+        "g_ds4_compress_ratios",
+        "ds4_layer_compress_ratio",
+        "ds4_layer_cache",
+        "ds4_kv_cache",
+        "cpu_cache",
+        "kv_cache_init",
+        "kv_cache_free",
+        "ds4_default_raw_cap",
+        "session_cpu_",
+        "layer_attn_state_bytes",
+        "layer_index_state_bytes",
+        "ds4_session_is_cpu",
+        "ds4_engine_layer_compress_ratio",
+        "ds4_engine_hidden_f32_values",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_engine) / sizeof(removed_engine[0]); i++) {
+        TEST_ASSERT(strstr(engine, removed_engine[i]) == NULL);
+    }
+
+    static const char *const removed_public[] = {
+        "ds4_engine_layer_compress_ratio",
+        "ds4_engine_hidden_f32_values",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_public) / sizeof(removed_public[0]); i++) {
+        TEST_ASSERT(strstr(header, removed_public[i]) == NULL);
+    }
+
+    static const char *const retained_engine[] = {
+        "DS4_SESSION_PAYLOAD_MAGIC",
+        "DS4_SESSION_PAYLOAD_VERSION",
+        "payload_write_laguna_ring",
+        "payload_read_laguna_ring",
+        "ds4_session_dflash_invalidate(s)",
+        "ds4_engine_model_id",
+        "DS4_MODEL_VARIANT",
+    };
+    for (size_t i = 0;
+         i < sizeof(retained_engine) / sizeof(retained_engine[0]); i++) {
+        TEST_ASSERT(strstr(engine, retained_engine[i]) != NULL);
+    }
+
+    static const char *const retained_public[] = {
+        "#define DS4_SESSION_PAYLOAD_MAGIC",
+        "#define DS4_SESSION_PAYLOAD_VERSION",
+        "#define DS4_SESSION_LAYER_PAYLOAD_MAGIC",
+        "#define DS4_SESSION_LAYER_PAYLOAD_VERSION",
+        "int ds4_engine_model_id(ds4_engine *e);",
+    };
+    for (size_t i = 0;
+         i < sizeof(retained_public) / sizeof(retained_public[0]); i++) {
+        TEST_ASSERT(strstr(header, retained_public[i]) != NULL);
+    }
+
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    /* Exercise the malformed payload boundary as well as the source fence:
+     * restore must invalidate DFlash state before rejecting its header. */
+    TEST_ASSERT(ds4_test_dflash_payload_invalidation());
+#endif
+    free(engine);
+    free(header);
+}
+
 typedef struct {
     const char *name;
     int number;
@@ -10809,6 +10892,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-architecture", "laguna-architecture",
      "accept literal Laguna GGUF architecture and reject legacy/missing values",
      test_laguna_architecture_gate, false},
+    {"--laguna-session-surface", "laguna-session-surface",
+     "keep the public/session payload surface Metal-only and DFlash-safe",
+     test_laguna_session_surface_contract, false},
     {"--laguna-selector-parser", "laguna-selector-parser",
      "strict Laguna selector and prefill-route parser boundaries",
      test_laguna_selector_parser, false},

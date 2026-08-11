@@ -153,8 +153,6 @@ static ds4_shape g_ds4_shape = {
     .rope_orig_ctx = UINT64_C(8192),
 };
 
-static uint32_t g_ds4_compress_ratios[DS4_MAX_LAYER] = {0};
-
 #define DS4_MODEL_SHAPE_NAME          (g_ds4_shape.name)
 #define DS4_MODEL_FAMILY              (g_ds4_shape.family)
 #define DS4_MODEL_VARIANT             (g_ds4_shape.variant)
@@ -478,14 +476,6 @@ static void ds4_die(const char *msg) {
     exit(1);
 }
 
-/* Attention compression is read from GGUF metadata after validating that it
- * matches the exact layout expected for the loaded model shape. */
-static uint32_t ds4_layer_compress_ratio(uint32_t il) {
-    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_DEEPSEEK4) return 0;
-    if (il >= DS4_N_LAYER) ds4_die("DeepSeek4 layer index is outside the loaded model layout");
-    return g_ds4_compress_ratios[il];
-}
-
 #ifndef DS4_NO_GPU
 static uint32_t ds4_layer_head_count(uint32_t il) {
     if (il >= DS4_N_LAYER) ds4_die("layer index is outside the loaded model layout");
@@ -571,20 +561,6 @@ static void *xrealloc(void *ptr, size_t size) {
     ds4_alloc_guard_check("realloc", size);
     void *p = realloc(ptr, size);
     if (!p) ds4_die("out of memory");
-    return p;
-}
-
-static void *xmalloc_zeroed(size_t n, size_t size) {
-    if (size != 0 && n > SIZE_MAX / size) ds4_die("allocation size overflow");
-    const size_t total = n * size;
-    void *p = xmalloc(total ? total : 1);
-    /*
-     * This is intentionally not calloc(). Large untouched calloc ranges may be
-     * represented by the VM through shared zero-page bookkeeping. Explicitly
-     * writing zeroes while host payload/cache storage is allocated keeps those
-     * pages private and avoids delayed first-touch faults.
-     */
-    memset(p, 0, total);
     return p;
 }
 
@@ -1892,7 +1868,6 @@ static void weights_validate_layout(
 
 static void config_validate_laguna_model(const ds4_model *m) {
     g_ds4_shape = *lgn_model_shape();
-    memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
     lgn_model_validate_config(m);
 }
 
@@ -3158,102 +3133,6 @@ typedef struct {
 } swiglu_batch_ctx;
 
 
-
-/* =========================================================================
- * Session Payload KV Layout.
- * =========================================================================
- *
- * These host allocations are retained for KVC/KTM/DSV4/DSVL payload byte
- * compatibility.  Metal owns all inference execution; no host inference
- * route consumes this cache.
- */
-
-typedef struct {
-    float *raw_kv;
-    uint32_t n_raw;
-    uint32_t cap_raw;
-
-    uint32_t compress_ratio;
-    uint32_t comp_cap;
-    uint32_t n_comp;
-    float *attn_comp_kv;
-    float *attn_state_kv;
-    float *attn_state_score;
-
-    uint32_t n_index_comp;
-    float *index_comp_kv;
-    float *index_state_kv;
-    float *index_state_score;
-} ds4_layer_cache;
-
-typedef struct {
-    ds4_layer_cache layer[DS4_MAX_LAYER];
-    uint32_t head_dim;
-} ds4_kv_cache;
-
-static uint32_t ds4_default_raw_cap(uint32_t ctx_size) {
-    uint32_t raw_cap = DS4_N_SWA;
-    if (raw_cap > ctx_size) raw_cap = ctx_size;
-    if (raw_cap == 0) raw_cap = 1;
-    return raw_cap;
-}
-/* Allocate per-layer KV state: a raw sliding window for all layers, plus
- * compressed attention/indexer caches for layers whose ratio is nonzero. */
-static void kv_cache_init(ds4_kv_cache *cache, uint32_t ctx_size, uint32_t raw_cap) {
-    memset(cache, 0, sizeof(*cache));
-    if (raw_cap == 0) raw_cap = ds4_default_raw_cap(ctx_size);
-    if (raw_cap > ctx_size) raw_cap = ctx_size;
-    if (raw_cap == 0) raw_cap = 1;
-
-    cache->head_dim = DS4_N_HEAD_DIM;
-
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        const uint32_t ratio = ds4_layer_compress_ratio(il);
-        cache->layer[il].cap_raw = raw_cap;
-        cache->layer[il].raw_kv = xmalloc_zeroed((size_t)raw_cap * DS4_N_HEAD_DIM, sizeof(float));
-        cache->layer[il].compress_ratio = ratio;
-
-        if (ratio != 0) {
-            const uint32_t coff = ratio == 4 ? 2u : 1u;
-            const uint32_t comp_cap = ctx_size / ratio + 2;
-            const uint32_t attn_width = coff * DS4_N_HEAD_DIM;
-            const uint32_t attn_rows = coff * ratio;
-
-            cache->layer[il].comp_cap = comp_cap;
-            cache->layer[il].attn_comp_kv = xmalloc_zeroed((size_t)comp_cap * DS4_N_HEAD_DIM, sizeof(float));
-            cache->layer[il].attn_state_kv = xmalloc_zeroed((size_t)attn_width * attn_rows, sizeof(float));
-            cache->layer[il].attn_state_score = xmalloc((size_t)attn_width * attn_rows * sizeof(float));
-            for (uint64_t i = 0; i < (uint64_t)attn_width * attn_rows; i++) {
-                cache->layer[il].attn_state_score[i] = DS4_NEG_INF;
-            }
-
-            if (ratio == 4) {
-                const uint32_t index_width = coff * DS4_N_INDEXER_HEAD_DIM;
-                const uint32_t index_rows = coff * ratio;
-                cache->layer[il].index_comp_kv = xmalloc_zeroed((size_t)comp_cap * DS4_N_INDEXER_HEAD_DIM, sizeof(float));
-                cache->layer[il].index_state_kv = xmalloc_zeroed((size_t)index_width * index_rows, sizeof(float));
-                cache->layer[il].index_state_score = xmalloc((size_t)index_width * index_rows * sizeof(float));
-                for (uint64_t i = 0; i < (uint64_t)index_width * index_rows; i++) {
-                    cache->layer[il].index_state_score[i] = DS4_NEG_INF;
-                }
-            }
-        }
-    }
-}
-
-static void kv_cache_free(ds4_kv_cache *cache) {
-    if (!cache) return;
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        free(cache->layer[il].raw_kv);
-        free(cache->layer[il].attn_comp_kv);
-        free(cache->layer[il].attn_state_kv);
-        free(cache->layer[il].attn_state_score);
-        free(cache->layer[il].index_comp_kv);
-        free(cache->layer[il].index_state_kv);
-        free(cache->layer[il].index_state_score);
-    }
-    memset(cache, 0, sizeof(*cache));
-}
 
 #ifndef DS4_NO_GPU
 static int sample_argmax(const float *logits, uint32_t n_vocab);
@@ -9124,7 +9003,6 @@ struct ds4_session {
     bool dflash_suspended;
     bool dflash_guard_decided;
 #endif
-    ds4_kv_cache cpu_cache;
     token_vec checkpoint;
     float *logits;
     float *sample_probs;
@@ -9196,17 +9074,16 @@ void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out) {
  * graph-specific payload below to the engine.  This payload is intentionally
  * not mmaped: restoring a checkpoint copies bytes back into the already
  * allocated Metal tensors, preserving the same live graph buffers used by
- * normal prefill/decode.  The raw SWA cache is serialized as the last logical
- * window only; suffix prefill writes its own raw rows before attention.  The
- * compressed caches are serialized up to their live row counts because sparse
- * attention may select rows from the whole prefix.
+ * normal prefill/decode.  Laguna's circular F16 key/value caches are
+ * serialized in logical token order, with each layer retaining only the rows
+ * live at the checkpoint.  A restore can therefore use a different physical
+ * ring position without changing the next-token state.
  *
  * The payload is model-specific rather than self-describing.  The fixed header
  * records enough shape information to reject a file written for a different
- * DS4 runtime, then the body writes: checkpoint tokens, last logits, per-layer
- * compressed row counts, raw SWA rows in logical order, compressed attention
- * rows, and the compressor/indexer frontiers.  That is the minimum state needed
- * for the next token to match a session that had just prefetched the prefix.
+ * Laguna runtime, then the body writes checkpoint tokens, last logits, and
+ * per-layer key/value rows.  That is the minimum state needed for the next
+ * token to match a session that had just prefetched the prefix.
  */
 
 #define DS4_SESSION_IO_CHUNK (8u * 1024u * 1024u)
@@ -9328,16 +9205,6 @@ static int payload_copy_file_bytes(FILE *src, FILE *dst, uint64_t bytes, char *e
     }
     free(buf);
     return rc;
-}
-
-static DS4_MAYBE_UNUSED uint64_t layer_attn_state_bytes(uint32_t ratio) {
-    const uint32_t coff = ratio == 4 ? 2u : 1u;
-    return (uint64_t)coff * DS4_N_HEAD_DIM * coff * ratio * sizeof(float);
-}
-
-static DS4_MAYBE_UNUSED uint64_t layer_index_state_bytes(uint32_t ratio) {
-    const uint32_t coff = ratio == 4 ? 2u : 1u;
-    return (uint64_t)coff * DS4_N_INDEXER_HEAD_DIM * coff * ratio * sizeof(float);
 }
 
 #ifndef DS4_NO_GPU
@@ -9571,13 +9438,6 @@ static DS4_MAYBE_UNUSED int payload_read_tensor_span_f32_as_f16(FILE *fp, ds4_gp
 
 #endif
 
-/* Retained only as a source-compatibility seam for the serializer's old
- * layout helpers.  No public route can create a host-inference session. */
-static bool ds4_session_is_cpu(const ds4_session *s) {
-    (void)s;
-    return false;
-}
-
 static bool ds4_session_is_laguna(const ds4_session *s) {
     return s && s->engine && DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA;
 }
@@ -9601,51 +9461,6 @@ static uint32_t ds4_model_normal_layer_count(void) {
     return DS4_N_LAYER <= DS4_MAX_LAYER ? (uint32_t)DS4_N_LAYER : 0;
 }
 
-static uint32_t session_cpu_raw_live_rows(const ds4_session *s) {
-    if (!s || !s->checkpoint_valid) return 0;
-    uint32_t rows = ds4_default_raw_cap((uint32_t)s->ctx_size);
-    if (rows > (uint32_t)s->checkpoint.len) rows = (uint32_t)s->checkpoint.len;
-    return rows;
-}
-
-static uint32_t session_cpu_comp_cap(const ds4_session *s) {
-    if (!s) return 0;
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        const ds4_layer_cache *layer = &s->cpu_cache.layer[il];
-        if (layer->compress_ratio == 4) return layer->comp_cap;
-    }
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        const ds4_layer_cache *layer = &s->cpu_cache.layer[il];
-        if (layer->compress_ratio != 0) return layer->comp_cap;
-    }
-    return (uint32_t)s->ctx_size;
-}
-
-static uint64_t session_cpu_payload_live_tensor_bytes(const ds4_session *s) {
-    uint64_t bytes = 0;
-    const uint32_t raw_live = session_cpu_raw_live_rows(s);
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        const ds4_layer_cache *layer = &s->cpu_cache.layer[il];
-        bytes += (uint64_t)raw_live * DS4_N_HEAD_DIM * sizeof(float);
-        const uint32_t ratio = layer->compress_ratio;
-        if (ratio == 0) continue;
-        bytes += (uint64_t)layer->n_comp * DS4_N_HEAD_DIM * sizeof(float);
-        bytes += layer_attn_state_bytes(ratio);
-        bytes += layer_attn_state_bytes(ratio);
-        if (ratio == 4) {
-            bytes += (uint64_t)layer->n_index_comp * DS4_N_INDEXER_HEAD_DIM * sizeof(float);
-            bytes += layer_index_state_bytes(ratio);
-            bytes += layer_index_state_bytes(ratio);
-        }
-    }
-    return bytes;
-}
-
-static void session_cpu_reset_cache(ds4_session *s) {
-    kv_cache_free(&s->cpu_cache);
-    kv_cache_init(&s->cpu_cache, (uint32_t)s->ctx_size, 0);
-}
-
 static bool ds4_layer_payload_range_valid(uint32_t layer_start, uint32_t layer_end) {
     const uint32_t n_layers = ds4_model_normal_layer_count();
     return n_layers != 0 && layer_start <= layer_end && layer_end < n_layers;
@@ -9657,7 +9472,6 @@ uint64_t ds4_session_layer_payload_bytes(ds4_session *s,
     if (!s || !s->checkpoint_valid ||
         !ds4_layer_payload_range_valid(layer_start, layer_end))
         return 0;
-    if (ds4_session_is_cpu(s)) return 0;
     if (ds4_session_is_laguna(s)) return 0;
     return 0;
 }
@@ -9668,10 +9482,6 @@ int ds4_session_save_layer_payload(ds4_session *s, FILE *fp,
     if (!s || !fp || !s->checkpoint_valid ||
         !ds4_layer_payload_range_valid(layer_start, layer_end)) {
         payload_set_err(err, errlen, "invalid session layer payload save");
-        return 1;
-    }
-    if (ds4_session_is_cpu(s)) {
-        payload_set_err(err, errlen, "layer payloads require the graph backend");
         return 1;
     }
     if (ds4_session_is_laguna(s)) {
@@ -9691,10 +9501,6 @@ int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
     if (!s || !fp || !tokens ||
         !ds4_layer_payload_range_valid(layer_start, layer_end)) {
         payload_set_err(err, errlen, "invalid session layer payload load");
-        return 1;
-    }
-    if (ds4_session_is_cpu(s)) {
-        payload_set_err(err, errlen, "layer payloads require the graph backend");
         return 1;
     }
     if (ds4_session_is_laguna(s)) {
@@ -9754,15 +9560,6 @@ uint64_t ds4_session_payload_bytes(ds4_session *s) {
         if (bytes > UINT64_MAX - kv_bytes) return 0;
         return bytes + kv_bytes;
 #endif
-    }
-    if (ds4_session_is_cpu(s)) {
-        uint64_t bytes = (uint64_t)DS4_SESSION_PAYLOAD_U32_FIELDS * sizeof(uint32_t);
-        bytes += (uint64_t)s->checkpoint.len * sizeof(uint32_t);
-        bytes += (uint64_t)DS4_N_VOCAB * sizeof(float);
-        bytes += (uint64_t)DS4_N_LAYER * sizeof(uint32_t);
-        bytes += (uint64_t)DS4_N_LAYER * sizeof(uint32_t);
-        bytes += session_cpu_payload_live_tensor_bytes(s);
-        return bytes;
     }
     return 0;
 }
@@ -9937,71 +9734,6 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
         return rc;
 #endif
     }
-    if (ds4_session_is_cpu(s)) {
-        const uint32_t raw_live = session_cpu_raw_live_rows(s);
-        const uint32_t raw_cap = ds4_default_raw_cap((uint32_t)s->ctx_size);
-        const uint32_t comp_cap = session_cpu_comp_cap(s);
-        uint32_t header[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
-            DS4_SESSION_PAYLOAD_MAGIC,
-            DS4_SESSION_PAYLOAD_VERSION,
-            (uint32_t)s->ctx_size,
-            s->prefill_cap,
-            raw_cap,
-            raw_cap,
-            comp_cap,
-            (uint32_t)s->checkpoint.len,
-            DS4_N_LAYER,
-            DS4_N_HEAD_DIM,
-            DS4_N_INDEXER_HEAD_DIM,
-            DS4_N_VOCAB,
-            raw_live,
-        };
-        for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
-            if (payload_write_u32(fp, header[i], err, errlen) != 0) return 1;
-        }
-        for (int i = 0; i < s->checkpoint.len; i++) {
-            if (payload_write_u32(fp, (uint32_t)s->checkpoint.v[i], err, errlen) != 0) return 1;
-        }
-        if (payload_write_bytes(fp, s->logits, (uint64_t)DS4_N_VOCAB * sizeof(float), err, errlen) != 0) return 1;
-        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-            if (payload_write_u32(fp, s->cpu_cache.layer[il].n_comp, err, errlen) != 0) return 1;
-        }
-        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-            if (payload_write_u32(fp, s->cpu_cache.layer[il].n_index_comp, err, errlen) != 0) return 1;
-        }
-        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-            const ds4_layer_cache *layer = &s->cpu_cache.layer[il];
-            if (raw_live > layer->n_raw) {
-                payload_set_err(err, errlen, "CPU session raw cache has fewer live rows than checkpoint");
-                return 1;
-            }
-            const uint32_t raw_start = layer->n_raw - raw_live;
-            if (payload_write_bytes(fp,
-                                    layer->raw_kv + (uint64_t)raw_start * DS4_N_HEAD_DIM,
-                                    (uint64_t)raw_live * DS4_N_HEAD_DIM * sizeof(float),
-                                    err,
-                                    errlen) != 0) return 1;
-            const uint32_t ratio = layer->compress_ratio;
-            if (ratio == 0) continue;
-            if (payload_write_bytes(fp,
-                                    layer->attn_comp_kv,
-                                    (uint64_t)layer->n_comp * DS4_N_HEAD_DIM * sizeof(float),
-                                    err,
-                                    errlen) != 0) return 1;
-            if (payload_write_bytes(fp, layer->attn_state_kv, layer_attn_state_bytes(ratio), err, errlen) != 0) return 1;
-            if (payload_write_bytes(fp, layer->attn_state_score, layer_attn_state_bytes(ratio), err, errlen) != 0) return 1;
-            if (ratio == 4) {
-                if (payload_write_bytes(fp,
-                                        layer->index_comp_kv,
-                                        (uint64_t)layer->n_index_comp * DS4_N_INDEXER_HEAD_DIM * sizeof(float),
-                                        err,
-                                        errlen) != 0) return 1;
-                if (payload_write_bytes(fp, layer->index_state_kv, layer_index_state_bytes(ratio), err, errlen) != 0) return 1;
-                if (payload_write_bytes(fp, layer->index_state_score, layer_index_state_bytes(ratio), err, errlen) != 0) return 1;
-            }
-        }
-        return 0;
-    }
     payload_set_err(err, errlen, "generic graph payload is unsupported");
     return 1;
 }
@@ -10152,141 +9884,6 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         s->checkpoint_valid = true;
         return 0;
 #endif
-    }
-    if (ds4_session_is_cpu(s)) {
-        const uint32_t saved_ctx = h[2];
-        const uint32_t saved_prefill_cap = h[3];
-        const uint32_t saved_raw_cap = h[4];
-        const uint32_t saved_raw_window = h[5];
-        const uint32_t saved_comp_cap = h[6];
-        const uint32_t saved_tokens = h[7];
-        const uint32_t saved_raw_live = h[12];
-        const uint32_t cpu_raw_cap = ds4_default_raw_cap((uint32_t)s->ctx_size);
-        const uint32_t cpu_comp_cap = session_cpu_comp_cap(s);
-        if (saved_ctx > (uint32_t)s->ctx_size || saved_tokens >= (uint32_t)s->ctx_size) {
-            payload_set_err(err, errlen, "KV checkpoint does not fit current context");
-            return 1;
-        }
-        if (h[8] != DS4_N_LAYER || h[9] != DS4_N_HEAD_DIM ||
-            h[10] != DS4_N_INDEXER_HEAD_DIM || h[11] != DS4_N_VOCAB)
-        {
-            payload_set_err(err, errlen, "KV checkpoint was written for a different DS4 layout");
-            return 1;
-        }
-        /* prefill_cap is scratch scheduling capacity, not durable KV layout.
-         * Old checkpoints remain valid as long as the raw KV window matches. */
-        (void)saved_prefill_cap;
-        if (saved_raw_window != cpu_raw_cap) {
-            payload_set_err(err, errlen, "KV checkpoint graph chunk layout does not match current runtime");
-            return 1;
-        }
-        const uint32_t expected_raw_live = saved_tokens < saved_raw_window ? saved_tokens : saved_raw_window;
-        if (saved_raw_cap == 0 || saved_raw_live != expected_raw_live ||
-            saved_raw_live > saved_raw_cap || saved_raw_live > cpu_raw_cap)
-        {
-            payload_set_err(err, errlen, "KV checkpoint raw ring layout does not match current context");
-            return 1;
-        }
-        if (saved_comp_cap > cpu_comp_cap) {
-            payload_set_err(err, errlen, "KV checkpoint compressed cache is larger than current context");
-            return 1;
-        }
-
-        token_vec new_checkpoint = {0};
-        for (uint32_t i = 0; i < saved_tokens; i++) {
-            uint32_t tok = 0;
-            if (payload_read_u32(fp, &tok, &remaining, err, errlen) != 0) {
-                token_vec_free(&new_checkpoint);
-                return 1;
-            }
-            token_vec_push(&new_checkpoint, (int)tok);
-        }
-        if (payload_read_bytes(fp, s->logits, (uint64_t)DS4_N_VOCAB * sizeof(float),
-                               &remaining, err, errlen) != 0)
-        {
-            token_vec_free(&new_checkpoint);
-            return 1;
-        }
-        uint32_t n_comp[DS4_MAX_LAYER];
-        uint32_t n_index_comp[DS4_MAX_LAYER];
-        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-            if (payload_read_u32(fp, &n_comp[il], &remaining, err, errlen) != 0) {
-                token_vec_free(&new_checkpoint);
-                return 1;
-            }
-            if (n_comp[il] > saved_comp_cap || n_comp[il] > cpu_comp_cap) {
-                token_vec_free(&new_checkpoint);
-                payload_set_err(err, errlen, "KV checkpoint has invalid compressed row count");
-                return 1;
-            }
-        }
-        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-            if (payload_read_u32(fp, &n_index_comp[il], &remaining, err, errlen) != 0) {
-                token_vec_free(&new_checkpoint);
-                return 1;
-            }
-            if (n_index_comp[il] > saved_comp_cap || n_index_comp[il] > cpu_comp_cap) {
-                token_vec_free(&new_checkpoint);
-                payload_set_err(err, errlen, "KV checkpoint has invalid indexer row count");
-                return 1;
-            }
-        }
-
-        s->checkpoint_valid = false;
-        session_cpu_reset_cache(s);
-        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-            ds4_layer_cache *layer = &s->cpu_cache.layer[il];
-            if (payload_read_bytes(fp,
-                                   layer->raw_kv,
-                                   (uint64_t)saved_raw_live * DS4_N_HEAD_DIM * sizeof(float),
-                                   &remaining,
-                                   err,
-                                   errlen) != 0)
-            {
-                token_vec_free(&new_checkpoint);
-                return 1;
-            }
-            layer->n_raw = saved_raw_live;
-            const uint32_t ratio = layer->compress_ratio;
-            if (ratio == 0) continue;
-            layer->n_comp = n_comp[il];
-            layer->n_index_comp = n_index_comp[il];
-            if (payload_read_bytes(fp,
-                                   layer->attn_comp_kv,
-                                   (uint64_t)n_comp[il] * DS4_N_HEAD_DIM * sizeof(float),
-                                   &remaining,
-                                   err,
-                                   errlen) != 0 ||
-                payload_read_bytes(fp, layer->attn_state_kv, layer_attn_state_bytes(ratio), &remaining, err, errlen) != 0 ||
-                payload_read_bytes(fp, layer->attn_state_score, layer_attn_state_bytes(ratio), &remaining, err, errlen) != 0)
-            {
-                token_vec_free(&new_checkpoint);
-                return 1;
-            }
-            if (ratio == 4) {
-                if (payload_read_bytes(fp,
-                                       layer->index_comp_kv,
-                                       (uint64_t)n_index_comp[il] * DS4_N_INDEXER_HEAD_DIM * sizeof(float),
-                                       &remaining,
-                                       err,
-                                       errlen) != 0 ||
-                    payload_read_bytes(fp, layer->index_state_kv, layer_index_state_bytes(ratio), &remaining, err, errlen) != 0 ||
-                    payload_read_bytes(fp, layer->index_state_score, layer_index_state_bytes(ratio), &remaining, err, errlen) != 0)
-                {
-                    token_vec_free(&new_checkpoint);
-                    return 1;
-                }
-            }
-        }
-        if (remaining != 0) {
-            token_vec_free(&new_checkpoint);
-            payload_set_err(err, errlen, "KV checkpoint has trailing payload bytes");
-            return 1;
-        }
-        token_vec_free(&s->checkpoint);
-        s->checkpoint = new_checkpoint;
-        s->checkpoint_valid = true;
-        return 0;
     }
     payload_set_err(err, errlen, "generic graph payload is unsupported");
     return 1;
@@ -10518,7 +10115,7 @@ int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen)
 #endif
     ds4_session_note_logits_dirty(s);
     const bool laguna_path = ds4_session_eval_argmax_uses_laguna_path(s);
-    if (ds4_session_is_cpu(s) || laguna_path) {
+    if (laguna_path) {
         if (ds4_session_eval_argmax_dispatch_eval(
                 s, token, err, errlen, laguna_path) != 0) return -1;
         return ds4_session_argmax(s);
@@ -10822,18 +10419,6 @@ const char *ds4_engine_model_name(ds4_engine *e) {
 int ds4_engine_layer_count(ds4_engine *e) {
     (void)e;
     return (int)DS4_N_LAYER;
-}
-
-uint32_t ds4_engine_layer_compress_ratio(ds4_engine *e, uint32_t layer) {
-    (void)e;
-    if (layer >= DS4_N_LAYER) return 0;
-    return ds4_layer_compress_ratio(layer);
-}
-
-uint64_t ds4_engine_hidden_f32_values(ds4_engine *e) {
-    (void)e;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) return DS4_N_EMBD;
-    return (uint64_t)DS4_N_HC * DS4_N_EMBD;
 }
 
 int ds4_engine_model_id(ds4_engine *e) {
@@ -11506,8 +11091,8 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
  * ways:
  *
  *   - long suffix: batched layer-major prefill, aligned to absolute chunk
- *     boundaries so compressor/indexer rows finalize in the same order as a
- *     cold prompt;
+ *     boundaries so the Laguna target graph's KV frontiers finalize in the
+ *     same order as a cold prompt;
  *   - short suffix: ordinary one-token decode, which is faster below the
  *     measured crossover and preserves exact autoregressive semantics.
  *
@@ -11731,11 +11316,11 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
 
 /* Return true when canonicalization would replace already-sampled tokens.
  *
- * A DS4 session checkpoint is more than a token vector: the backend state also
- * contains raw SWA rows, compressed KV rows, indexer rows, and compressor
- * frontiers.  Replacing any part of the live tail requires restoring that whole
- * frontier first.  Extending exactly at the live end is safe; rewriting behind
- * it is not an in-place operation. */
+ * A DS4 session checkpoint is more than a token vector: the Laguna target
+ * graph also contains persistent KV rings and optional DFlash feature history.
+ * Replacing any part of the live tail requires restoring that whole frontier
+ * first.  Extending exactly at the live end is safe; rewriting behind it is
+ * not an in-place operation. */
 bool ds4_session_rewrite_requires_rebuild(int live_len, int canonical_len, int common) {
     if (live_len < 0 || canonical_len < 0 || common < 0) return true;
     if (common > live_len || common > canonical_len) return true;
@@ -11747,11 +11332,11 @@ bool ds4_session_rewrite_requires_rebuild(int live_len, int canonical_len, int c
  * This is used after parsing a generated tool call.  The model may have emitted
  * DSML in an order that is semantically valid but not byte-for-byte equal to the
  * canonical prompt we will see on the next request.  Rewriting only the token
- * checkpoint is not enough: the backend still contains raw and compressed rows
- * for the old suffix.  Until we have a real frontier snapshot at the
- * rewrite point, any replacement behind the live end reports that a rebuild is
- * needed without mutating the session.  The server may still find an older disk KV
- * checkpoint before falling back to a full replay. */
+ * checkpoint is not enough: the backend still contains target KV and optional
+ * DFlash rows for the old suffix.  Until we have a real frontier snapshot at
+ * the rewrite point, any replacement behind the live end reports that a rebuild
+ * is needed without mutating the session.  The server may still find an older
+ * disk KV checkpoint before falling back to a full replay. */
 ds4_session_rewrite_result ds4_session_rewrite_from_common(
         ds4_session *s, const ds4_tokens *prompt, int common,
         char *err, size_t errlen) {
@@ -12937,13 +12522,6 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
     }
 #endif
     ds4_session_note_logits_dirty(s);
-    if (ds4_session_is_cpu(s)) {
-        (void)max_tokens;
-        (void)eos_token;
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
-        accepted[0] = first_token;
-        return 1;
-    }
 #ifdef DS4_NO_GPU
     (void)s; (void)first_token; (void)max_tokens; (void)eos_token;
     (void)accepted; (void)accepted_cap;
