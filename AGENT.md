@@ -100,9 +100,9 @@ major refactor boundary, verify:
 4. The retained DFlash path passes its focused regression coverage.
 
 Do not add new CPU, CUDA, ROCm, SSD, distributed, tensor-parallel, multi-GPU,
-MTP, DSpark, steering, power, or custom-prefill test obligations. Keep the
-frozen `laguna-s2.1` benchmark commit unchanged while this work proceeds on the
-refactor branch; compare against it rather than changing it.
+MTP, DSpark, steering, power, or custom-prefill test obligations. Keep
+`BENCHMARK.md` and `benchmark/**` unchanged: they are frozen pre-fork protocol
+evidence whose pinned commits and releases remain in `michaelasper/ds4`.
 
 ## Safety
 

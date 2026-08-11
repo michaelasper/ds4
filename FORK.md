@@ -1,14 +1,15 @@
-# LagoonNebula Metal-only Refactor
+# LagoonNebula Metal-only Fork
 
-This file records the migration boundary for `refactor/laguna-metal-only`.
-It is an implementation guide, not a replacement for the frozen benchmark
-baseline. The frozen `laguna-s2.1` benchmark commit, its defaults, and its
-benchmark data remain unchanged while this branch is cleaned up.
+This file records the completed migration boundary for the standalone
+`michaelasper/lgn2` repository. It is an implementation record, not a
+replacement for the frozen benchmark baseline. The pre-fork `laguna-s2.1`
+benchmark commit, its defaults, releases, and data remain in the historical
+`michaelasper/ds4` repository; the protocol files retained here remain frozen.
 
 ## Current boundary
 
 The product is **LagoonNebula**: one Laguna S2.1 GGUF model family, executed on
-Apple Metal with the whole model mmap-backed. The staged repository, tool, API,
+Apple Metal with the whole model mmap-backed. The repository, tool, API,
 environment, and local-state namespace is **`lgn2`**. The supported commands
 are `lgn2`, `lgn2-server`, `lgn2-bench`, and `lgn2-eval`; DFlash remains a
 Laguna-specific optional feature for now. Local state lives under `~/.lgn2`.
@@ -22,7 +23,7 @@ cache, lock-file, or model-link alias is supported.
 
 ## Completed boundary work
 
-The refactor branch already:
+The standalone branch:
 
 - requires the literal Laguna architecture before engine creation;
 - exposes a Metal-only CLI and server contract and rejects retired backend,
@@ -208,8 +209,9 @@ implementation naming, not GLM product support.
 
 ## Guardrails
 
-- Work only on `refactor/laguna-metal-only`; do not modify or reinterpret the
-  frozen `laguna-s2.1` benchmark commit.
+- Keep the historical `michaelasper/ds4` benchmark branch, releases, and
+  published artifacts unchanged; do not modify or reinterpret their pinned
+  revisions from the standalone repository.
 - Make the smallest coherent change at each boundary. Do not mix a broad
   rename with backend or model deletion.
 - Remove flags and dead branches instead of preserving unsupported behaviour
@@ -243,7 +245,8 @@ not survive the code removal.
 
 ## Intentional source-ABI break
 
-`refactor/laguna-metal-only` intentionally defines the public `lgn2_engine_options`
+The standalone `lgn2` repository intentionally defines the public
+`lgn2_engine_options`
 layout as a clean break from the pre-fork layout and multi-GPU source ABI. This
 is a deliberate boundary break, not an append-only API evolution: callers must
 rebuild against the current headers. No reserved compatibility slots are
@@ -291,11 +294,10 @@ The current public boundary records the following decisions:
 - retained upstream copyright and license attribution is not rewritten as
   new LagoonNebula authorship.
 
-## Repository rename timing
+## Repository separation
 
-Source and local namespaces can be changed and reviewed on the refactor branch
-before the GitHub repository itself moves.  Update clone URLs, Git remotes,
-default-branch settings, and release coordinates only as one explicit final
-repository operation; do not publish a half-renamed remote.  Until that
-operation, `fork/refactor/laguna-metal-only` is the integration branch and the
-frozen `laguna-s2.1` branch remains untouched.
+The supported source now lives in the standalone `michaelasper/lgn2`
+repository with `laguna-s2.1` as its authoritative branch. The historical
+`michaelasper/ds4` fork remains the immutable home of pre-separation pull
+requests, benchmark branches, tags, releases, and result assets. It is not an
+upstream remote or release coordinate for new LagoonNebula development.

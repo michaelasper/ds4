@@ -3,7 +3,7 @@
 Run a verified Laguna S2.1 model locally on Apple silicon with one coherent
 CLI, HTTP, session, and evaluation workflow.
 
-LagoonNebula is the product name and **`lgn2`** is the staged repository,
+LagoonNebula is the product name and **`lgn2`** is the repository,
 tool, API, environment, and local-state namespace. Local state lives under
 `~/.lgn2`. This branch applies the clean break: old executable, API,
 environment, cache, lock-file, and model-link names are not aliases for the
@@ -73,15 +73,12 @@ legacy model-link names.
 ## Install and build
 
 The project is built from source, with an optional `make install` for the four
-executables and their runtime Metal sources. The source rename is staged on
-`refactor/laguna-metal-only`, but the GitHub
-repository remains `michaelasper/ds4` until the final remote rename. Clone that
-current URL and branch now; update the remote and clone URL only as part of the
-final repository operation.
+executables and their runtime Metal sources. The standalone repository is
+`michaelasper/lgn2`; its authoritative branch is `laguna-s2.1`.
 
 ```sh
-git clone --branch refactor/laguna-metal-only --single-branch \
-  https://github.com/michaelasper/ds4.git LagoonNebula
+git clone --branch laguna-s2.1 --single-branch \
+  https://github.com/michaelasper/lgn2.git LagoonNebula
 cd LagoonNebula
 make -j8
 ```
