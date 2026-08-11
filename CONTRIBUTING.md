@@ -1,8 +1,9 @@
 # Contributing
 
-This fork is intentionally specialized for Laguna S2.1 inference on Apple
-Metal. Changes should make that product smaller, clearer, more correct, or
-faster. CPU inference, CUDA, ROCm, DeepSeek, GLM, distributed execution,
+This LagoonNebula fork is intentionally specialized for Laguna S2.1 inference
+on Apple Metal. Changes should make that product smaller, clearer, more
+correct, or faster. CPU inference, CUDA, ROCm, DeepSeek, GLM, distributed
+execution,
 tensor parallelism, multi-GPU placement, SSD expert streaming, MTP, and DSpark
 are outside the supported boundary; SSD expert streaming is retired rather than
 an available compatibility mode.
@@ -27,11 +28,11 @@ checks include:
 ```zsh
 make check-metal-sources
 make test-laguna-cli-options
-./ds4_test --laguna-architecture
-./ds4_test --laguna-selector-parser
-./ds4_test --laguna-metal-core
-./ds4_test --server
-./ds4-eval --self-test-extractors
+./lgn2_test --laguna-architecture
+./lgn2_test --laguna-selector-parser
+./lgn2_test --laguna-metal-core
+./lgn2_test --server
+./lgn2-eval --self-test-extractors
 ```
 
 Add or tighten a focused test whenever a bug could otherwise return silently to
@@ -45,9 +46,9 @@ malformed.
 Use the Laguna S2.1 GGUF affected by the change:
 
 ```zsh
-export LAGUNA_TEST_MODEL=/absolute/path/to/laguna-s2.1.gguf
-shasum -a 256 "$LAGUNA_TEST_MODEL"
-make test-metal-laguna-integration LAGUNA_TEST_MODEL="$LAGUNA_TEST_MODEL"
+export LGN2_TEST_MODEL=/absolute/path/to/laguna-s2.1.gguf
+shasum -a 256 "$LGN2_TEST_MODEL"
+make test-metal-laguna-integration LGN2_TEST_MODEL="$LGN2_TEST_MODEL"
 ```
 
 For graph, kernel, tokenizer, template, or sampling changes, also run a fixed
@@ -82,25 +83,27 @@ metrics too. Compare the same model checkpoint, manifest, machine, and options.
 
 ## Performance checks
 
-Use `ds4-bench` for exploratory throughput work:
+Use `lgn2-bench` for exploratory throughput work:
 
 ```zsh
-./ds4-bench \
+./lgn2-bench \
   --metal \
-  -m "$LAGUNA_TEST_MODEL" \
+  -m "$LGN2_TEST_MODEL" \
   --prompt-file speed-bench/promessi_sposi.txt \
   --ctx-start 2048 \
   --ctx-max 65536 \
   --step-incr 2048 \
   --gen-tokens 128 \
-  --csv /tmp/laguna-speed.csv
+  --csv /tmp/lgn2-speed.csv
 ```
 
 Compare prefill and steady decode separately on the same machine, model,
 context frontiers, power/thermal state, and background load. Preserve raw CSVs
 and commands. Performance claims or selector promotion require a committed,
 reviewed protocol; use `BENCHMARK.md` when it covers the experiment rather than
-inventing an ad-hoc gate.
+inventing an ad-hoc gate. `BENCHMARK.md` and `benchmark/**` are frozen historical
+pre-fork protocols; their old `ds4`/`DS4_*` commands are not current
+LagoonNebula interfaces.
 
 ## Review expectations
 

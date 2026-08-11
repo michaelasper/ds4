@@ -7,17 +7,18 @@ benchmark data remain unchanged while this branch is cleaned up.
 
 ## Current boundary
 
-The intended tool and product is **LagoonNebula**: one Laguna S2.1 GGUF model
-family, executed on Apple Metal with the whole model mmap-backed. The
-repository will be renamed to **`lgn2`** after the cleanup boundary is stable.
-The CLI and server remain supported; DFlash remains a Laguna-specific optional
-feature for now.
+The product is **LagoonNebula**: one Laguna S2.1 GGUF model family, executed on
+Apple Metal with the whole model mmap-backed. The staged repository, tool, API,
+environment, and local-state namespace is **`lgn2`**. The supported commands
+are `lgn2`, `lgn2-server`, `lgn2-bench`, and `lgn2-eval`; DFlash remains a
+Laguna-specific optional feature for now. Local state lives under `~/.lgn2`.
 
 The following are explicitly outside the product boundary: CPU, CUDA, ROCm,
 distributed inference, tensor parallelism, multi-GPU
 placement, MTP, DSpark, steering, power controls, and custom prefill. Existing
 code for those features is legacy removal material, even when it still builds.
-The `ds4_*` names are retained temporarily; renaming is deliberately deferred.
+The public namespace is a clean break: no prior executable, API, environment,
+cache, lock-file, or model-link alias is supported.
 
 ## Completed boundary work
 
@@ -42,16 +43,16 @@ The refactor branch already:
 - isolates Laguna target-graph base scratch, persistent KV storage, capacity
   accounting, and allocation/free lifecycle in the private `lgn_graph.c` /
   `lgn_graph.h` module while scheduler-owned speculative/evidence state remains
-  in `ds4.c`;
+  in `lgn2_engine.c`;
 - isolates the complete DFlash support-graph tensor owner and its fixed
   feature/draft/KV allocation lifecycle in the private `lgn_dflash_graph.c` /
   `lgn_dflash_graph.h` module while command scheduling and target capture stay
-  in `ds4.c`;
+  in `lgn2_engine.c`;
 - isolates borrowed DFlash support-model execution in the private
   `lgn_dflash_exec.c` / `lgn_dflash_exec.h` module: BF16 weights use the F16
   shadow map, quantized weights use the support GGUF map, and six-layer
   injection only records into an already-owned command batch; scheduler,
-  target-output, rollback, and completion evidence remain in `ds4.c`;
+  target-output, rollback, and completion evidence remain in `lgn2_engine.c`;
 - makes DFlash speculative command ownership explicit: the scheduler owns the
   snapshot, draft, verifier, rollback, and terminal command boundaries;
   submitted snapshots and accepted-prefix restores must complete successfully
@@ -89,9 +90,8 @@ The refactor branch already:
   setting honestly full-power-only. The model-independent default gate now
   includes sampling, DFlash payload lifecycle, serial-route, and terminal
   drain-failure coverage;
-- fixes the product name as **LagoonNebula** and the eventual repository name
-  as **`lgn2`**, while deliberately postponing the mechanical identifier
-  rename until unsupported implementation paths are gone;
+- fixes the product name as **LagoonNebula** and records **`lgn2`** as the
+  repository, tool, API, environment, and local-state namespace;
 - retains only Laguna quality fixtures and tooling under `quality/`;
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.
@@ -114,8 +114,8 @@ The refactor branch already:
 - removes the uncalled tensor-parallel gate service, lifecycle/callback and
   keep-alive APIs, host service-thread/event state, and TP flag/keep-alive
   kernels. Whole-model mmap residency and warmup are now unconditional within
-  their existing `DS4_METAL_NO_RESIDENCY`/`DS4_METAL_NO_MODEL_WARMUP` controls;
-  the lifecycle-frozen world-1 `DS4_METAL_Q8_MV_NSG` override remains
+  their existing `LGN2_METAL_NO_RESIDENCY`/`LGN2_METAL_NO_MODEL_WARMUP` controls;
+  the lifecycle-frozen world-1 `LGN2_METAL_Q8_MV_NSG` override remains
   supported and world-2 dispatch geometry is retired;
   active routed expert bindings now use the full model expert range and direct
   expert ids; the active world-1 TP ownership/range ABI residue is removed.
@@ -137,14 +137,14 @@ The active MoE host/MSL ABI marker is
 `kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48`: generation 2,
 `mul_mm_id` size 104, routed-MoE size 96, and routed key/stride offset 48.
 Every host/MSL layout change must rename or bump this marker.  The strict
-checks are `make check-metal-sources`, `make test-glm-q23-metal`, and
+checks are `make check-metal-sources`, `make test-laguna-q23-metal`, and
 `make test-metal-laguna` (also the default `make test`).  The ABI gate inside
-the latter runs `./ds4_test --laguna-moe-abi`, whose default matrix creates a
+the latter runs `./lgn2_test --laguna-moe-abi`, whose default matrix creates a
 current source and a marker-stripped stale fixture, plus the explicit current
 source check:
-`DS4_METAL_MOE_SOURCE=metal/moe.metal DS4_TEST_MOE_ABI_MODE=current ./ds4_test --laguna-moe-abi`.
+`LGN2_METAL_MOE_SOURCE=metal/moe.metal LGN2_TEST_MOE_ABI_MODE=current ./lgn2_test --laguna-moe-abi`.
 An exact pre-fingerprint parent/old override can be checked with
-`DS4_METAL_MOE_SOURCE=/path/to/pre-fingerprint/metal/moe.metal DS4_TEST_MOE_ABI_MODE=old ./ds4_test --laguna-moe-abi`;
+`LGN2_METAL_MOE_SOURCE=/path/to/pre-fingerprint/metal/moe.metal LGN2_TEST_MOE_ABI_MODE=old ./lgn2_test --laguna-moe-abi`;
 all such incompatible or unversioned sources must fail before active work.
 
 The private generic raw graph implementation and its public routes are now
@@ -191,10 +191,11 @@ implementation naming, not GLM product support.
    tests. Rewrite or remove DeepSeek/GLM/CUDA/ROCm/distributed fixtures,
    quantisation notes, model download cases, and stale documentation. Extract
    any still-useful Laguna-only tooling before deleting umbrella tooling.
-9. **Rename last.** Apply the fixed LagoonNebula product identity and rename
-   the repository to `lgn2`. Rename binaries, files, symbols, environment
-   variables, cache paths, aliases, and any intentionally migrated payload
-   identifiers only after the runtime and test contract is stable.
+9. **Apply the clean-break namespace.** Use the fixed LagoonNebula product
+   identity and `lgn2` repository namespace for binaries, public symbols,
+   environment variables, cache paths, local state, and model links. Do not
+   retain old aliases or fallbacks; apply this only after the runtime and test
+   contract is stable.
 
 ## Guardrails
 
@@ -204,7 +205,7 @@ implementation naming, not GLM product support.
   rename with backend or model deletion.
 - Remove flags and dead branches instead of preserving unsupported behaviour
   behind new aliases. A compatibility alias requires an explicit decision.
-- Change a Metal kernel source, `ds4_metal.m`, and its Makefile source entry
+- Change a Metal kernel source, `lgn2_metal.m`, and its Makefile source entry
   as one unit; never leave the runtime loader naming a deleted source.
 - Preserve mmap lifetime, Metal command/resource ownership, KV/session
   serialisation, server streaming, batching, sampling, and the retained
@@ -233,11 +234,11 @@ not survive the code removal.
 
 ## Intentional source-ABI break
 
-`refactor/laguna-metal-only` intentionally breaks the old public
-`ds4_engine_options` layout and the multi-GPU source ABI. This is a deliberate
-rename/boundary break, not an append-only API evolution: callers must rebuild
-against the current headers. No reserved compatibility slots are promised;
-retaining them would defeat the rename/break objective.
+`refactor/laguna-metal-only` intentionally defines the public `lgn2_engine_options`
+layout as a clean break from the pre-fork layout and multi-GPU source ABI. This
+is a deliberate boundary break, not an append-only API evolution: callers must
+rebuild against the current headers. No reserved compatibility slots are
+promised; retaining them would defeat the rename/break objective.
 
 ## Recorded ABI and rename decisions
 
@@ -248,20 +249,19 @@ The current public boundary records the following decisions:
 - the four installed commands will be `lgn2`, `lgn2-server`, `lgn2-bench`,
   and `lgn2-eval`; the public C namespace will be `lgn2_*`/`LGN2_*`, runtime
   environment variables will use `LGN2_*`, and local state will use the
-  `lgn2` namespace;
+  `~/.lgn2` namespace;
 - the rename is a clean break: no old executable, C symbol, environment,
   history, cache, lock-file, or model-symlink alias is retained.  The former
   engine implementation becomes `lgn2_engine.c` so it does not collide with
   the existing private `lgn.c` Laguna module;
-- the convenience model link becomes `lgn2.gguf`.  Existing
-  `ds4flash.gguf` files or links are left untouched and are not consulted by
-  the renamed tools;
+- the only convenience model link is `lgn2.gguf`; no legacy model-link name is
+  consulted by the renamed tools;
 - DFlash remains a public, optional support-model API for Laguna S2.1;
 - legacy MTP, GLM-MTP, and DSpark option fields and public aliases are
   intentionally absent; callers must use the DFlash fields and rebuild;
 - the canonical Laguna model ids remain `laguna-s-2.1` and its documented
-  Laguna aliases.  Those are model/API identities, not DS4 compatibility
-  aliases;
+  Laguna aliases. Those are model/API identities, not tool-namespace
+  compatibility aliases;
 - the GGUF architecture literals `laguna` and `dflash`, every `laguna.*` and
   `dflash.*` metadata key, the pinned GGUF filename/hash/source, GGUF numeric
   codes, and Laguna family/model numeric identities 2/3 remain fixed;
@@ -276,8 +276,9 @@ The current public boundary records the following decisions:
   shader implementation identifiers may adopt `lgn2`, but their externally
   looked-up entry-point strings do not;
 - `BENCHMARK.md` and every file under `benchmark/` are frozen historical
-  protocol evidence and remain byte-for-byte unchanged.  Their old command
-  and environment names apply only to their pinned pre-fork revisions;
+  pre-fork protocol evidence and remain byte-for-byte unchanged. Their old
+  `ds4`/`DS4_*` commands and environment names apply only to their pinned
+  revisions and are not current LagoonNebula interfaces;
 - retained upstream copyright and license attribution is not rewritten as
   new LagoonNebula authorship.
 

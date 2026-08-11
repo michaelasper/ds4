@@ -1,20 +1,13 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="logo.svg">
-    <source media="(prefers-color-scheme: light)" srcset="logo.svg">
-    <img src="logo.svg" alt="DwarfStar logo" width="220">
-  </picture>
-</p>
-
-# DwarfStar
+# LagoonNebula
 
 Run a verified Laguna S2.1 model locally on Apple silicon with one coherent
 CLI, HTTP, session, and evaluation workflow.
 
-The final product name is **LagoonNebula**, and the repository will become
-**`lgn2`**. This transitional checkout keeps the historical DwarfStar and
-`ds4*` names until the unsupported implementations have been removed and the
-remaining public surface is stable enough for one deliberate rename.
+LagoonNebula is the product name and **`lgn2`** is the staged repository,
+tool, API, environment, and local-state namespace. Local state lives under
+`~/.lgn2`. This branch applies the clean break: old executable, API,
+environment, cache, lock-file, and model-link names are not aliases for the
+current interface.
 
 [![License: MIT][license-shield]][license-url]
 
@@ -23,10 +16,10 @@ checkout is for you. It deliberately targets Laguna S2.1 on Apple Metal and
 keeps the runtime, server, benchmark, and quality tools on the same product
 surface.
 
-## Why DwarfStar
+## Why LagoonNebula
 
 Local model experiments often drift when every tool uses a different model
-file, prompt path, or runtime configuration. DwarfStar pins the model identity
+file, prompt path, or runtime configuration. LagoonNebula pins the model identity
 and gives interactive generation, HTTP serving, session reuse, evaluation, and
 benchmarking one documented path.
 
@@ -34,10 +27,11 @@ benchmarking one documented path.
 
 This README documents one supported product: a Laguna S2.1 GGUF model (the
 portable model-file format) running on Apple Metal with the whole model
-memory-mapped. The public names `ds4`,
-`ds4-server`, `ds4-bench`, and `ds4-eval` are retained temporarily; the rename
-is intentionally deferred. Unsupported model architectures, flags, and
-execution modes are rejected rather than selecting an undocumented fallback.
+memory-mapped. The supported commands are `lgn2`, `lgn2-server`, `lgn2-bench`,
+and `lgn2-eval`; the public C/API namespace is `lgn2_*` and runtime
+environment variables use `LGN2_*`. Unsupported model architectures, flags,
+and execution modes are rejected rather than selecting an undocumented
+fallback or compatibility alias.
 
 ## Features
 
@@ -48,7 +42,7 @@ execution modes are rejected rather than selecting an undocumented fallback.
   checkpoints.
 - Optional Laguna DFlash speculative decoding support with explicit draft and
   probability controls.
-- `ds4-bench`, `ds4-eval`, and the Laguna quality scorer for repeatable local
+- `lgn2-bench`, `lgn2-eval`, and the Laguna quality scorer for repeatable local
   experiments without promising a particular speed or memory result.
 
 ## Prerequisites
@@ -67,32 +61,38 @@ From a clean checkout:
 ```sh
 make -j8
 ./download_model.sh laguna-q2-q3
-./ds4 --metal \
+./lgn2 --metal \
   -m gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf \
   -p "Explain this repository in one paragraph."
 ```
 
-The model downloader resumes interrupted downloads, verifies the pinned hash,
-and leaves an existing model file or `ds4flash.gguf` link untouched.
+The model downloader resumes interrupted downloads and verifies the pinned hash.
+The only convenience model link is `lgn2.gguf`; current tools do not consult
+legacy model-link names.
 
 ## Install and build
 
-The project is built from source; there is no package-manager install step.
+The project is built from source; there is no package-manager install step. The
+source rename is staged on `refactor/laguna-metal-only`, but the GitHub
+repository remains `michaelasper/ds4` until the final remote rename. Clone that
+current URL and branch now; update the remote and clone URL only as part of the
+final repository operation.
 
 ```sh
-git clone https://github.com/michaelasper/ds4.git
-cd ds4
+git clone --branch refactor/laguna-metal-only --single-branch \
+  https://github.com/michaelasper/ds4.git LagoonNebula
+cd LagoonNebula
 make -j8
 ```
 
-`make` builds the four retained executables: `ds4`, `ds4-server`, `ds4-bench`,
-and `ds4-eval`. Run `make clean` before a clean rebuild when changing source
-or compiler settings.
+`make` builds the four executables: `lgn2`, `lgn2-server`, `lgn2-bench`, and
+`lgn2-eval`. Run `make clean` before a clean rebuild when changing source or
+compiler settings.
 
 ## Pinned model download
 
 `download_model.sh` accepts the `laguna-q2-q3` alias and stores the verified
-file under `DS4_GGUF_DIR` (default: `./gguf`). The current model identity is:
+file under `LGN2_GGUF_DIR` (default: `./gguf`). The current model identity is:
 
 | File | SHA-256 |
 | --- | --- |
@@ -102,23 +102,23 @@ The pinned file is available from the [Laguna S2.1 GGUF download][model-url].
 To select a different output directory and verify the result explicitly:
 
 ```sh
-export DS4_GGUF_DIR="$PWD/gguf"
+export LGN2_GGUF_DIR="$PWD/gguf"
 ./download_model.sh laguna-q2-q3
-MODEL="$DS4_GGUF_DIR/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf"
+MODEL="$LGN2_GGUF_DIR/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf"
 shasum -a 256 "$MODEL"
 ```
 
 ## CLI
 
-The `ds4` command supports one-shot prompts, prompt files, and an interactive
+The `lgn2` command supports one-shot prompts, prompt files, and an interactive
 session:
 
 ```sh
 MODEL=gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
 
-./ds4 --metal -m "$MODEL" -p "Summarize the model card."
-./ds4 --metal -m "$MODEL" --prompt-file prompt.txt --nothink
-./ds4 --metal -m "$MODEL"
+./lgn2 --metal -m "$MODEL" -p "Summarize the model card."
+./lgn2 --metal -m "$MODEL" --prompt-file prompt.txt --nothink
+./lgn2 --metal -m "$MODEL"
 ```
 
 Useful common options are:
@@ -138,7 +138,7 @@ Useful common options are:
 
 In an interactive session, `/help`, `/think`, `/think-max`, `/nothink`,
 `/ctx N`, `/read FILE`, `/quit`, and `/exit` are available. Use
-`./ds4 --help all` for diagnostics, logits/probability dumps, inspection, and
+`./lgn2 --help all` for diagnostics, logits/probability dumps, inspection, and
 the complete option limits.
 
 ## DFlash
@@ -152,7 +152,7 @@ draft count accepts `1` through `15`, and `--dflash-p-min` accepts `0` through
 ```sh
 MODEL=gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
 
-./ds4 --metal -m "$MODEL" \
+./lgn2 --metal -m "$MODEL" \
   --dflash /path/to/compatible-dflash.gguf \
   --dflash-draft 3 \
   --dflash-p-min 0.4 \
@@ -164,12 +164,12 @@ this README makes no acceptance-rate or speed claim.
 
 ## HTTP server
 
-`ds4-server` exposes the loaded model on a local HTTP listener. The defaults
+`lgn2-server` exposes the loaded model on a local HTTP listener. The defaults
 are `127.0.0.1:8000`:
 
 ```sh
 MODEL=gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
-./ds4-server --metal -m "$MODEL" --host 127.0.0.1 --port 8000
+./lgn2-server --metal -m "$MODEL" --host 127.0.0.1 --port 8000
 ```
 
 Available endpoints are:
@@ -192,7 +192,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 Requests can use streamed responses and tool schemas where the selected
 protocol supports them. Server controls include `--cors`, `--trace FILE`,
 `--batched-session N`, and `--mixed-prefill-quantum N`. Run
-`./ds4-server --help all` for request, thinking, and cache policy details.
+`./lgn2-server --help all` for request, thinking, and cache policy details.
 
 ### Disk KV and sessions
 
@@ -200,24 +200,24 @@ Enable a disk-backed KV directory when prompt or session state should be
 checkpointed outside the process:
 
 ```sh
-./ds4-server --metal -m "$MODEL" \
-  --kv-disk-dir "$HOME/.ds4/server-kv" \
+./lgn2-server --metal -m "$MODEL" \
+  --kv-disk-dir "$HOME/.lgn2/server-kv" \
   --kv-disk-space-mb 8192
 ```
 
 The server also exposes cache-age, continuation, compatibility, and tool-memory
 policies. Keep those defaults unless an experiment requires a documented
-change; `./ds4-server --help all` is the authoritative option reference.
+change; `./lgn2-server --help all` is the authoritative option reference.
 
 ## Benchmark, evaluation, and quality
 
-`ds4-bench` measures context-growth frontiers and generation into CSV. This is
+`lgn2-bench` measures context-growth frontiers and generation into CSV. This is
 an exploratory invocation:
 
 ```sh
 MODEL=gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
 
-./ds4-bench \
+./lgn2-bench \
   --metal \
   -m "$MODEL" \
   --prompt-file speed-bench/promessi_sposi.txt \
@@ -225,18 +225,21 @@ MODEL=gguf/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
   --ctx-max 65536 \
   --step-incr 2048 \
   --gen-tokens 128 \
-  --csv /tmp/laguna-speed.csv
+  --csv /tmp/lgn2-speed.csv
 ```
 
 Use the [benchmark runbook](BENCHMARK.md) for official comparisons, fixed
-frontiers, parity checks, and interpretation. A CSV from an ad-hoc run is not
-a published performance result.
+frontiers, parity checks, and interpretation. `BENCHMARK.md` and every file
+under `benchmark/` are frozen historical pre-fork protocols. Their old `ds4`/
+`DS4_*` commands and environment names are not current LagoonNebula interfaces;
+do not copy them into new runs. A CSV from an ad-hoc run is not a published
+performance result.
 
-`ds4-eval` provides local reasoning, math, science, and security cases:
+`lgn2-eval` provides local reasoning, math, science, and security cases:
 
 ```sh
-./ds4-eval --self-test-extractors
-./ds4-eval --metal -m "$MODEL" --questions 10 --plain
+./lgn2-eval --self-test-extractors
+./lgn2-eval --metal -m "$MODEL" --questions 10 --plain
 ```
 
 For deterministic continuation quality, build the scorer and compare the
@@ -268,17 +271,17 @@ make clean
 make -j8 test
 make check-metal-sources
 make test-laguna-cli-options
-./ds4_test --laguna-architecture
-./ds4_test --laguna-selector-parser
-./ds4_test --laguna-metal-core
-./ds4_test --server
+./lgn2_test --laguna-architecture
+./lgn2_test --laguna-selector-parser
+./lgn2_test --laguna-metal-core
+./lgn2_test --server
 ```
 
 For a model-backed integration gate, provide the exact model explicitly:
 
 ```sh
 make test-metal-laguna-integration \
-  LAGUNA_TEST_MODEL=/absolute/path/to/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
+  LGN2_TEST_MODEL=/absolute/path/to/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for review evidence and focused test
@@ -291,12 +294,12 @@ The supported product is Laguna S2.1 GGUF inference on Apple Metal, using the
 whole model through a memory-mapped file. The CLI, HTTP server, session/KV
 serialization, batching, sampling, and DFlash path are retained product
 surfaces. Other model families, hardware paths, and execution topologies are
-outside this release; do not infer compatibility from the temporary `ds4*`
-names or from files in the repository that are not linked here.
+outside this release; do not infer compatibility from files in the repository
+that are not part of the current lgn2 interface.
 
 ## Attribution and license
 
-DwarfStar is released under the [MIT License](LICENSE). It exists thanks to
+LagoonNebula is released under the [MIT License](LICENSE). It exists thanks to
 the [llama.cpp](https://github.com/ggml-org/llama.cpp) and
 [GGML](https://github.com/ggerganov/ggml) projects. The runtime and tools build
 on that ecosystem's code, kernels, quantization formats, GGUF conventions, and
@@ -315,7 +318,7 @@ tools. Humans lead the design, review, testing, and release decisions.
 - [Benchmark runbook](BENCHMARK.md): the reproducible comparison protocol.
 - [Contributing guide](CONTRIBUTING.md): development and review expectations.
 - [Release QA](QA_BEFORE_RELEASES.md): pre-release gates and evidence.
-- [Refactor boundary](FORK.md): current scope and deferred naming decisions.
+- [Refactor boundary](FORK.md): current scope and namespace decisions.
 - [License](LICENSE): copyright and upstream attribution terms.
 
 ---

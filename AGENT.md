@@ -1,7 +1,7 @@
 # LagoonNebula Agent Notes
 
-These notes are authoritative for the Laguna Metal-only refactor. The product
-target is Laguna S2.1 GGUF inference on Apple Metal; the historical ds4
+These notes are authoritative for the LagoonNebula Laguna Metal-only refactor.
+The product target is Laguna S2.1 GGUF inference on Apple Metal; historical
 multi-model and multi-backend paths are cleanup work, not compatibility
 requirements.
 
@@ -18,12 +18,13 @@ requirements.
   inference, tensor parallelism, multi-GPU placement, MTP, DSpark, steering,
   power controls, or custom prefill. Do not preserve these paths with new
   compatibility flags.
-- The tool and product name is **LagoonNebula** and the eventual repository
-  name is **`lgn2`**. Defer the broad mechanical rename until implementation and
-  documentation cleanup is complete. Existing `ds4_*` names, cache paths,
-  payload identifiers, and public symbols are temporary migration surfaces;
-  the exact spelling and compatibility policy remain recorded decisions in
-  `FORK.md`.
+- The product name is **LagoonNebula** and the repository, tool, API, and local
+  state namespace is **`lgn2`**. Public commands are `lgn2`, `lgn2-server`,
+  `lgn2-bench`, and `lgn2-eval`; public C/API names use `lgn2_*`, and runtime
+  environment variables use `LGN2_*`; local state lives under `~/.lgn2`. The
+  clean break retains no old command, symbol, environment, cache, lock-file, or
+  model-link alias. The exact protocol identifiers that must remain stable are
+  recorded in `FORK.md`.
 
 ## Implementation rules
 
@@ -60,7 +61,7 @@ requirements.
 - `lgn_dflash_exec.c` / `lgn_dflash_exec.h`: borrowed DFlash support-map
   execution and active-batch-only six-layer injection recording; it never owns
   scheduler, target-output, rollback, or command completion state.
-- `ds4.c`: transitional tokenizer, Laguna scheduling, sessions, and disk-cache
+- `lgn2_engine.c`: internal tokenizer, Laguna scheduling, sessions, and disk-cache
   payload serialisation. The unreachable private generic/raw graph
   implementation is deleted; public session/batch/speculative routes own only
   Laguna plus optional DFlash. The standalone GLM/DSA graph and all public
@@ -69,10 +70,10 @@ requirements.
   and custom-prefill APIs are also gone. Move supported Laguna code into
   `lgn_*` modules as the remaining dormant low-level backend conditionals and
   generic Metal compatibility paths are deleted.
-- `ds4_cli.c`: command line and interactive transcript handling.
-- `ds4_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
+- `lgn2_cli.c`: command-line and interactive transcript handling.
+- `lgn2_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
   streaming, tool-call mapping, and server-side KV-cache policy.
-- `ds4_metal.m`: contracted Objective-C Metal runtime and kernel wrappers.
+- `lgn2_metal.m`: contracted Objective-C Metal runtime and kernel wrappers.
   Legacy HC, raw-KV, compressor, and generic graph wrappers are removed;
   retain only paths proven reachable from Laguna/DFlash or their correctness
   and lifecycle evidence.
@@ -80,20 +81,20 @@ requirements.
   must remain identical; mixed sources are pruned by symbol rather than by
   filename when Laguna still owns a kernel.
 - `tests/`: unit and live integration tests.
-- `FORK.md`: refactor boundary, deletion order, guardrails, and deferred
-  compatibility decisions.
+- `FORK.md`: refactor boundary, deletion order, guardrails, and fixed namespace
+  decisions.
 
 ## Testing
 
 Use `make` for build validation and `make test` for the model-independent
 Laguna Metal suite on Apple hardware. Run the model-backed gate explicitly as
-`make test-metal-laguna-integration LAGUNA_TEST_MODEL=/absolute/model.gguf`;
+`make test-metal-laguna-integration LGN2_TEST_MODEL=/absolute/model.gguf`;
 it must never fall back to a default fixture or skip a missing model. At each
 major refactor boundary, verify:
 
 1. A valid Laguna S2.1 model loads through the whole-model mmap Metal path.
 2. Non-Laguna architectures and unsupported backend/mode options are rejected
-   clearly rather than selecting a legacy fallback.
+   clearly rather than selecting an undocumented fallback.
 3. CLI generation, server streaming, sessions, batching, and sampling remain
    correct.
 4. The retained DFlash path passes its focused regression coverage.

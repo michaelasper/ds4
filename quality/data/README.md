@@ -1,4 +1,4 @@
-# Laguna quality fixture
+# LagoonNebula Laguna quality fixture
 
 The release fixture is `laguna-openrouter-100`: 100 deterministic Laguna S2.1
 continuations collected through OpenRouter model `poolside/laguna-s-2.1`.

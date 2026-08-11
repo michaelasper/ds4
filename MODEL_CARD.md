@@ -1,4 +1,4 @@
-# Laguna S 2.1 model and runtime note
+# LagoonNebula Laguna S 2.1 model and runtime note
 
 This checkout uses one pinned Laguna S 2.1 GGUF for its benchmark and local
 Metal runtime. The required model identity is:
@@ -15,15 +15,15 @@ locally recorded Hugging Face source
 and verifies the pinned SHA-256 before installing it.
 
 ```sh
-export DS4_GGUF_DIR=/absolute/path/to/laguna-models
+export LGN2_GGUF_DIR=/absolute/path/to/laguna-models
 ./download_model.sh laguna-q2-q3
 ```
 
 The downloader resumes its own `.part` file, leaves existing model files and
-`ds4flash.gguf` links untouched, and refuses a model path whose hash does not
-match the benchmark identity. Use the verified file at
-`$DS4_GGUF_DIR/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf` directly when an
-existing link must remain unchanged.
+the `lgn2.gguf` convenience link untouched, and refuses a model path whose hash
+does not match the benchmark identity. Use the verified file at
+`$LGN2_GGUF_DIR/laguna-s-2.1-RoutedQ2_K-Last27Q3_K.gguf` directly when a
+convenience link must remain unchanged. No legacy model-link name is consulted.
 
 The current product boundary is Laguna S 2.1 on Apple Metal. The benchmark
 runner separately creates its own read-only input symlink and rechecks the

@@ -1,7 +1,7 @@
-# QA before releases
+# LagoonNebula QA before releases
 
-This checklist is the release gate for the Laguna S2.1 Apple Metal fork. The
-supported product is deliberately narrow:
+This checklist is the release gate for the LagoonNebula Laguna S2.1 Apple Metal
+fork. The supported product is deliberately narrow:
 
 - model family: Laguna S2.1;
 - host: Apple silicon running macOS;
@@ -44,10 +44,10 @@ Check that the public programs render their help and expose only Laguna/Metal
 features:
 
 ```zsh
-./ds4 --help all
-./ds4-server --help all
-./ds4-bench --help all
-./ds4-eval --help all
+./lgn2 --help all
+./lgn2-server --help all
+./lgn2-bench --help all
+./lgn2-eval --help all
 ```
 
 ## 2. Model-independent tests
@@ -64,7 +64,7 @@ explicitly:
 
 ```zsh
 make test-laguna-cli-options
-./ds4-eval --self-test-extractors
+./lgn2-eval --self-test-extractors
 ```
 
 After Metal kernel, graph, quantization, or scheduling changes, also run the
@@ -74,7 +74,7 @@ focused targets that cover the changed code. At minimum:
 make test-metal-laguna
 ```
 
-Do not substitute `test-legacy` for the default Laguna suite. It is a temporary
+Do not substitute `test-extended` for the default Laguna suite. It is a temporary
 transition aid and may exercise code scheduled for deletion.
 
 ## 3. Model-backed integration
@@ -84,9 +84,9 @@ must inspect the model and exercise the session API. Unsupported-architecture
 rejection remains part of the model-independent `make test` gate.
 
 ```zsh
-export LAGUNA_TEST_MODEL=/absolute/path/to/laguna-s2.1.gguf
-shasum -a 256 "$LAGUNA_TEST_MODEL"
-make test-metal-laguna-integration LAGUNA_TEST_MODEL="$LAGUNA_TEST_MODEL"
+export LGN2_TEST_MODEL=/absolute/path/to/laguna-s2.1.gguf
+shasum -a 256 "$LGN2_TEST_MODEL"
+make test-metal-laguna-integration LGN2_TEST_MODEL="$LGN2_TEST_MODEL"
 ```
 
 For a release-affecting graph or kernel change, run at least one deterministic
@@ -106,10 +106,10 @@ Run the built-in server tests whenever HTTP parsing, SSE, prompt rendering,
 tool calls, sampling, batching, cancellation, or disk KV code changes:
 
 ```zsh
-./ds4_test --server
+./lgn2_test --server
 ```
 
-Then start `ds4-server` with the release model and smoke-test every advertised
+Then start `lgn2-server` with the release model and smoke-test every advertised
 API family:
 
 - `GET /v1/models`;
@@ -134,7 +134,7 @@ changes. Preserve the raw TSV, command, revision, model hash, and summary:
 ```zsh
 make quality/score_official
 quality/score_official \
-  "$LAGUNA_TEST_MODEL" \
+  "$LGN2_TEST_MODEL" \
   quality/data/laguna-openrouter-100/manifest.tsv \
   /tmp/laguna-quality.tsv 4096 --quality
 ```
@@ -142,7 +142,9 @@ quality/score_official \
 Performance claims require a committed protocol. For the current M5 Max
 confirmation study, `BENCHMARK.md` is the complete and authoritative handoff;
 run its committed driver without reconstructing commands or changing its
-selectors. Never use an informal timing run as release evidence.
+selectors. `BENCHMARK.md` and `benchmark/**` are frozen historical pre-fork
+protocols. Their old `ds4`/`DS4_*` commands are not current LagoonNebula
+interfaces. Never use an informal timing run as release evidence.
 
 Compare against the declared baseline on the same machine and power state.
 Report prefill and steady decode separately, retain rejected arms, and never

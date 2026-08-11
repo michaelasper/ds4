@@ -1,4 +1,4 @@
-# Laguna continuation quality testing
+# LagoonNebula Laguna continuation quality testing
 
 This directory compares local Laguna S2.1 GGUF variants with deterministic
 hosted-model continuations. The primary metric is target-token negative log
