@@ -227,8 +227,8 @@ cleanup:
 }
 #endif
 
-static void test_laguna_graph_guard_routes(void) {
-    TEST_ASSERT(ds4_test_laguna_graph_guard_routes());
+static void test_laguna_session_routes(void) {
+    TEST_ASSERT(ds4_test_laguna_session_routes());
 }
 
 static void test_laguna_graph_lifecycle(void) {
@@ -14768,9 +14768,9 @@ static const ds4_test_entry test_entries[] = {
      "serialized session ownership, structural close order, and Metal cleanup",
      test_engine_lifecycle, true},
 #ifndef DS4_NO_GPU
-    {"--laguna-graph-guards", "laguna-graph-guards",
-     "Laguna session paths reject generic GLM/raw graph access",
-     test_laguna_graph_guard_routes, false},
+    {"--laguna-session-routes", "laguna-session-routes",
+     "Laguna argmax uses the session evaluator and rejects raw-graph prefill",
+     test_laguna_session_routes, false},
     {"--laguna-graph-lifecycle", "laguna-graph-lifecycle",
      "Laguna target graph allocation, layout, reset, and failure unwind",
      test_laguna_graph_lifecycle, false},

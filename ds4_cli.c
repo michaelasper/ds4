@@ -1213,22 +1213,10 @@ static void tokens_remove(ds4_tokens *dst, int pos, int n) {
     dst->len -= n;
 }
 
-static const char *repl_glm_reasoning_effort_text(ds4_think_mode mode) {
-    switch (mode) {
-    case DS4_THINK_HIGH: return "Reasoning Effort: High";
-    case DS4_THINK_MAX:  return "Reasoning Effort: Max";
-    case DS4_THINK_NONE: return NULL;
-    }
-    return NULL;
-}
-
 static void repl_chat_build_think_prefix(ds4_engine *engine,
                                          ds4_think_mode mode,
                                          ds4_tokens *prefix) {
-    if (ds4_engine_is_glm_dsa(engine)) {
-        const char *effort = repl_glm_reasoning_effort_text(mode);
-        if (effort) ds4_chat_append_message(engine, prefix, "system", effort);
-    } else if (!ds4_engine_is_laguna(engine) && mode == DS4_THINK_MAX) {
+    if (!ds4_engine_is_laguna(engine) && mode == DS4_THINK_MAX) {
         ds4_chat_append_max_effort_prefix(engine, prefix);
     }
 }

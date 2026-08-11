@@ -150,19 +150,10 @@ const char *ds4_engine_model_name(ds4_engine *e);
 int ds4_engine_layer_count(ds4_engine *e);
 uint32_t ds4_engine_layer_compress_ratio(ds4_engine *e, uint32_t layer);
 uint64_t ds4_engine_hidden_f32_values(ds4_engine *e);
-bool ds4_engine_glm_layer_payload_bytes(ds4_engine *e,
-                                        uint32_t layer,
-                                        uint32_t full_live,
-                                        uint32_t key_dim,
-                                        uint32_t value_dim,
-                                        uint32_t compact_live,
-                                        uint32_t index_live,
-                                        uint64_t *out);
 /* Stable id for cache compatibility.  0 is the original Flash shape, so old
  * KV files with the previously-zero reserved byte remain Flash-compatible;
  * Pro and later shapes must use nonzero ids. */
 int ds4_engine_model_id(ds4_engine *e);
-bool ds4_engine_is_glm_dsa(ds4_engine *e);
 bool ds4_engine_is_laguna(ds4_engine *e);
 const char *ds4_engine_default_system_prompt(ds4_engine *e);
 void ds4_engine_sampling_defaults(ds4_engine *e, float *temperature,
@@ -171,7 +162,6 @@ const char *ds4_backend_name(ds4_backend backend);
 bool ds4_think_mode_enabled(ds4_think_mode mode);
 const char *ds4_think_mode_name(ds4_think_mode mode);
 const char *ds4_think_max_prefix(void);
-const char *ds4_glm_reasoning_effort_text(ds4_think_mode mode);
 uint32_t ds4_think_max_min_context(void);
 ds4_think_mode ds4_think_mode_for_context(ds4_think_mode mode, int ctx_size);
 /* Uses the active model shape selected by ds4_engine_open(); call after opening
@@ -308,9 +298,9 @@ bool ds4_test_engine_close_workspace_lifecycle(void);
  * output-head preflight. */
 int ds4_test_raw_graph_preflight_failure_state(int valid_output_shape);
 #ifndef DS4_NO_GPU
-/* Model-independent guard coverage for the Laguna session/graph routing
- * checkpoint.  This does not open a model or allocate an inference graph. */
-bool ds4_test_laguna_graph_guard_routes(void);
+/* Model-independent session-route contract: Laguna argmax uses the Laguna
+ * evaluator and mixed raw-graph prefill is rejected before graph access. */
+bool ds4_test_laguna_session_routes(void);
 #endif
 #endif
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k);

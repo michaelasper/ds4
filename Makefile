@@ -268,7 +268,7 @@ test-laguna-cli-options: ds4 ds4-server tests/test_laguna_cli_options.sh
 
 test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options test-engine-lifecycle ds4 ds4-server ds4-bench ds4-eval
 	@set -eu; \
-	./ds4_test --laguna-architecture --laguna-selector-parser --laguna-graph-guards --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --laguna-dflash-exec --laguna-dflash-command-ownership --server; \
+	./ds4_test --laguna-architecture --laguna-selector-parser --laguna-session-routes --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --laguna-dflash-exec --laguna-dflash-command-ownership --server; \
 	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
 	./ds4_test --laguna-metal-core
 
