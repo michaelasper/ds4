@@ -64,9 +64,11 @@ requirements.
   payload serialisation. The unreachable private generic/raw graph
   implementation is deleted; public session/batch/speculative routes own only
   Laguna plus optional DFlash. The standalone GLM/DSA graph and all public
-  raw-graph, imatrix, MTP, and DSpark orchestration are gone. Move supported
-  Laguna code into `lgn_*` modules as the remaining obsolete backend and
-  low-level compatibility paths are deleted.
+  raw-graph, imatrix, MTP, and DSpark orchestration are gone. The backend enum,
+  CPU inference closure, non-Apple accelerator startup shell, steering, power,
+  and custom-prefill APIs are also gone. Move supported Laguna code into
+  `lgn_*` modules as the remaining dormant low-level backend conditionals and
+  generic Metal compatibility paths are deleted.
 - `ds4_cli.c`: command line and interactive transcript handling.
 - `ds4_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
   streaming, tool-call mapping, and server-side KV-cache policy.

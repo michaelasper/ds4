@@ -99,12 +99,21 @@ The refactor branch already:
   budget controls, and partial-load compatibility; supported model weights are
   whole-model mmap-backed while generic residency, warmup, and Q4 resident
   paths remain available. Disk-KV persistence, including its independent disk
-  budget and eviction policy, remains supported.
+  budget and eviction policy, remains supported;
+- removes the public backend enum and selector, custom-prefill, steering, and
+  power fields/APIs; engine and session startup now own one Apple Metal runtime
+  directly, while the four retained frontends reject the retired backend
+  spellings before model I/O;
+- removes the unreachable CPU inference closure, non-Apple accelerator startup
+  shell, obsolete multi-GPU public header, and stale GLM long-context smoke
+  script. Host tokenizer, sampling, payload serialization, DFlash conversion,
+  and Metal numerical reference helpers remain where the supported product or
+  its correctness tests still use them.
 
 The private generic raw graph implementation and its public routes are now
-deleted. Low-level CUDA-oriented tensor-parallel and tier-aware helpers,
-legacy model helpers, and broad shared-backend Metal code still remain
-internally for later low-level cleanup; no public
+deleted. Dormant low-level CUDA/ROCm conditionals, tensor-parallel/tier-aware
+Metal helpers, and broad shared-backend Metal code still remain internally for
+later low-level cleanup; no public
 engine, session, diagnostic, imatrix, or support-model route owns them. Their
 presence is transitional and must not be interpreted as supported behavior. A
 `glm_` name on one of the six retained router/MoE Metal helpers describes
