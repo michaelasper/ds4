@@ -18,8 +18,8 @@ requirements.
   inference, tensor parallelism, multi-GPU placement, MTP, DSpark, steering,
   power controls, or custom prefill. Do not preserve these paths with new
   compatibility flags.
-- The product name is **LagoonNebula** and the eventual repository name is
-  **`lgn2`**. Defer the broad mechanical rename until implementation and
+- The tool and product name is **LagoonNebula** and the eventual repository
+  name is **`lgn2`**. Defer the broad mechanical rename until implementation and
   documentation cleanup is complete. Existing `ds4_*` names, cache paths,
   payload identifiers, and public symbols are temporary migration surfaces;
   the exact spelling and compatibility policy remain recorded decisions in
@@ -48,6 +48,8 @@ requirements.
 - `lgn.c` / `lgn.h`: narrow private LagoonNebula boundary and shared types.
 - `lgn_model.c` / `lgn_model.h`: immutable Laguna S2.1 shape, admission,
   tensor-layout, and binding rules.
+- `lgn_dflash.c` / `lgn_dflash.h`: private Laguna DFlash profile, metadata,
+  tensor binding, and BF16 shadow-map conversion.
 - `ds4.c`: transitional tokenizer, Metal graph scheduling, sessions, and
   disk-cache payload serialisation; move supported Laguna code into `lgn_*`
   modules as obsolete model/backend paths are deleted.

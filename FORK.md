@@ -7,11 +7,11 @@ benchmark data remain unchanged while this branch is cleaned up.
 
 ## Current boundary
 
-The intended product is **LagoonNebula**: one Laguna S2.1 GGUF model family,
-executed on Apple Metal with the whole model mmap-backed. The repository will
-be renamed to **`lgn2`** after the cleanup boundary is stable. The CLI and
-server remain supported; DFlash remains a Laguna-specific optional feature for
-now.
+The intended tool and product is **LagoonNebula**: one Laguna S2.1 GGUF model
+family, executed on Apple Metal with the whole model mmap-backed. The
+repository will be renamed to **`lgn2`** after the cleanup boundary is stable.
+The CLI and server remain supported; DFlash remains a Laguna-specific optional
+feature for now.
 
 The following are explicitly outside the product boundary: CPU, CUDA, ROCm,
 SSD expert streaming, distributed inference, tensor parallelism, multi-GPU
@@ -36,6 +36,9 @@ The refactor branch already:
   the public MTP, GLM-MTP, and DSpark aliases/options;
 - isolates immutable Laguna S2.1 shape, admission, tensor-layout, binding,
   and output-head rules in the private `lgn_model.c` / `lgn_model.h` module;
+- isolates the retained DFlash support profile, metadata/layout validation,
+  tensor binding, and parallel BF16 shadow-map conversion in the private
+  `lgn_dflash.c` / `lgn_dflash.h` module;
 - fixes the product name as **LagoonNebula** and the eventual repository name
   as **`lgn2`**, while deliberately postponing the mechanical identifier
   rename until unsupported implementation paths are gone;
