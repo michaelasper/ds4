@@ -11,6 +11,11 @@
 Run a verified Laguna S2.1 model locally on Apple silicon with one coherent
 CLI, HTTP, session, and evaluation workflow.
 
+The final product name is **LagoonNebula**, and the repository will become
+**`lgn2`**. This transitional checkout keeps the historical DwarfStar and
+`ds4*` names until the unsupported implementations have been removed and the
+remaining public surface is stable enough for one deliberate rename.
+
 [![License: MIT][license-shield]][license-url]
 
 If a reproducible local model workflow matters more than a hosted service, this
