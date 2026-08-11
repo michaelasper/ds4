@@ -60307,6 +60307,24 @@ static void ds4_session_dflash_quarantine(ds4_session *s) {
 #endif
 }
 
+/* A submitted target snapshot is not a usable rollback source until the
+ * command buffer that wrote its backup has completed successfully.  Keep the
+ * completion proof at the restore boundary so terminal failures cannot read a
+ * stale or unwritten backup merely because an earlier flush succeeded. */
+static bool ds4_session_dflash_restore_snapshot(
+        ds4_session *s,
+        bool         snapshot_completed,
+        uint32_t     pos0,
+        uint32_t     accepted_rows,
+        uint32_t     n_rows) {
+    if (!snapshot_completed) return true;
+    if (!s) return false;
+    return laguna_graph_spec_restore(&s->laguna_graph,
+                                     pos0,
+                                     accepted_rows,
+                                     n_rows);
+}
+
 static bool ds4_session_dflash_finish_capture(
         ds4_session *s,
         uint32_t     pos0,
@@ -66880,7 +66898,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
     int verify_tokens[DS4_DFLASH_BLOCK_SIZE] = {0};
     const float draft_p_min = e->dflash_p_min;
     bool draft_read_ok = false;
-    bool spec_snapshot_committed = false;
+    bool snapshot_submitted = false;
+    bool snapshot_completed = false;
 
     const double cycle_t0 = now_sec();
     if (!laguna_graph_spec_snapshot(&s->laguna_graph, pos0, n_rows)) {
@@ -66899,7 +66918,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
         return -1;
     }
 #endif
-    spec_snapshot_committed = true;
+    snapshot_submitted = true;
 
     /* Rejected support-model rows are overwritten by the next draft or
      * target-feature injection before they can be consumed. The target graph
@@ -66972,12 +66991,19 @@ static int ds4_session_eval_dflash_speculative_argmax(
             NULL,
             0);
         if (!target_preencoded) {
-            if (!ds4_session_dflash_discard_owned_commands()) {
+            const bool target_discard_ok =
+                ds4_session_dflash_discard_owned_commands();
+            if (!target_discard_ok) {
                 ds4_session_dflash_quarantine(s);
                 if (errlen) snprintf(err, errlen,
                                      "DFlash target pre-encode rollback failed");
                 return -1;
             }
+            /* This terminal discard waits the snapshot CB(s) that were
+             * submitted before the target attempt.  Do not later mistake an
+             * empty wait for that proof; carry the successful boundary state
+             * forward explicitly. */
+            if (snapshot_submitted) snapshot_completed = true;
         } else if (!ds4_gpu_commands_active()) {
             ds4_session_dflash_quarantine(s);
             if (errlen) snprintf(err, errlen,
@@ -66989,8 +67015,15 @@ static int ds4_session_eval_dflash_speculative_argmax(
     if (draft_p_min > 0.0f) {
         float draft_probabilities[DS4_DFLASH_BLOCK_SIZE] = {0};
 #ifdef __APPLE__
+        const bool snapshot_wait_ok =
+            ds4_gpu_wait_submitted_commands() != 0;
+        /* wait_submitted_commands covers the committed snapshot and the
+         * speculative draft CB in queue order.  A reported failure means the
+         * backup must remain untrusted, even if the device completed some
+         * work before reporting that failure. */
+        snapshot_completed = snapshot_wait_ok;
         draft_read_ok =
-            ds4_gpu_wait_submitted_commands() != 0 &&
+            snapshot_wait_ok &&
             ds4_gpu_tensor_read(
                 s->dflash_graph.argmax,
                 0,
@@ -67003,8 +67036,11 @@ static int ds4_session_eval_dflash_speculative_argmax(
                 (uint64_t)n_rows *
                     sizeof(draft_probabilities[0])) != 0;
 #else
+        const bool snapshot_end_ok =
+            ds4_gpu_end_commands() != 0;
+        snapshot_completed = snapshot_end_ok;
         draft_read_ok =
-            ds4_gpu_end_commands() != 0 &&
+            snapshot_end_ok &&
             ds4_gpu_tensor_read(
                 s->dflash_graph.argmax,
                 0,
@@ -67092,6 +67128,10 @@ static int ds4_session_eval_dflash_speculative_argmax(
     bool inject_ok = false;
     if (verify_ok) {
         inject_ok = ds4_session_dflash_finish_capture(s, pos0, n_rows);
+        /* p_min == 0 intentionally keeps snapshot, verification, and
+         * injection in one transaction.  finish_capture's successful
+         * terminal boundary is the completion proof for that snapshot. */
+        if (inject_ok) snapshot_completed = true;
     }
     bool target_read_ok = false;
     if (inject_ok) {
@@ -67110,9 +67150,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
     if (!verify_ok || !inject_ok || !target_read_ok || !draft_read_ok) {
         ds4_session_dflash_quarantine(s);
-        if (spec_snapshot_committed) {
-            (void)laguna_graph_spec_restore(
-                &s->laguna_graph, pos0, 0, n_rows);
+        if (snapshot_completed) {
+            (void)ds4_session_dflash_restore_snapshot(
+                s, snapshot_completed, pos0, 0, n_rows);
         }
         if (errlen) snprintf(err, errlen,
                              "%s DFlash target verification failed",
@@ -67129,15 +67169,22 @@ static int ds4_session_eval_dflash_speculative_argmax(
         if (proposal == eos_token) break;
     }
 
+    /* The accepted-prefix restore is the only rollback that can repair the
+     * target cache after a successful verifier.  Refuse to use the backup if
+     * its submitting command never acquired a successful completion proof. */
+    if (!snapshot_submitted || !snapshot_completed) {
+        ds4_session_dflash_quarantine(s);
+        if (errlen) snprintf(err, errlen,
+                             "DFlash verifier snapshot completion missing");
+        return -1;
+    }
+
     const bool logits_ok = laguna_graph_read_spec_logits(
         &s->laguna_graph,
         (uint32_t)(n_accept - 1),
         s->logits);
-    const bool target_restore_ok = laguna_graph_spec_restore(
-        &s->laguna_graph,
-        pos0,
-        (uint32_t)n_accept,
-        n_rows);
+    const bool target_restore_ok = ds4_session_dflash_restore_snapshot(
+        s, snapshot_completed, pos0, (uint32_t)n_accept, n_rows);
     if (!logits_ok || !target_restore_ok) {
         ds4_session_dflash_quarantine(s);
         if (errlen) snprintf(err, errlen,
@@ -68504,6 +68551,86 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
         !ds4_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
                              readback, test_row_bytes) ||
         memcmp(readback, value_host + test_row_bytes, test_row_bytes) != 0) {
+        goto cleanup;
+    }
+
+    /* A submitted snapshot is not complete merely because its CB was
+     * submitted.  The hook below waits a real Metal CB to completion, then
+     * reports a terminal wait failure and suppresses completion evidence.  A
+     * later active write is committed so an accidental stale-backup restore
+     * would visibly replace the distinct post-failure sentinel. */
+    for (size_t i = 0; i < test_row_bytes; i++) {
+        cache_host[test_row_bytes + i] = 0x73u;
+        value_host[test_row_bytes + i] = 0x83u;
+    }
+    if (!ds4_gpu_tensor_write(target.key_cache[chosen], 0,
+                              cache_host, sizeof(cache_host)) ||
+        !ds4_gpu_tensor_write(target.value_cache[chosen], 0,
+                              value_host, sizeof(value_host))) {
+        goto cleanup;
+    }
+    const uint64_t wait_target_generated_before =
+        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+    const uint64_t wait_target_consumed_before =
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+    const uint64_t wait_target_family0_before =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+    const uint64_t wait_target_family1_before =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+    const uint64_t wait_support_generated_before =
+        ds4_gpu_laguna_rope_support_atlas_completed_generated_count();
+    const uint64_t wait_support_consumed_before =
+        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
+    if (!laguna_graph_spec_snapshot(&target, 1u, 1u) ||
+        !ds4_gpu_commands_active() ||
+        ds4_gpu_flush_commands() != 1 ||
+        !ds4_gpu_commands_active()) {
+        goto cleanup;
+    }
+    ds4_gpu_test_inject_wait_submitted_failure();
+    const bool snapshot_wait_ok = ds4_gpu_wait_submitted_commands() != 0;
+    ds4_session failed_wait_state;
+    memset(&failed_wait_state, 0, sizeof(failed_wait_state));
+    failed_wait_state.checkpoint_valid = true;
+    failed_wait_state.dflash_synced = true;
+    if (snapshot_wait_ok ||
+        !ds4_gpu_commands_active() ||
+        ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+            wait_target_generated_before ||
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+            wait_target_consumed_before ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+            wait_target_family0_before ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+            wait_target_family1_before ||
+        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+            wait_support_generated_before ||
+        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+            wait_support_consumed_before) {
+        goto cleanup;
+    }
+    ds4_session_dflash_quarantine(&failed_wait_state);
+    if (failed_wait_state.checkpoint_valid || failed_wait_state.dflash_synced ||
+        !ds4_gpu_tensor_copy(target.key_cache[chosen], test_row_bytes,
+                             mutation_key, 0, test_row_bytes) ||
+        !ds4_gpu_tensor_copy(target.value_cache[chosen], test_row_bytes,
+                             mutation_value, 0, test_row_bytes) ||
+        ds4_gpu_end_commands() != 1 ||
+        ds4_gpu_commands_active() ||
+        !ds4_session_dflash_restore_snapshot(
+            &failed_wait_state, snapshot_wait_ok, 1u, 0u, 1u) ||
+        !ds4_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
+                             readback, test_row_bytes) ||
+        memcmp(readback, mutated_key, test_row_bytes) != 0 ||
+        !ds4_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
+                             readback, test_row_bytes) ||
+        memcmp(readback, mutated_value, test_row_bytes) != 0 ||
+        !ds4_gpu_tensor_read(target.key_cache[chosen], 0,
+                             readback, test_row_bytes) ||
+        memcmp(readback, cache_host, test_row_bytes) != 0 ||
+        !ds4_gpu_tensor_read(target.value_cache[chosen], 0,
+                             readback, test_row_bytes) ||
+        memcmp(readback, value_host, test_row_bytes) != 0) {
         goto cleanup;
     }
     ok = true;

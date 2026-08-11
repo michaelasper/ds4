@@ -687,6 +687,10 @@ typedef enum {
 
 static ds4_gpu_test_init_failpoint g_test_init_failpoint;
 static int g_test_synchronize_fail_once;
+/* The wait-failure hook is consumed only after at least one submitted
+ * command buffer has really completed.  This lets tests exercise the
+ * reported-failure/quarantine path without fabricating a pre-submit error. */
+static int g_test_wait_submitted_fail_once;
 
 static int ds4_gpu_test_init_should_fail(
         ds4_gpu_test_init_failpoint failpoint) {
@@ -1440,13 +1444,32 @@ static void ds4_gpu_laguna_test_decode_route_batch_completed(int ok);
 
 static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     int ok = 1;
+#ifdef DS4_TEST_HOOKS
+    int injected_failure = 0;
+#endif
     const NSUInteger count = [g_pending_cbs count];
     for (NSUInteger i = 0; i < count; i++) {
         id<MTLCommandBuffer> pending = [g_pending_cbs objectAtIndex:i];
         const BOOL completed = ds4_gpu_wait_command_buffer(pending, label);
         if (!completed) {
             ok = 0;
-        } else if (i < [g_pending_laguna_atlas_evidence count]) {
+        }
+#ifdef DS4_TEST_HOOKS
+        /* Consume this fault only after the device has completed real work.
+         * Report failure for the boundary and suppress every evidence record
+         * from this wait, so completion cannot promote a speculative path. */
+        if (completed && !injected_failure &&
+            g_test_wait_submitted_fail_once) {
+            g_test_wait_submitted_fail_once = 0;
+            injected_failure = 1;
+            ok = 0;
+        }
+#endif
+        if (completed
+#ifdef DS4_TEST_HOOKS
+            && !injected_failure
+#endif
+            && i < [g_pending_laguna_atlas_evidence count]) {
             NSData *data = [g_pending_laguna_atlas_evidence objectAtIndex:i];
             if ([data length] == sizeof(ds4_gpu_laguna_atlas_cb_evidence)) {
                 ds4_gpu_laguna_atlas_cb_evidence evidence;
@@ -12545,6 +12568,7 @@ void ds4_gpu_cleanup(void) {
         g_laguna_swa_selectors_snapshot_valid = 0;
 #ifdef DS4_TEST_HOOKS
         g_test_synchronize_fail_once = 0;
+        g_test_wait_submitted_fail_once = 0;
         g_laguna_test_route_hooks = 0;
         g_laguna_test_direct_kv_count = 0;
         g_laguna_test_wrap_kv_count = 0;
@@ -13671,6 +13695,10 @@ static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_owned(
 #ifdef DS4_TEST_HOOKS
 void ds4_gpu_test_inject_synchronize_failure(void) {
     g_test_synchronize_fail_once = 1;
+}
+
+void ds4_gpu_test_inject_wait_submitted_failure(void) {
+    g_test_wait_submitted_fail_once = 1;
 }
 
 int ds4_gpu_test_tensor_tracking_state(uint64_t *live_handles,

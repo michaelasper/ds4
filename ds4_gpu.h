@@ -269,6 +269,9 @@ int ds4_gpu_test_lifecycle_cleanup(void);
  * waited for all submitted work.  This exercises engine-close cleanup after a
  * reported drain failure without leaving GPU work in flight. */
 void ds4_gpu_test_inject_synchronize_failure(void);
+/* Inject a one-shot submitted-wait failure only after a real pending command
+ * buffer has completed; completion evidence is suppressed for that wait. */
+void ds4_gpu_test_inject_wait_submitted_failure(void);
 /* Diagnostics used by engine-close ownership tests. */
 int ds4_gpu_test_tensor_tracking_state(uint64_t *live_handles,
                                        uint64_t *live_bytes);
