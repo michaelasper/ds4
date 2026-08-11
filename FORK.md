@@ -111,6 +111,14 @@ The refactor branch already:
   tokenizer, sampling, payload serialization, DFlash conversion, and Metal
   numerical reference helpers remain where the supported product or its
   correctness tests still use them;
+- removes the uncalled tensor-parallel gate service, lifecycle/callback and
+  keep-alive APIs, host service-thread/event state, and TP flag/keep-alive
+  kernels. Whole-model mmap residency and warmup are now unconditional within
+  their existing `DS4_METAL_NO_RESIDENCY`/`DS4_METAL_NO_MODEL_WARMUP` controls;
+  the lifecycle-frozen world-1 `DS4_METAL_Q8_MV_NSG` override remains
+  supported and world-2 dispatch geometry is retired;
+  routed expert argument fields and range helpers remain as private ABI residue
+  for the later TP-compatible shader cleanup;
 - removes the unreachable legacy Metal HC, raw-KV, generic RoPE, concat,
   repeat, set-rows, softmax, and sum-rows shader families together with their
   public wrappers, pipeline state, runtime source registrations, and stale
@@ -121,13 +129,14 @@ The refactor branch already:
   deliberately retained.
 
 The private generic raw graph implementation and its public routes are now
-deleted. Tensor-parallel/tier-aware Metal helpers, and a smaller set of shared
-FlashAttention, parallel-FFN, quantized-MoE, and source-override internals
-still remain for later low-level cleanup; no public engine, session,
-diagnostic, imatrix, or support-model route owns them. Their presence is
-transitional and must not be interpreted as supported behavior. A `glm_` name
-on one of the six retained router/MoE Metal helpers describes inherited
-implementation naming, not GLM product support.
+deleted. Active routed expert argument fields/range helpers, tier-aware Metal
+helpers, and a smaller set of shared FlashAttention, parallel-FFN,
+quantized-MoE, and source-override internals still remain for later low-level
+cleanup; no public engine, session, diagnostic, imatrix, or support-model
+route owns them. Their presence is transitional and must not be interpreted
+as supported behavior. A `glm_` name on one of the six retained router/MoE
+Metal helpers describes inherited implementation naming, not GLM product
+support.
 
 ## Staged deletion and extraction order
 

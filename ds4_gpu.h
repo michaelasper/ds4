@@ -200,9 +200,8 @@ int ds4_gpu_init(void);
 void ds4_gpu_cleanup(void);
 
 #ifdef __APPLE__
-/* Process-lifecycle snapshot for the Q8 decode dispatch selectors.  The
- * graph admission code and every Metal TP-world descriptor consume this same
- * snapshot.  The snapshot is intentionally immutable for the lifetime of a
+/* Process-lifecycle snapshot for the supported world-1 Q8 decode dispatch
+ * selectors.  The snapshot is intentionally immutable for the lifetime of a
  * process; changing the environment after the first GPU lifecycle probe does
  * not change an in-flight or subsequently-created graph.  A fresh process is
  * the reset boundary. */
@@ -324,69 +323,6 @@ static inline int ds4_gpu_device_is_pre_m5_apple_silicon(void) { return 0; }
 static inline int ds4_gpu_device_is_m5_apple_silicon(void) { return 0; }
 #endif
 void ds4_gpu_print_memory_report(const char *label);
-
-/* Tensor-parallel per-layer gates (Metal only).  The encoder calls
- * ds4_gpu_tp_gate_encode() right after the kernels that produce a partial
- * block output in the TP slab: it closes the current encoder, makes the GPU
- * signal a shared event, queues the exchange on a service thread, and makes
- * the GPU wait for the CPU-signaled release before the combine kernel runs.
- * Sequence values are assigned internally and increase monotonically; both
- * ranks encode the identical gate sequence so values pair up by
- * construction.  The exchange callback runs on the service thread and must
- * return nonzero on success. */
-typedef int (*ds4_gpu_tp_exchange_fn)(void *ud, uint32_t layer, uint32_t gate, uint64_t seq);
-/* Bind one rank of the two-way split. slab is the transport slab tensor and
- * gpu_flags_off is the offset of its GPU-written gate-ready flag words. */
-int ds4_gpu_tp_init(uint32_t rank,
-                    ds4_gpu_tensor *slab, uint64_t gpu_flags_off,
-                    ds4_gpu_tp_exchange_fn fn, void *ud);
-void ds4_gpu_tp_shutdown(void);
-/* Multi-session TP reuses slab slots across several encoded graph tapes.
- * Shared-event arrival is required in that mode to make each partial vector
- * CPU-visible before the transport thread reads it. */
-void ds4_gpu_tp_set_session_batch_mode(int enabled);
-/* The coordinator-only DSpark support model does not participate in TP.
- * Suspend ownership only while encoding it; base-model verification remains
- * split across both ranks. */
-void ds4_gpu_tp_suspend_expert_sharding(int suspend);
-int ds4_gpu_tp_gate_encode(uint32_t layer, uint32_t gate);
-/* Verify-block batch gates: one exchange per layer moving `rows` partial
- * rows at once (speculative verify).  The callback runs on the gate service
- * thread with the same ud as the row-gate exchange fn. */
-typedef int (*ds4_gpu_tp_batch_exchange_fn)(void *ud, uint32_t layer,
-                                            uint32_t rows, uint64_t seq);
-void ds4_gpu_tp_set_batch_exchange(ds4_gpu_tp_batch_exchange_fn fn);
-int ds4_gpu_tp_batch_gate_encode(uint32_t layer, uint32_t rows);
-/* Prefill batch gates: the service thread exchanges `bytes` between two
- * CPU-visible bounce tensors directly (payloads far beyond slab slots). */
-typedef int (*ds4_gpu_tp_big_exchange_fn)(void *ud, uint32_t layer,
-                                          uint64_t seq, const void *out,
-                                          void *in, uint64_t bytes);
-void ds4_gpu_tp_set_big_exchange(ds4_gpu_tp_big_exchange_fn fn);
-int ds4_gpu_tp_big_gate_encode(uint32_t layer, uint32_t rows,
-                               const ds4_gpu_tensor *out_t,
-                               ds4_gpu_tensor *in_t,
-                               uint64_t bytes);
-/* Split big gate: kick publishes the GPU arrival marker (batch shared
- * event, whose completion semantics make the bounce payload visible to
- * the exchange thread) and queues the exchange, returning the gate seq
- * (0 on failure); wait encodes the release.  Multiple kicks may be in
- * flight; waiting on the last seq covers all earlier kicks (monotonic
- * release event, in-order service thread). */
-uint64_t ds4_gpu_tp_big_gate_kick(uint32_t layer, uint32_t rows,
-                                  const ds4_gpu_tensor *out_t,
-                                  ds4_gpu_tensor *in_t,
-                                  uint64_t bytes);
-int ds4_gpu_tp_big_gate_wait(uint64_t seq);
-/* Pause/resume the DVFS keep-alive around work that keeps the GPU busy.
- * No-op when TP is not bound. */
-void ds4_gpu_tp_keepalive_pause(int paused);
-/* Skip the whole-file model residency set (TP sharding: only the
- * owned ranges are warmed; the rest must never be paged in). Call before
- * the model is mapped. */
-void ds4_gpu_model_residency_skip(int skip);
-/* Nonzero after any gate exchange failed; the eval must abort. */
-int ds4_gpu_tp_failed(void);
 
 /* =========================================================================
  * Embeddings and Indexer Helpers.
@@ -849,8 +785,8 @@ int ds4_gpu_test_laguna_decode_route_counters(uint64_t *ordinary,
                                               uint64_t *global_grouped);
 int ds4_gpu_test_laguna_q8_bco_counters(uint64_t *bco_false,
                                         uint64_t *bco_true);
-/* Test-only view of the real Q8 descriptor geometry for each TP world. */
-int ds4_gpu_test_q8_decode_nsg_for_world(int world);
+/* Test-only view of the supported Q8 descriptor geometry. */
+int ds4_gpu_test_q8_decode_nsg(void);
 /* Test-only malformed lifecycle injection for fail-before-mutation coverage. */
 void ds4_gpu_test_laguna_set_direct_kv_mode(int mode);
 #endif

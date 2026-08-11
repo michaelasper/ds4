@@ -1517,20 +1517,17 @@ static void test_metal_laguna_dense_q8_gate_up_swiglu(void) {
     test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
 }
 
-/* Q8 dispatch selectors are a process-lifecycle snapshot, not per-world
- * getenv probes.  Mutating either selector after the first Metal probe must
- * leave the descriptor configuration unchanged; cleanup is intentionally not
- * a reset boundary. */
+/* The supported world-1 Q8 dispatch selectors are process-lifecycle
+ * snapshots, not per-call getenv probes.  Mutating either selector after the
+ * first Metal probe must leave the descriptor configuration unchanged;
+ * cleanup is intentionally not a reset boundary. */
 static void test_metal_q8_decode_lifecycle_snapshot(void) {
     ds4_gpu_q8_decode_config first;
     ds4_gpu_q8_decode_config mutated;
     TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&first) > 0);
-    const int expected_world1 = first.q8_mv_nsg_override > 0 ?
+    const int expected_nsg = first.q8_mv_nsg_override > 0 ?
         first.q8_mv_nsg_override : 4;
-    const int expected_world2 = first.q8_mv_nsg_override > 0 ?
-        first.q8_mv_nsg_override : 2;
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg() == expected_nsg);
 
     char *saved_nsg = test_save_env("DS4_METAL_Q8_MV_NSG");
     char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
@@ -1539,29 +1536,40 @@ static void test_metal_q8_decode_lifecycle_snapshot(void) {
     TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
     TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
     TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg() == expected_nsg);
 
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_NSG") == 0);
     TEST_ASSERT(unsetenv("DS4_METAL_Q8_MV_ROWS") == 0);
     TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
     TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
     TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg() == expected_nsg);
 
     /* Cleanup releases Metal objects but deliberately does not reopen the
-     * process snapshot.  Re-init must keep the same world-1/world-2
-     * descriptors even after the environment was mutated and then unset. */
+     * process snapshot.  Re-init must keep the same world-1 descriptor even
+     * after the environment was mutated and then unset. */
     ds4_gpu_cleanup();
     TEST_ASSERT(ds4_gpu_init() != 0);
     TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&mutated) > 0);
     TEST_ASSERT(mutated.q8_mv_nsg_override == first.q8_mv_nsg_override);
     TEST_ASSERT(mutated.q8_mv_rows == first.q8_mv_rows);
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(1) == expected_world1);
-    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg_for_world(2) == expected_world2);
+    TEST_ASSERT(ds4_gpu_test_q8_decode_nsg() == expected_nsg);
     test_restore_env("DS4_METAL_Q8_MV_NSG", saved_nsg);
     test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
+}
+
+/* This selector is frozen on the first Metal probe, so malformed admission
+ * runs as an explicit fresh-process test rather than mutating an initialized
+ * snapshot. */
+static void test_metal_q8_decode_nsg_malformed(void) {
+    char *saved_nsg = test_save_env("DS4_METAL_Q8_MV_NSG");
+    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_NSG", "9", 1) == 0);
+
+    ds4_gpu_q8_decode_config config;
+    TEST_ASSERT(ds4_gpu_q8_decode_config_snapshot(&config) < 0);
+    TEST_ASSERT(config.q8_mv_nsg_override == -1);
+    TEST_ASSERT(ds4_gpu_init() == 0);
+    test_restore_env("DS4_METAL_Q8_MV_NSG", saved_nsg);
 }
 
 /* The focused selector starts in a fresh process, so use it to prove that a
@@ -10494,6 +10502,9 @@ static const ds4_test_entry test_entries[] = {
     {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4, false},
     {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group, false},
 #if defined(__APPLE__)
+    {"--metal-q8-nsg-malformed", "metal-q8-nsg-malformed",
+     "reject malformed lifecycle-frozen Q8 world-1 NSG selector",
+     test_metal_q8_decode_nsg_malformed, true},
     {"--metal-laguna-q8-lmhead-screen", "metal-laguna-q8-lmhead-screen",
      "certified Laguna Q8 lm-head top-1 screen (focused opt-in)",
      test_metal_laguna_q8_lmhead_screen_focused, true},

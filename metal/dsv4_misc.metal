@@ -850,29 +850,3 @@ kernel void kernel_dsv4_router_transform_finalize_weights_one_simd(
         weights[tid] = reloaded_probs[s[tid]] * norm_scratch[1];
     }
 }
-
-kernel void kernel_dsv4_tp_keepalive(
-        device float * out,
-        constant uint & iters,
-        uint tid [[thread_position_in_grid]]) {
-    float a = out[tid];
-    const float b = 1.000001f;
-    for (uint i = 0; i < iters; i++) {
-        a = fma(a, b, 0.000001f);
-        a = fma(a, b, -0.000001f);
-    }
-    out[tid] = a;
-}
-
-// Tensor-parallel gate flag: publishes a sequence number to a slab slot the
-// CPU service thread spin-reads, replacing the much slower shared-event
-// signal for the GPU->CPU direction.  Ordering against the partial-output
-// kernels comes from the buffer hazard on the shared slab.
-kernel void kernel_dsv4_tp_flag_set(
-        device atomic_uint & flag,
-        constant uint & value,
-        uint tid [[thread_position_in_grid]]) {
-    if (tid == 0) {
-        atomic_store_explicit(&flag, value, memory_order_relaxed);
-    }
-}
