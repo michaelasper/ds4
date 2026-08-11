@@ -5201,29 +5201,6 @@ static bool laguna_graph_read_spec_logits(
                                row_bytes) != 0;
 }
 
-#ifdef DS4_ROCM_BUILD
-extern int ds4_gpu_matmul_q8_0_decode_preq_tensor(
-        ds4_gpu_tensor *out,
-        const void *model_map,
-        uint64_t model_size,
-        uint64_t weight_offset,
-        uint64_t in_dim,
-        uint64_t out_dim,
-        const ds4_gpu_tensor *x,
-        uint64_t n_tok);
-extern int ds4_gpu_matmul_q8_0_pair_decode_preq8_tensor(
-        ds4_gpu_tensor *out0,
-        ds4_gpu_tensor *out1,
-        const void *model_map,
-        uint64_t model_size,
-        uint64_t weight0_offset,
-        uint64_t weight1_offset,
-        uint64_t in_dim,
-        uint64_t out0_dim,
-        uint64_t out1_dim,
-        const ds4_gpu_tensor *x);
-#endif
-
 static bool laguna_graph_matmul(
         ds4_gpu_tensor       *out,
         const ds4_model      *model,
@@ -5231,19 +5208,6 @@ static bool laguna_graph_matmul(
         const ds4_gpu_tensor *x,
         uint64_t              n_tokens) {
     if (!out || !model || !weight || !x || weight->ndim < 2) return false;
-#ifdef DS4_ROCM_BUILD
-    if (weight->type == DS4_TENSOR_Q8_0 && n_tokens == 1u) {
-        return ds4_gpu_matmul_q8_0_decode_preq_tensor(
-                   out,
-                   model->map,
-                   model->size,
-                   weight->abs_offset,
-                   weight->dim[0],
-                   weight->dim[1],
-                   x,
-                   n_tokens) != 0;
-    }
-#endif
     if (weight->type == DS4_TENSOR_F16) {
         return ds4_gpu_matmul_f16_tensor(out,
                                          model->map,
@@ -5710,88 +5674,6 @@ static bool laguna_graph_routed_moe_decode_rows(
                    (uint32_t)mid_elems) != 0;
     }
 #endif
-#if defined(DS4_ROCM_BUILD) || defined(DS4_NATIVE_CUDA_BUILD)
-#ifdef DS4_ROCM_BUILD
-    /* The ROCm Q4_K batch path keeps decode's per-token kernels when the row
-     * block is short, so it sweeps the selected experts once for the whole
-     * block while every row stays bit-identical to single-row decode.  Falling
-     * back to the row loop below would cost a launch storm and one full expert
-     * sweep per row, which is exactly what speculation is meant to avoid. */
-    if (l->ffn_gate_exps->type == DS4_TENSOR_Q4_K &&
-        l->ffn_up_exps->type == DS4_TENSOR_Q4_K &&
-        l->ffn_down_exps->type == DS4_TENSOR_Q4_K &&
-        n_rows <= DS4_DFLASH_BLOCK_SIZE) {
-        return ds4_gpu_glm_routed_moe_batch_tensor(
-                   g->ffn_out,
-                   g->routed_mid,
-                   model->map,
-                   model->size,
-                   l->ffn_gate_exps->abs_offset,
-                   l->ffn_up_exps->abs_offset,
-                   l->ffn_down_exps->abs_offset,
-                   l->ffn_gate_exps->type,
-                   l->ffn_up_exps->type,
-                   l->ffn_down_exps->type,
-                   gate_expert_bytes,
-                   gate_row_bytes,
-                   up_expert_bytes,
-                   up_row_bytes,
-                   down_expert_bytes,
-                   down_row_bytes,
-                   DS4_N_EMBD,
-                   DS4_N_FF_EXP,
-                   DS4_N_EMBD,
-                   g->router_selected,
-                   g->router_weights,
-                   DS4_N_EXPERT,
-                   DS4_N_EXPERT_USED,
-                   layer,
-                   g->ffn_norm,
-                   n_rows,
-                   (uint32_t)mid_elems,
-                   true) != 0;
-    }
-#endif
-    if (
-#ifdef DS4_NATIVE_CUDA_BUILD
-        getenv("DS4_CUDA_DFLASH_ROW_MOE") == NULL &&
-#endif
-        (l->ffn_gate_exps->type == DS4_TENSOR_Q2_K ||
-         l->ffn_gate_exps->type == DS4_TENSOR_Q3_K) &&
-        l->ffn_up_exps->type == l->ffn_gate_exps->type &&
-        l->ffn_down_exps->type == l->ffn_gate_exps->type &&
-        n_rows <= DS4_DFLASH_BLOCK_SIZE) {
-        return ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
-                   g->ffn_out,
-                   g->routed_mid,
-                   model->map,
-                   model->size,
-                   l->ffn_gate_exps->abs_offset,
-                   l->ffn_up_exps->abs_offset,
-                   l->ffn_down_exps->abs_offset,
-                   l->ffn_gate_exps->type,
-                   l->ffn_up_exps->type,
-                   l->ffn_down_exps->type,
-                   gate_expert_bytes,
-                   gate_row_bytes,
-                   up_expert_bytes,
-                   up_row_bytes,
-                   down_expert_bytes,
-                   down_row_bytes,
-                   DS4_N_EMBD,
-                   DS4_N_FF_EXP,
-                   DS4_N_EMBD,
-                   g->router_selected,
-                   g->router_weights,
-                   DS4_N_EXPERT,
-                   DS4_N_EXPERT_USED,
-                   layer,
-                   g->ffn_norm,
-                   n_rows,
-                   (uint32_t)mid_elems) != 0;
-    }
-#endif
-
     for (uint32_t row = 0; row < n_rows; row++) {
         ds4_gpu_tensor *out = ds4_gpu_tensor_view(
             g->ffn_out, (uint64_t)row * embd_bytes, embd_bytes);
@@ -5903,7 +5785,7 @@ static bool laguna_graph_router_decode_rows(
         }
     }
 #endif
-#if defined(__APPLE__) || defined(DS4_ROCM_BUILD)
+#if defined(__APPLE__)
     return ds4_gpu_matmul_f32_decode_rows_exact_tensor(
                g->router_logits,
                model->map,
@@ -5925,30 +5807,6 @@ static bool laguna_graph_router_decode_rows(
                DS4_N_EXPERT_USED,
                DS4_EXPERT_WEIGHT_SCALE,
                n_rows) != 0;
-#elif defined(DS4_NATIVE_CUDA_BUILD)
-    if (getenv("DS4_CUDA_DFLASH_ROW_ROUTER") == NULL) {
-        return ds4_gpu_matmul_f32_decode_rows_exact_tensor(
-                   g->router_logits,
-                   model->map,
-                   model->size,
-                   l->ffn_gate_inp->abs_offset,
-                   DS4_N_EMBD,
-                   DS4_N_EXPERT,
-                   g->ffn_norm,
-                   n_rows) != 0 &&
-               ds4_gpu_glm_router_select_batch_tensor(
-                   g->router_selected,
-                   g->router_weights,
-                   g->router_probs,
-                   model->map,
-                   model->size,
-                   l->ffn_exp_probs_b->abs_offset,
-                   g->router_logits,
-                   DS4_N_EXPERT,
-                   DS4_N_EXPERT_USED,
-                   DS4_EXPERT_WEIGHT_SCALE,
-                   n_rows) != 0;
-    }
 #endif
     const uint64_t embd_bytes =
         (uint64_t)DS4_N_EMBD * sizeof(float);
@@ -6302,18 +6160,11 @@ static bool dflash_graph_draft_block(
         }
     }
     if (ok) {
-#ifdef DS4_ROCM_BUILD
-        ok = ds4_gpu_argmax_rows_tensor(g->argmax,
-                                        g->logits,
-                                        DS4_N_VOCAB,
-                                        n_rows) != 0;
-#else
         ok = ds4_gpu_indexer_topk_tensor(g->argmax,
                                           g->logits,
                                           DS4_N_VOCAB,
                                           n_rows,
                                           1) != 0;
-#endif
     }
     if (ok && e->dflash_p_min > 0.0f) {
         ok = ds4_gpu_dflash_probabilities_tensor(
@@ -6884,30 +6735,6 @@ static bool laguna_graph_forward_token(
                         n_head,
                         g->attn_norm) != 0;
             } else {
-#ifdef DS4_ROCM_BUILD
-                ok = ds4_gpu_matmul_q8_0_pair_decode_preq8_tensor(
-                        g->q,
-                        g->k,
-                        model->map,
-                        model->size,
-                        l->attn_q->abs_offset,
-                        l->attn_k->abs_offset,
-                        DS4_N_EMBD,
-                        q_dim,
-                        DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
-                        g->attn_norm) != 0 &&
-                     ds4_gpu_matmul_q8_0_pair_decode_preq8_tensor(
-                        g->v,
-                        g->gate,
-                        model->map,
-                        model->size,
-                        l->attn_v->abs_offset,
-                        l->attn_gate->abs_offset,
-                        DS4_N_EMBD,
-                        DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
-                        n_head,
-                        g->attn_norm) != 0;
-#else
                 ok = ds4_gpu_matmul_q8_0_pair_tensor(
                         g->q,
                         g->k,
@@ -6932,7 +6759,6 @@ static bool laguna_graph_forward_token(
                         n_head,
                         g->attn_norm,
                         1) != 0;
-#endif
             }
         }
         if (ok) {
@@ -7726,16 +7552,12 @@ static bool laguna_graph_forward_batch(
 
     bool ok = true;
     bool dense_q8_completion_waited = false;
-#ifdef DS4_ROCM_BUILD
-    const bool gpu_draft_pipeline_ready = true;
-#else
     const bool gpu_draft_pipeline_ready =
         ds4_gpu_commands_active() != 0;
-#endif
     if (gpu_draft_tokens) {
         /* Copy proposals on-GPU so drafting does not add an intermediate
          * completion and CPU readback. Metal keeps both graphs in one command
-         * buffer; ROCm gets the same ordering from its default stream. */
+         * buffer, so the existing command boundary provides the ordering. */
         if (!gpu_draft_pipeline_ready ||
             tokens[0] < 0 || tokens[0] >= (int)DS4_N_VOCAB ||
             ds4_gpu_tensor_bytes(gpu_draft_tokens) <
@@ -7991,15 +7813,9 @@ static bool laguna_graph_forward_batch(
         if (ok) {
             failed_stage = "causal attention";
             /* Ask the backend to replay decode's split-key attention per
-             * verifier row.  On Metal that is a long-context throughput choice;
-             * on ROCm the batched causal kernel accumulates its softmax in a
-             * different order than the decode kernel, so the verifier needs the
-             * replay at every context length to accept the same tokens plain
-             * decoding would have produced. */
+             * verifier row for long-context Metal throughput. */
             const int split_decode_rows = row_argmax_out != NULL &&
-#ifndef DS4_ROCM_BUILD
                 (uint64_t)pos0 + n_tokens > 256u &&
-#endif
                 true;
             ok = ds4_gpu_laguna_attention_prefill_tensor(
                     g->heads,
@@ -8346,18 +8162,11 @@ static bool laguna_graph_forward_batch(
         }
         if (ok) {
             failed_stage = "speculative row argmax";
-#ifdef DS4_ROCM_BUILD
-            ok = ds4_gpu_argmax_rows_tensor(g->spec_argmax,
-                                            g->spec_logits,
-                                            DS4_N_VOCAB,
-                                            n_tokens) != 0;
-#else
             ok = ds4_gpu_indexer_topk_tensor(g->spec_argmax,
                                               g->spec_logits,
                                               DS4_N_VOCAB,
                                               n_tokens,
                                               1) != 0;
-#endif
         }
     }
 
@@ -8547,12 +8356,7 @@ static bool laguna_metal_gpu_argmax_debug_forces_full_logits(void) {
         "DS4_METAL_GRAPH_DUMP_NAME",
         "DS4_METAL_GRAPH_DUMP_LAYER",
         "DS4_METAL_GRAPH_DUMP_POS",
-        "DS4_ROCM_GRAPH_DUMP_PREFIX",
-        "DS4_ROCM_GRAPH_DUMP_NAME",
-        "DS4_ROCM_GRAPH_DUMP_LAYER",
-        "DS4_ROCM_GRAPH_DUMP_POS",
         "DS4_METAL_GRAPH_DUMP_TRACE",
-        "DS4_ROCM_GRAPH_DUMP_TRACE",
         "DS4_METAL_GRAPH_TRACE_CACHE",
         "DS4_METAL_GRAPH_TRACE_COMP",
         "DS4_METAL_GRAPH_TRACE_LAYERS",
@@ -13038,7 +12842,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
     s->dflash_synced = true;
 
     const double verify_done = now_sec();
-    /* CUDA installs the anonymous F16 support mapping lazily. Its first draft
+    /* The anonymous F16 support mapping is installed lazily. Its first draft
      * cycle faults roughly 2 GiB of weights and is intentionally a one-time
      * warmup, not evidence that steady-state speculation is unprofitable. */
     const bool dflash_warmup_cycle = s->dflash_cycles == 0u;

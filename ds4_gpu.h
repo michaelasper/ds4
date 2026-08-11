@@ -217,7 +217,6 @@ int ds4_gpu_q8_decode_config_snapshot(ds4_gpu_q8_decode_config *out);
 #endif
 
 ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes);
-ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_view(const ds4_gpu_tensor *base, uint64_t offset, uint64_t bytes);
 void ds4_gpu_tensor_free(ds4_gpu_tensor *tensor);
 uint64_t ds4_gpu_tensor_bytes(const ds4_gpu_tensor *tensor);
@@ -300,14 +299,6 @@ uint32_t ds4_gpu_diagnostic_pending_command_buffer_count(void);
 int ds4_gpu_signal_selected_readback_ready(uint64_t *event_value);
 int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *label);
 int ds4_gpu_wait_selected_readback_ready(uint64_t event_value, const char *label);
-#ifdef DS4_ROCM_BUILD
-int ds4_gpu_tensor_read_after_selected_event(const ds4_gpu_tensor *tensor,
-                                             uint64_t offset,
-                                             void *data,
-                                             uint64_t bytes,
-                                             uint64_t event_value,
-                                             const char *label);
-#endif
 int ds4_gpu_end_commands(void);
 /* Terminal boundary: a zero result reports command-buffer/backend failure,
  * but all submitted work, if any, has still been waited before returning. */
@@ -315,50 +306,13 @@ int ds4_gpu_synchronize(void);
 
 int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size);
 int ds4_gpu_set_model_fd_for_map(int fd, const void *model_map);
-int ds4_gpu_build_derived_artifacts(const void *model_map, uint64_t model_size,
-                                    const char *model_path);
-int ds4_gpu_model_range_replaced(const void *model_map, uint64_t offset,
-                                 uint64_t bytes);
 int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size, uint64_t max_tensor_bytes);
-int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, const char *label);
-int ds4_gpu_cache_q8_f16_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, uint64_t in_dim, uint64_t out_dim, const char *label);
-int ds4_gpu_q8_cache_suppressed(void);
-void ds4_gpu_set_q8_cache_suppressed(int suppressed);
-#ifdef DS4_ROCM_BUILD
-void ds4_gpu_release_q8_f16_cache(void);
-#endif
-
-/* Model-file ranges assigned to CUDA devices by the multi-GPU placement
- * planner. Metal keeps these declarations for the shared engine interface. */
-#ifndef DS4_MAX_GPUS
-#define DS4_MAX_GPUS 16
-#endif
-typedef struct {
-    uint64_t source_offset;
-    uint64_t bytes;
-    int target_device;
-} ds4_tensor_range;
-
-int ds4_gpu_device_cache_tensors(int device_id,
-                                 const ds4_tensor_range *ranges,
-                                 int n_ranges);
-int ds4_gpu_register_support_map(const void *map, uint64_t size, uint64_t bias);
-int ds4_gpu_device_cache_support_tensors(int device_id,
-                                         int entry_device_id,
-                                         const ds4_tensor_range *ranges,
-                                         int n_ranges,
-                                         int from_main_map);
-uint64_t ds4_gpu_tier_free_vram(int logical_tier);
-int ds4_gpu_lookup_cache(uint64_t source_offset, uint64_t bytes,
-                         int *out_device_id, void **out_device_ptr);
-int ds4_gpu_lookup_cache_device(uint64_t source_offset, uint64_t bytes);
 
 int ds4_gpu_pro_q4_expert_table_auto_available(void);
 int ds4_gpu_preload_q4_expert_tables(const void *model_map, uint64_t model_size,
                                      uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset,
                                      uint64_t gate_expert_bytes, uint64_t down_expert_bytes,
                                      uint32_t n_total_expert);
-int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t context_bytes);
 void ds4_gpu_set_quality(bool quality);
 void ds4_gpu_set_tensor_matmul_suppressed(bool suppressed);
 void ds4_gpu_set_glm_model(bool enabled);
@@ -633,14 +587,6 @@ int ds4_gpu_laguna_q8_lmhead_screen_stats(
         float    *winner_value);
 #endif
 
-#ifdef DS4_ROCM_BUILD
-int ds4_gpu_argmax_rows_tensor(
-        ds4_gpu_tensor       *out_idx,
-        const ds4_gpu_tensor *logits,
-        uint32_t              n_vocab,
-        uint32_t              n_rows);
-#endif
-
 /* =========================================================================
  * Dense Projections, Norms, RoPE, and KV Rounding.
  * =========================================================================
@@ -788,8 +734,8 @@ int ds4_gpu_matmul_q8_0_pair_decode_rows_exact_tensor(
         const ds4_gpu_tensor *x,
         uint32_t              n_rows);
 
-/* Implemented by the Metal and ROCm backends; the DFlash verifier is the only
- * caller, and it needs each row bit-identical to single-row decode. */
+/* Implemented by Metal; the DFlash verifier is the only caller, and it needs
+ * each row bit-identical to single-row decode. */
 int ds4_gpu_matmul_f32_decode_rows_exact_tensor(
         ds4_gpu_tensor       *out,
         const void           *model_map,
@@ -979,29 +925,6 @@ int ds4_gpu_matmul_f16_rms_norm_mv_tensor(
 int ds4_gpu_matmul_f16_rms_norm_mv_preflight(
         uint32_t in_dim,
         uint32_t out_dim);
-
-/* CUDA batch path: fold an input RMS normalization into the FP16 activation
- * conversion used by the following projection. Returns 0 without touching
- * out when the optimized path is unavailable. */
-int ds4_gpu_matmul_f16_rms_fold_tensor(
-        ds4_gpu_tensor       *out,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                weight_offset,
-        uint64_t                in_dim,
-        uint64_t                out_dim,
-        const ds4_gpu_tensor *x,
-        uint64_t                n_tok,
-        float                   norm_eps);
-
-/* Exact multi-row form of the DeepSeek 4096x256 F16 router projection. */
-int ds4_gpu_matmul_f16_router_rows_exact_tensor(
-        ds4_gpu_tensor       *out,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                weight_offset,
-        const ds4_gpu_tensor *x,
-        uint32_t                n_rows);
 
 int ds4_gpu_matmul_f16_pair_tensor(
         ds4_gpu_tensor       *out_a,
@@ -1532,7 +1455,7 @@ int ds4_gpu_glm_routed_moe_batch_tensor(
         bool                    force_resident);
 
 /* DFlash verifier path: batch Q2_K/Q3_K rows while retaining decode math.
- * Implemented by the native CUDA and ROCm backends. */
+ * Implemented by Metal. */
 int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         ds4_gpu_tensor       *out,
         ds4_gpu_tensor       *mid,
