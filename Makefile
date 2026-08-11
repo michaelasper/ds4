@@ -68,8 +68,6 @@ check-metal-sources:
 		fi; \
 	done
 
-.PHONY: metal-decode-schedule-bench metal-prefill-variant-bench
-
 all: check-metal-sources ds4 ds4-server ds4-bench ds4-eval
 
 help:
@@ -79,8 +77,6 @@ help:
 	@echo "  make test-metal-laguna  Run the strict model-independent Apple Metal/Laguna suite"
 	@echo "  make test-legacy  Run the temporary umbrella regression suite (may need a model)"
 	@echo "  make test-metal-laguna-integration LAGUNA_TEST_MODEL=FILE  Run model-backed Laguna smoke"
-	@echo "  make metal-decode-schedule-bench  Build the balanced Metal decode schedule benchmark"
-	@echo "  make metal-prefill-variant-bench  Build the balanced Metal prefill variant benchmark"
 	@echo "  make dflash-verify-depth  Run DFlash speculative verification smoke if support GGUF is present"
 	@echo "  make clean        Remove build outputs"
 
@@ -107,22 +103,6 @@ tests/test_metal_session_batch: tests/test_metal_session_batch.o $(CORE_OBJS) | 
 
 test-metal-session-batch: tests/test_metal_session_batch
 	DS4_TEST_MODEL="$(DS4_TEST_MODEL)" ./tests/test_metal_session_batch
-
-speed-bench/metal_decode_schedule_bench.o: speed-bench/metal_decode_schedule_bench.c ds4.h
-	$(CC) $(CFLAGS) -I. -c -o $@ $<
-
-speed-bench/metal_decode_schedule_bench: speed-bench/metal_decode_schedule_bench.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
-
-metal-decode-schedule-bench: speed-bench/metal_decode_schedule_bench
-
-speed-bench/metal_prefill_variant_bench.o: speed-bench/metal_prefill_variant_bench.c ds4.h
-	$(CC) $(CFLAGS) -I. -c -o $@ $<
-
-speed-bench/metal_prefill_variant_bench: speed-bench/metal_prefill_variant_bench.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
-
-metal-prefill-variant-bench: speed-bench/metal_prefill_variant_bench
 
 tests/test_glm_q23_metal.o: tests/test_glm_q23_metal.c ds4_gpu.h
 	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
@@ -266,4 +246,4 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 	./tests/test_mxfp4_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o quality/score_official quality/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_metal_session_batch tests/test_sampling tests/*.o *.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o quality/score_official quality/score_official.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_metal_session_batch tests/test_sampling tests/*.o *.o
