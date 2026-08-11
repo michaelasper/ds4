@@ -50,6 +50,8 @@ requirements.
   tensor-layout, and binding rules.
 - `lgn_dflash.c` / `lgn_dflash.h`: private Laguna DFlash profile, metadata,
   tensor binding, and BF16 shadow-map conversion.
+- `lgn_graph.c` / `lgn_graph.h`: private Laguna target-graph storage owner for
+  base Metal scratch, persistent KV caches, and their allocation lifecycle.
 - `ds4.c`: transitional tokenizer, Metal graph scheduling, sessions, and
   disk-cache payload serialisation; move supported Laguna code into `lgn_*`
   modules as obsolete model/backend paths are deleted.

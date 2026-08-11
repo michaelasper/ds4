@@ -39,6 +39,10 @@ The refactor branch already:
 - isolates the retained DFlash support profile, metadata/layout validation,
   tensor binding, and parallel BF16 shadow-map conversion in the private
   `lgn_dflash.c` / `lgn_dflash.h` module;
+- isolates Laguna target-graph base scratch, persistent KV storage, capacity
+  accounting, and allocation/free lifecycle in the private `lgn_graph.c` /
+  `lgn_graph.h` module while scheduler-owned speculative/evidence state remains
+  in `ds4.c`;
 - enforces engine-outlives-session ownership and tears down command buffers,
   shared Metal tensors, backend caches, host aliases, and model mappings in
   lifetime-safe order, including partial initialization and GPU-error paths;
