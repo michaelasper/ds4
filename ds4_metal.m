@@ -104,10 +104,6 @@ static id<MTLComputePipelineState> g_add_rms_norm_pipeline;
  * for the new kernel. */
 static id<MTLComputePipelineState> g_laguna_add3_rms_norm_pipeline;
 static int g_laguna_add3_rms_norm_pipeline_checked;
-/* Optional fused decode output-head norm+matvec.  Lazy for the same
- * source-override reason as the add3 fusion above. */
-static id<MTLComputePipelineState> g_mul_mv_f16_rms_norm_pipeline;
-static int g_mul_mv_f16_rms_norm_pipeline_checked;
 static id<MTLComputePipelineState> g_unary_sigmoid_pipeline;
 static id<MTLComputePipelineState> g_unary_silu_pipeline;
 static id<MTLComputePipelineState> g_unary_softplus_pipeline;
@@ -2012,61 +2008,6 @@ static int ds4_gpu_laguna_qk_head_norm_rope_simd32_usable(
                 "ds4: Laguna Q/K norm/RoPE SIMD32 pipeline supports %lu "
                 "threads, needs at least 32; requested configuration fails\n",
                 (unsigned long)pipeline.maxTotalThreadsPerThreadgroup);
-        return 0;
-    }
-    return 1;
-}
-
-static id<MTLComputePipelineState>
-ds4_gpu_mul_mv_f16_rms_norm_pipeline(void) {
-    if (!g_mul_mv_f16_rms_norm_pipeline_checked) {
-        g_mul_mv_f16_rms_norm_pipeline_checked = 1;
-        g_mul_mv_f16_rms_norm_pipeline =
-            ds4_gpu_get_pipeline("kernel_mul_mv_f16_f32_rms_norm_4");
-    }
-    return g_mul_mv_f16_rms_norm_pipeline;
-}
-
-static id<MTLComputePipelineState> ds4_gpu_hot_pipeline(
-        id<MTLComputePipelineState> pipeline,
-        const char *fallback_name);
-static NSUInteger ds4_gpu_rms_norm_threads(uint32_t n);
-
-int ds4_gpu_matmul_f16_rms_norm_mv_preflight(
-        uint32_t in_dim,
-        uint32_t out_dim) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    /* These values are copied into signed shader arguments below.  Reject
-     * the public uint32 API range that would wrap those fields before any
-     * optional-source probe or command encoder can run. */
-    if (in_dim == 0u || out_dim == 0u ||
-        in_dim > (uint32_t)INT32_MAX || out_dim > (uint32_t)INT32_MAX ||
-        (in_dim % 32u) != 0u) return 0;
-
-    const uint32_t nsg =
-        (in_dim + 127u) / 128u > 8u ? 8u : (in_dim + 127u) / 128u;
-    const uint32_t norm_threads = (uint32_t)ds4_gpu_rms_norm_threads(in_dim);
-    if (nsg != 8u || norm_threads < 256u ||
-        (norm_threads % 256u) != 0u ||
-        (!g_quality_mode && (out_dim == 512u || out_dim == 1024u) &&
-         in_dim >= 4096u)) {
-        fprintf(stderr,
-                "ds4: Metal fused RMS-norm F16 matvec preflight rejected "
-                "shape in=%u out=%u\n", in_dim, out_dim);
-        return 0;
-    }
-
-    /* Pipeline lookup is intentionally the only optional-source probe here:
-     * an old DS4_METAL_DENSE_SOURCE therefore fails closed before the graph
-     * opens commands or allocates any layer/KV state. */
-    id<MTLComputePipelineState> pipeline = ds4_gpu_hot_pipeline(
-        ds4_gpu_mul_mv_f16_rms_norm_pipeline(),
-        "kernel_mul_mv_f16_f32_rms_norm_4");
-    if (!pipeline || pipeline.threadExecutionWidth != 32u ||
-        pipeline.maxTotalThreadsPerThreadgroup < 256u) {
-        fprintf(stderr,
-                "ds4: Metal fused RMS-norm F16 matvec preflight requires "
-                "the current source PSO with TEW=32 and maxThreads>=256\n");
         return 0;
     }
     return 1;
@@ -5833,8 +5774,6 @@ void ds4_gpu_cleanup(void) {
         g_add_rms_norm_pipeline = nil;
         g_laguna_add3_rms_norm_pipeline = nil;
         g_laguna_add3_rms_norm_pipeline_checked = 0;
-        g_mul_mv_f16_rms_norm_pipeline = nil;
-        g_mul_mv_f16_rms_norm_pipeline_checked = 0;
         g_laguna_qk_head_norm_rope_simd32_pipeline = nil;
         g_laguna_qk_head_norm_rope_simd32_pipeline_checked = 0;
         g_laguna_qk_head_norm_rope_simd32_invalid_env_reported = 0;
@@ -9693,197 +9632,6 @@ int ds4_gpu_matmul_f16_tensor(
     return 1;
 }
 
-typedef struct {
-    int32_t ne00;
-    int32_t ne01;
-    int32_t norm_threads;
-    float   eps;
-} ds4_gpu_mul_mv_rms_norm_args;
-
-/* Opt-in decode output-head fusion: one dispatch for the plain RMS norm of
- * the flattened HC stream plus the F16 HC-head matvec, dropping the
- * normalized-vector write+read.  Bit-identical to the two-dispatch path by
- * construction (see metal/dense.metal).  Fails closed on shapes outside the
- * replicated reduction trees so the opt-in never silently changes numerics:
- * the stock matvec must be the NSG=8/NR0=2 vectorized matvec and the stock
- * norm's thread count must map evenly onto the 256-thread fused group. */
-int ds4_gpu_matmul_f16_rms_norm_mv_tensor(
-        ds4_gpu_tensor       *out,
-        const void           *model_map,
-        uint64_t              model_size,
-        uint64_t              weight_offset,
-        uint32_t              in_dim,
-        uint32_t              out_dim,
-        const ds4_gpu_tensor *x,
-        float                 eps) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    if (!out || !x || !model_map || in_dim == 0u || out_dim == 0u ||
-        in_dim > (uint32_t)INT32_MAX || out_dim > (uint32_t)INT32_MAX) {
-        return 0;
-    }
-
-    const uint32_t nsg =
-        (in_dim + 127u) / 128u > 8u ? 8u : (in_dim + 127u) / 128u;
-    const uint32_t norm_threads =
-        (uint32_t)ds4_gpu_rms_norm_threads(in_dim);
-    if ((in_dim % 32u) != 0u || nsg != 8u ||
-        norm_threads < 256u || (norm_threads % 256u) != 0u ||
-        (!g_quality_mode &&
-         (out_dim == 512u || out_dim == 1024u) && in_dim >= 4096u)) {
-        fprintf(stderr,
-                "ds4: Metal fused RMS-norm F16 matvec received unsupported "
-                "shape in=%u out=%u\n", in_dim, out_dim);
-        return 0;
-    }
-
-    @autoreleasepool {
-        id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
-        id<MTLBuffer> outbuf = ds4_gpu_tensor_buffer(out);
-        if (!xbuf || !outbuf ||
-            ds4_gpu_tensor_bytes(x) < (uint64_t)in_dim * sizeof(float) ||
-            ds4_gpu_tensor_bytes(out) < (uint64_t)out_dim * sizeof(float)) {
-            fprintf(stderr, "ds4: Metal fused RMS-norm F16 matvec received undersized activation buffers\n");
-            return 0;
-        }
-
-        const uint64_t row_bytes = (uint64_t)in_dim * sizeof(uint16_t);
-        if ((uint64_t)out_dim > UINT64_MAX / row_bytes) return 0;
-        const uint64_t weight_bytes = (uint64_t)out_dim * row_bytes;
-        if (weight_offset > model_size ||
-            weight_bytes > model_size - weight_offset) {
-            fprintf(stderr, "ds4: Metal fused RMS-norm F16 matvec range is outside the mapped model\n");
-            return 0;
-        }
-
-        uint64_t inner_offset = 0;
-        id<MTLBuffer> wbuf = ds4_gpu_wrap_model_range(model_map,
-                                                      model_size,
-                                                      weight_offset,
-                                                      weight_bytes,
-                                                      &inner_offset);
-        if (!wbuf) return 0;
-
-        id<MTLComputePipelineState> pipeline = ds4_gpu_hot_pipeline(
-            ds4_gpu_mul_mv_f16_rms_norm_pipeline(),
-            "kernel_mul_mv_f16_f32_rms_norm_4");
-        if (!pipeline) return 0;
-        if (pipeline.threadExecutionWidth != 32u ||
-            pipeline.maxTotalThreadsPerThreadgroup < 256u) {
-            fprintf(stderr,
-                    "ds4: Metal fused RMS-norm F16 matvec requires TEW=32 "
-                    "and maxThreads>=256 (got TEW=%lu maxThreads=%lu)\n",
-                    (unsigned long)pipeline.threadExecutionWidth,
-                    (unsigned long)pipeline.maxTotalThreadsPerThreadgroup);
-            return 0;
-        }
-
-        ds4_gpu_mul_mv_rms_norm_args args = {
-            .ne00 = (int32_t)in_dim,
-            .ne01 = (int32_t)out_dim,
-            .norm_threads = (int32_t)norm_threads,
-            .eps = eps,
-        };
-
-        int owned = 0;
-        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
-        if (!cb) return 0;
-
-        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
-        [enc setComputePipelineState:pipeline];
-        [enc setBytes:&args length:sizeof(args) atIndex:0];
-        [enc setBuffer:wbuf offset:(NSUInteger)inner_offset atIndex:1];
-        [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:2];
-        [enc setBuffer:outbuf offset:ds4_gpu_tensor_offset(out) atIndex:3];
-        [enc setThreadgroupMemoryLength:(32u + 64u) * sizeof(float) atIndex:0];
-        [enc dispatchThreadgroups:MTLSizeMake(((NSUInteger)out_dim + 1u) / 2u, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
-        ds4_gpu_end_compute_encoder(cb, enc);
-
-        if (!ds4_gpu_finish_command_buffer(cb, owned, "fused RMS-norm F16 matvec")) return 0;
-    }
-
-    return 1;
-}
-
-int ds4_gpu_matmul_f16_pair_tensor(
-        ds4_gpu_tensor       *out_a,
-        ds4_gpu_tensor       *out_b,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                weight_a_offset,
-        uint64_t                weight_b_offset,
-        uint64_t                in_dim,
-        uint64_t                out_dim,
-        const ds4_gpu_tensor *x,
-        uint64_t                n_tok) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    if (in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok != 1 || (in_dim & 3u) != 0) return 0;
-
-    @autoreleasepool {
-        id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
-        id<MTLBuffer> outabuf = ds4_gpu_tensor_buffer(out_a);
-        id<MTLBuffer> outbbuf = ds4_gpu_tensor_buffer(out_b);
-        const uint64_t x_bytes = in_dim * sizeof(float);
-        const uint64_t out_bytes = out_dim * sizeof(float);
-        if (!xbuf || !outabuf || !outbbuf ||
-            ds4_gpu_tensor_bytes(x) < x_bytes ||
-            ds4_gpu_tensor_bytes(out_a) < out_bytes ||
-            ds4_gpu_tensor_bytes(out_b) < out_bytes) {
-            fprintf(stderr, "ds4: Metal F16 paired matvec received undersized activation buffers\n");
-            return 0;
-        }
-
-        const uint64_t row_bytes = in_dim * sizeof(uint16_t);
-        const uint64_t weight_bytes = row_bytes * out_dim;
-        if (weight_a_offset > model_size || weight_bytes > model_size - weight_a_offset ||
-            weight_b_offset > model_size || weight_bytes > model_size - weight_b_offset) {
-            fprintf(stderr, "ds4: Metal F16 paired matvec range is outside the mapped model\n");
-            return 0;
-        }
-
-        uint64_t inner_a = 0;
-        uint64_t inner_b = 0;
-        id<MTLBuffer> wabuf = ds4_gpu_wrap_model_range(model_map, model_size,
-                                                         weight_a_offset, weight_bytes,
-                                                         &inner_a);
-        id<MTLBuffer> wbbuf = ds4_gpu_wrap_model_range(model_map, model_size,
-                                                         weight_b_offset, weight_bytes,
-                                                         &inner_b);
-        if (!wabuf || !wbbuf) return 0;
-
-        int owned = 0;
-        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
-        if (!cb) return 0;
-
-        ds4_gpu_f16_matvec_args mv_args = ds4_gpu_make_f16_mv_args(in_dim, out_dim);
-        ds4_gpu_mv_dispatch mv_dispatch = ds4_gpu_make_plain_mv_dispatch(in_dim, 0);
-        mv_args.nr0 = mv_dispatch.nr0;
-        id<MTLComputePipelineState> pipeline =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_f16_f32_pair_4", mv_dispatch.nsg);
-        if (!pipeline) return 0;
-
-        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
-        [enc setComputePipelineState:pipeline];
-        [enc setBytes:&mv_args length:sizeof(mv_args) atIndex:0];
-        [enc setBuffer:wabuf offset:(NSUInteger)inner_a atIndex:1];
-        [enc setBuffer:wbbuf offset:(NSUInteger)inner_b atIndex:2];
-        [enc setBuffer:xbuf offset:ds4_gpu_tensor_offset(x) atIndex:3];
-        [enc setBuffer:outabuf offset:ds4_gpu_tensor_offset(out_a) atIndex:4];
-        [enc setBuffer:outbbuf offset:ds4_gpu_tensor_offset(out_b) atIndex:5];
-        if (mv_dispatch.smem) {
-            [enc setThreadgroupMemoryLength:mv_dispatch.smem atIndex:0];
-        }
-        [enc dispatchThreadgroups:MTLSizeMake(((NSUInteger)out_dim + (NSUInteger)mv_dispatch.nr0 - 1u) / (NSUInteger)mv_dispatch.nr0,
-                                              1,
-                                              1)
-             threadsPerThreadgroup:MTLSizeMake(32, (NSUInteger)mv_dispatch.nsg, 1)];
-        ds4_gpu_end_compute_encoder(cb, enc);
-
-        if (!ds4_gpu_finish_command_buffer(cb, owned, "F16 paired matvec")) return 0;
-    }
-
-    return 1;
-}
 
 int ds4_gpu_matmul_f32_tensor(
         ds4_gpu_tensor       *out,

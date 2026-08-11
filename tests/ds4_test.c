@@ -74,13 +74,6 @@ static void test_laguna_selector_parser(void) {
     TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("01") < 0);
     TEST_ASSERT(ds4_gpu_laguna_direct_kv_prefill_env_mode("true") < 0);
 
-    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode(NULL) == 0);
-    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("") == 0);
-    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("0") == 0);
-    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("1") == 1);
-    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("01") < 0);
-    TEST_ASSERT(ds4_gpu_laguna_output_head_norm_fuse_env_mode("true") < 0);
-
     TEST_ASSERT(ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
                     1, 0, 1, 16) ==
                 DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK);
@@ -9819,19 +9812,23 @@ static void test_laguna_moe_abi_override_matrix(const char *shader) {
 static void test_laguna_moe_abi_contract(void) {
     char *engine = test_read_file("ds4.c");
     char *host = test_read_file("ds4_metal.m");
+    char *dense = test_read_file("metal/dense.metal");
     char *shader = test_read_file("metal/moe.metal");
     char *header = test_read_file("ds4_gpu.h");
     if (!engine) engine = test_read_file("../ds4.c");
     if (!host) host = test_read_file("../ds4_metal.m");
+    if (!dense) dense = test_read_file("../metal/dense.metal");
     if (!shader) shader = test_read_file("../metal/moe.metal");
     if (!header) header = test_read_file("../ds4_gpu.h");
     TEST_ASSERT(engine != NULL);
     TEST_ASSERT(host != NULL);
+    TEST_ASSERT(dense != NULL);
     TEST_ASSERT(shader != NULL);
     TEST_ASSERT(header != NULL);
-    if (!engine || !host || !shader || !header) {
+    if (!engine || !host || !dense || !shader || !header) {
         free(engine);
         free(host);
+        free(dense);
         free(shader);
         free(header);
         return;
@@ -9968,6 +9965,45 @@ static void test_laguna_moe_abi_contract(void) {
         TEST_ASSERT(strstr(host, removed_matmul_public[i]) == NULL);
     }
 
+    /* The F16 RMS-fused and paired matvec entry points were also uncalled
+     * host/shader residue.  Keep their public names, lazy cache, and exact
+     * shader entry points absent while retaining the ordinary F16 matvec and
+     * Laguna's dedicated F16 projection neighbors. */
+    static const char *const removed_f16_matmul[] = {
+        "ds4_gpu_matmul_f16_rms_norm_mv_tensor",
+        "ds4_gpu_matmul_f16_rms_norm_mv_preflight",
+        "ds4_gpu_matmul_f16_pair_tensor",
+        "ds4_gpu_laguna_output_head_norm_fuse_env_mode",
+        "DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE",
+        "g_mul_mv_f16_rms_norm_pipeline",
+        "ds4_gpu_mul_mv_f16_rms_norm_pipeline",
+        "ds4_gpu_mul_mv_rms_norm_args",
+        "kernel_mul_mv_f16_f32_rms_norm_4",
+        "kernel_mul_mv_f16_f32_pair_4",
+        "kernel_mul_mv_f16_f32_pair_4_impl",
+        "kernel_mul_mv_f16_f32_pair_4_disp",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_f16_matmul) / sizeof(removed_f16_matmul[0]); i++) {
+        TEST_ASSERT(strstr(header, removed_f16_matmul[i]) == NULL);
+        TEST_ASSERT(strstr(host, removed_f16_matmul[i]) == NULL);
+        TEST_ASSERT(strstr(dense, removed_f16_matmul[i]) == NULL);
+    }
+
+    static const char *const retained_f16_matmul[] = {
+        "int ds4_gpu_matmul_f16_tensor(",
+        "ds4_gpu_make_f16_mv_args",
+        "kernel_mul_mv_f16_f32_4",
+        "kernel_mul_mm_f16_f32",
+        "kernel_laguna_qkvg_f16_f32",
+        "kernel_laguna_attn_output_residual_f16_f32",
+    };
+    for (size_t i = 0;
+         i < sizeof(retained_f16_matmul) / sizeof(retained_f16_matmul[0]); i++) {
+        TEST_ASSERT(strstr(host, retained_f16_matmul[i]) != NULL ||
+                    strstr(dense, retained_f16_matmul[i]) != NULL);
+    }
+
     static const char *const retained_matmul_public[] = {
         "int ds4_gpu_matmul_q8_0_tensor(",
         "int ds4_gpu_matmul_q8_0_dflash_tensor(",
@@ -10072,6 +10108,7 @@ static void test_laguna_moe_abi_contract(void) {
 #endif
     free(engine);
     free(host);
+    free(dense);
     free(shader);
     free(header);
 }

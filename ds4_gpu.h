@@ -76,14 +76,6 @@ static inline int ds4_gpu_laguna_direct_kv_prefill_env_mode(
     return -1;
 }
 
-static inline int ds4_gpu_laguna_output_head_norm_fuse_env_mode(
-        const char *value) {
-    if (!value || value[0] == '\0' ||
-        (value[0] == '0' && value[1] == '\0')) return 0;
-    if (value[0] == '1' && value[1] == '\0') return 1;
-    return -1;
-}
-
 /* Strict parser shared by the Laguna production selector and focused tests.
  * It is backend-independent so malformed requests can be rejected before a
  * graph is allocated even in a non-Metal build. */
@@ -747,37 +739,6 @@ int ds4_gpu_matmul_f16_tensor(
         const void             *model_map,
         uint64_t                model_size,
         uint64_t                weight_offset,
-        uint64_t                in_dim,
-        uint64_t                out_dim,
-        const ds4_gpu_tensor *x,
-        uint64_t                n_tok);
-
-/* Opt-in fused decode path: fold the supported RMS normalization into the
- * F16 matvec (single token), failing closed outside its shape certificate. */
-int ds4_gpu_matmul_f16_rms_norm_mv_tensor(
-        ds4_gpu_tensor       *out,
-        const void           *model_map,
-        uint64_t              model_size,
-        uint64_t              weight_offset,
-        uint32_t              in_dim,
-        uint32_t              out_dim,
-        const ds4_gpu_tensor *x,
-        float                 eps);
-
-/* Admission-only check for the fused output head.  It validates the literal
- * selector's requested source/PSO and the exact TEW/shape certificate without
- * opening a command buffer or mutating activation/KV state. */
-int ds4_gpu_matmul_f16_rms_norm_mv_preflight(
-        uint32_t in_dim,
-        uint32_t out_dim);
-
-int ds4_gpu_matmul_f16_pair_tensor(
-        ds4_gpu_tensor       *out_a,
-        ds4_gpu_tensor       *out_b,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                weight_a_offset,
-        uint64_t                weight_b_offset,
         uint64_t                in_dim,
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
