@@ -245,21 +245,47 @@ The current public boundary records the following decisions:
 
 - the final product name is **LagoonNebula** and the repository name is
   **`lgn2`**;
+- the four installed commands will be `lgn2`, `lgn2-server`, `lgn2-bench`,
+  and `lgn2-eval`; the public C namespace will be `lgn2_*`/`LGN2_*`, runtime
+  environment variables will use `LGN2_*`, and local state will use the
+  `lgn2` namespace;
+- the rename is a clean break: no old executable, C symbol, environment,
+  history, cache, lock-file, or model-symlink alias is retained.  The former
+  engine implementation becomes `lgn2_engine.c` so it does not collide with
+  the existing private `lgn.c` Laguna module;
+- the convenience model link becomes `lgn2.gguf`.  Existing
+  `ds4flash.gguf` files or links are left untouched and are not consulted by
+  the renamed tools;
 - DFlash remains a public, optional support-model API for Laguna S2.1;
 - legacy MTP, GLM-MTP, and DSpark option fields and public aliases are
   intentionally absent; callers must use the DFlash fields and rebuild;
-- DSV4/DSVL session payload magics, versions, and layouts remain fixed.
+- the canonical Laguna model ids remain `laguna-s-2.1` and its documented
+  Laguna aliases.  Those are model/API identities, not DS4 compatibility
+  aliases;
+- the GGUF architecture literals `laguna` and `dflash`, every `laguna.*` and
+  `dflash.*` metadata key, the pinned GGUF filename/hash/source, GGUF numeric
+  codes, and Laguna family/model numeric identities 2/3 remain fixed;
+- DSV4/DSVL session payload magics, versions, field order, and layouts remain
+  fixed.  The 48-byte KVC header, KVC/DSV4/DSVL version bytes, and serialized
+  Laguna model-id byte 3 remain fixed;
+- OpenAI-, Anthropic-, and Responses-compatible HTTP routes, request/response
+  JSON fields, SSE event shapes, `[DONE]`, and DSML/tokenizer markers remain
+  byte-compatible;
+- all active Metal `host_name` values and runtime lookup names remain fixed,
+  including `kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48`.  Host and
+  shader implementation identifiers may adopt `lgn2`, but their externally
+  looked-up entry-point strings do not;
+- `BENCHMARK.md` and every file under `benchmark/` are frozen historical
+  protocol evidence and remain byte-for-byte unchanged.  Their old command
+  and environment names apply only to their pinned pre-fork revisions;
+- retained upstream copyright and license attribution is not rewritten as
+  new LagoonNebula authorship.
 
-## Deferred ABI and rename decisions
+## Repository rename timing
 
-The product and repository names are fixed. No decision has yet been made on
-the exact migration spelling or compatibility policy for:
-
-- renaming `ds4_*`/`DS4_*` symbols and executable names;
-- changing `DS4_METAL_*` environment variables;
-- changing model IDs, model aliases, default filenames, or `~/.ds4` cache paths;
-- whether server protocol compatibility names remain unchanged;
-
-Until those choices are recorded, preserve the existing identifiers where the
-supported Laguna path still depends on them and avoid silent format changes;
-this does not authorize the removed legacy option fields or aliases.
+Source and local namespaces can be changed and reviewed on the refactor branch
+before the GitHub repository itself moves.  Update clone URLs, Git remotes,
+default-branch settings, and release coordinates only as one explicit final
+repository operation; do not publish a half-renamed remote.  Until that
+operation, `fork/refactor/laguna-metal-only` is the integration branch and the
+frozen `laguna-s2.1` branch remains untouched.
