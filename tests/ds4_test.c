@@ -6,6 +6,10 @@
 #include "../lgn_dflash_exec.h"
 #include "../lgn_graph.h"
 
+#if defined(__APPLE__)
+int ds4_gpu_test_moe_abi_sentinel_status(void);
+#endif
+
 static void test_laguna_architecture_gate(void) {
     static const struct {
         const char *architecture;
@@ -9759,6 +9763,184 @@ static char *test_read_file(const char *path) {
     return s;
 }
 
+#if defined(__APPLE__)
+static char *test_write_temp_source(const char *source) {
+    char path[] = "/tmp/ds4-moe-abi.XXXXXX";
+    if (!source) return NULL;
+    const size_t length = strlen(source);
+    int fd = mkstemp(path);
+    if (fd < 0) {
+        return NULL;
+    }
+    size_t written = 0;
+    while (written < length) {
+        const ssize_t n = write(fd, source + written, length - written);
+        if (n <= 0) {
+            close(fd);
+            unlink(path);
+            return NULL;
+        }
+        written += (size_t)n;
+    }
+    if (close(fd) != 0) {
+        unlink(path);
+        return NULL;
+    }
+    char *result = malloc(strlen(path) + 1u);
+    if (!result) {
+        unlink(path);
+        return NULL;
+    }
+    memcpy(result, path, strlen(path) + 1u);
+    return result;
+}
+
+/* The pre-fingerprint parent source is an otherwise valid Metal library.
+ * Make that exact ABI-version failure shape locally when the focused test
+ * runs without an externally supplied parent fixture.  A parent checkout can
+ * be supplied through DS4_METAL_MOE_SOURCE with DS4_TEST_MOE_ABI_MODE=old
+ * for the same fail-closed seam. */
+static char *test_source_without_moe_abi_sentinel(const char *source) {
+    const char *begin = strstr(source,
+        "kernel void kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48");
+    if (!begin) return NULL;
+    const char *end = strstr(begin, "\n}\n");
+    if (!end) return NULL;
+    end += 3;
+    const size_t prefix = (size_t)(begin - source);
+    const size_t suffix = strlen(end);
+    char *result = malloc(prefix + suffix + 1u);
+    if (!result) return NULL;
+    memcpy(result, source, prefix);
+    memcpy(result + prefix, end, suffix + 1u);
+    return result;
+}
+
+static void test_laguna_moe_abi_override_matrix(const char *shader) {
+    const char *mode = getenv("DS4_TEST_MOE_ABI_MODE");
+    const char *override = getenv("DS4_METAL_MOE_SOURCE");
+    if (mode && mode[0]) {
+        /* The Makefile uses this seam for the current explicit source and
+         * for an exact git-show of a pre-fingerprint parent source. */
+        TEST_ASSERT(override != NULL && override[0] != '\0');
+        ds4_gpu_cleanup();
+        const int initialized = ds4_gpu_init();
+        if (!strcmp(mode, "current")) {
+            TEST_ASSERT(initialized != 0);
+            TEST_ASSERT(ds4_gpu_test_moe_abi_sentinel_status() == 1);
+        } else if (!strcmp(mode, "old")) {
+            TEST_ASSERT(initialized == 0);
+            TEST_ASSERT(ds4_gpu_test_moe_abi_sentinel_status() == 0);
+            /* Sentinel validation is before pipeline creation, graph work,
+             * or command encoding. */
+            TEST_ASSERT(ds4_gpu_commands_active() == 0);
+        } else {
+            TEST_ASSERT(false);
+        }
+        ds4_gpu_cleanup();
+        return;
+    }
+
+    char *current_path = test_write_temp_source(shader);
+    char *old_shader = test_source_without_moe_abi_sentinel(shader);
+    char *old_path = test_write_temp_source(old_shader);
+    char *saved_override = test_save_env("DS4_METAL_MOE_SOURCE");
+    TEST_ASSERT(current_path != NULL);
+    TEST_ASSERT(old_shader != NULL);
+    TEST_ASSERT(old_path != NULL);
+    if (current_path && old_path) {
+        TEST_ASSERT(setenv("DS4_METAL_MOE_SOURCE", current_path, 1) == 0);
+        ds4_gpu_cleanup();
+        TEST_ASSERT(ds4_gpu_init() != 0);
+        TEST_ASSERT(ds4_gpu_test_moe_abi_sentinel_status() == 1);
+        TEST_ASSERT(ds4_gpu_commands_active() == 0);
+        ds4_gpu_cleanup();
+
+        TEST_ASSERT(setenv("DS4_METAL_MOE_SOURCE", old_path, 1) == 0);
+        ds4_gpu_cleanup();
+        TEST_ASSERT(ds4_gpu_init() == 0);
+        TEST_ASSERT(ds4_gpu_test_moe_abi_sentinel_status() == 0);
+        TEST_ASSERT(ds4_gpu_commands_active() == 0);
+        ds4_gpu_cleanup();
+    }
+    test_restore_env("DS4_METAL_MOE_SOURCE", saved_override);
+    if (current_path) {
+        unlink(current_path);
+        free(current_path);
+    }
+    if (old_path) {
+        unlink(old_path);
+        free(old_path);
+    }
+    free(old_shader);
+}
+#endif
+
+/* The routed MoE argument structs are private host/shader ABI.  Keep a
+ * source-level contract test next to the numeric suites so a future field or
+ * range helper cannot silently put the two sides out of sync again. */
+static void test_laguna_moe_abi_contract(void) {
+    char *host = test_read_file("ds4_metal.m");
+    char *shader = test_read_file("metal/moe.metal");
+    if (!host) host = test_read_file("../ds4_metal.m");
+    if (!shader) shader = test_read_file("../metal/moe.metal");
+    TEST_ASSERT(host != NULL);
+    TEST_ASSERT(shader != NULL);
+    if (!host || !shader) {
+        free(host);
+        free(shader);
+        return;
+    }
+
+    static const char *const removed_host[] = {
+        "g_tp_split_rank",
+        "g_tp_split_world",
+        "ds4_gpu_tp_expert_range",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_host) / sizeof(removed_host[0]); i++) {
+        TEST_ASSERT(strstr(host, removed_host[i]) == NULL);
+    }
+
+    TEST_ASSERT(strstr(host,
+                       "offsetof(ds4_gpu_mul_mm_id_args, reserved) == 92u") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "sizeof(ds4_gpu_mul_mm_id_args) == 104u") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "offsetof(ds4_gpu_glm_routed_moe_args, reserved) == 32u") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "offsetof(ds4_gpu_glm_routed_moe_args, gate_expert_bytes) == 48u") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "sizeof(ds4_gpu_glm_routed_moe_args) == 96u") != NULL);
+    TEST_ASSERT(strstr(host, "uint32_t reserved[4];") != NULL);
+    TEST_ASSERT(strstr(shader, "uint32_t reserved[4];") != NULL);
+    TEST_ASSERT(strstr(shader, "int32_t  reserved[3];") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "(uint64_t)n_total_expert * gate_expert_bytes") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "(uint64_t)n_total_expert * up_expert_bytes") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "(uint64_t)n_total_expert * down_expert_bytes") != NULL);
+    TEST_ASSERT(strstr(shader,
+                       "struct ds4_metal_glm_routed_moe_args") != NULL);
+    TEST_ASSERT(strstr(shader,
+                       "struct ds4_metal_args_mul_mm_id") != NULL);
+    TEST_ASSERT(strstr(shader,
+                       "(uint64_t)im*args.nb02") != NULL);
+    TEST_ASSERT(strstr(
+        shader,
+        "kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48") != NULL);
+    TEST_ASSERT(strstr(host,
+                       "kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48 "
+                       "missing; ") != NULL);
+
+#if defined(__APPLE__)
+    test_laguna_moe_abi_override_matrix(shader);
+#endif
+    free(host);
+    free(shader);
+}
+
 typedef struct {
     const char *name;
     int number;
@@ -10449,6 +10631,9 @@ typedef struct {
 } ds4_test_entry;
 
 static const ds4_test_entry test_entries[] = {
+    {"--laguna-moe-abi", "laguna-moe-abi",
+     "private routed-MoE host/Metal ABI and full-expert-range contract",
+     test_laguna_moe_abi_contract, false},
     {"--laguna-architecture", "laguna-architecture",
      "accept literal Laguna GGUF architecture and reject legacy/missing values",
      test_laguna_architecture_gate, false},

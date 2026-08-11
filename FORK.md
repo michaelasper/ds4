@@ -117,8 +117,13 @@ The refactor branch already:
   their existing `DS4_METAL_NO_RESIDENCY`/`DS4_METAL_NO_MODEL_WARMUP` controls;
   the lifecycle-frozen world-1 `DS4_METAL_Q8_MV_NSG` override remains
   supported and world-2 dispatch geometry is retired;
-  routed expert argument fields and range helpers remain as private ABI residue
-  for the later TP-compatible shader cleanup;
+  active routed expert bindings now use the full model expert range and direct
+  expert ids; the active world-1 TP ownership/range ABI residue is removed.
+  Zeroed reserved pads preserve the versioned/current constant-buffer layout
+  for compatible source overrides, while incompatible or unversioned stale
+  overrides fail closed before active dispatch.  The marker is a compatibility
+  fingerprint, not a cryptographic trust boundary for a deliberately lying
+  override;
 - removes the unreachable legacy Metal HC, raw-KV, generic RoPE, concat,
   repeat, set-rows, softmax, and sum-rows shader families together with their
   public wrappers, pipeline state, runtime source registrations, and stale
@@ -128,15 +133,28 @@ The refactor branch already:
   MXFP4 product templates, command-completion evidence, and DFlash kernels are
   deliberately retained.
 
+The active MoE host/MSL ABI marker is
+`kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48`: generation 2,
+`mul_mm_id` size 104, routed-MoE size 96, and routed key/stride offset 48.
+Every host/MSL layout change must rename or bump this marker.  The strict
+checks are `make check-metal-sources`, `make test-glm-q23-metal`, and
+`make test-metal-laguna` (also the default `make test`).  The ABI gate inside
+the latter runs `./ds4_test --laguna-moe-abi`, whose default matrix creates a
+current source and a marker-stripped stale fixture, plus the explicit current
+source check:
+`DS4_METAL_MOE_SOURCE=metal/moe.metal DS4_TEST_MOE_ABI_MODE=current ./ds4_test --laguna-moe-abi`.
+An exact pre-fingerprint parent/old override can be checked with
+`DS4_METAL_MOE_SOURCE=/path/to/pre-fingerprint/metal/moe.metal DS4_TEST_MOE_ABI_MODE=old ./ds4_test --laguna-moe-abi`;
+all such incompatible or unversioned sources must fail before active work.
+
 The private generic raw graph implementation and its public routes are now
-deleted. Active routed expert argument fields/range helpers, tier-aware Metal
-helpers, and a smaller set of shared FlashAttention, parallel-FFN,
-quantized-MoE, and source-override internals still remain for later low-level
-cleanup; no public engine, session, diagnostic, imatrix, or support-model
-route owns them. Their presence is transitional and must not be interpreted
-as supported behavior. A `glm_` name on one of the six retained router/MoE
-Metal helpers describes inherited implementation naming, not GLM product
-support.
+deleted. Tier-aware Metal helpers, the dormant generic `mul_mv_id`/sum6 family,
+and a smaller set of shared FlashAttention, parallel-FFN, quantized-MoE, and
+source-override internals still remain for later low-level cleanup; no public
+engine, session, diagnostic, imatrix, or support-model route owns them. Their
+presence is transitional and must not be interpreted as supported behavior. A
+`glm_` name on one of the six retained router/MoE Metal helpers describes
+inherited implementation naming, not GLM product support.
 
 ## Staged deletion and extraction order
 

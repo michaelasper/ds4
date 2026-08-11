@@ -1,5 +1,15 @@
 // DS4 Metal routed-MoE matvec kernels.
 
+/* Versioned fingerprint for the host-side routed-MoE constant-buffer
+ * contract: generation 2, mul_mm_id sizeof 104, routed-MoE sizeof 96, and
+ * the routed-MoE stride/key offset at 48.  The host looks this function up
+ * immediately after compiling the combined library; it is never dispatched.
+ * Every host/MSL layout change must rename/bump this marker. */
+kernel void kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48(
+        uint3 gid [[thread_position_in_grid]]) {
+    (void)gid;
+}
+
 #ifndef QK_K
 #define QK_K 256
 #endif
@@ -431,11 +441,7 @@ struct ds4_metal_glm_routed_moe_args {
     uint32_t n_tokens;
     uint32_t mid_token_stride;
     uint32_t down_type;
-    /* Expert ownership under tensor parallelism: tp_world 0/1 = full
-     * compute; otherwise each rank owns a contiguous expert range. */
-    int32_t  tp_rank;
-    int32_t  tp_world;
-    int32_t  tp_expert_base;
+    uint32_t reserved[4];
     uint64_t gate_expert_bytes;
     uint64_t gate_row_bytes;
     uint64_t up_expert_bytes;
@@ -990,11 +996,9 @@ kernel void kernel_glm_q2_K_pair_swiglu_f32(
     if (slot >= args.n_expert_used || token >= args.n_tokens) return;
     const uint64_t selected_off = (uint64_t)token * args.n_expert_used + slot;
     const int expert = selected[selected_off];
-    if (!ds4_tp_owns_expert(expert, args.n_total_expert,
-                            args.tp_rank, args.tp_world)) return;
     glm_q2_K_pair_swiglu_simd_f32_impl<N_R0_Q2_K>(
         args, gate, up, x, weights, mid, scratch,
-        tgpig, slot, token, selected_off, expert - args.tp_expert_base,
+        tgpig, slot, token, selected_off, expert,
         tiisg, sgitg);
 }
 
@@ -1019,11 +1023,9 @@ kernel void kernel_glm_q2_K_pair_swiglu_r1_f32(
     if (slot >= args.n_expert_used || token >= args.n_tokens) return;
     const uint64_t selected_off = (uint64_t)token * args.n_expert_used + slot;
     const int expert = selected[selected_off];
-    if (!ds4_tp_owns_expert(expert, args.n_total_expert,
-                            args.tp_rank, args.tp_world)) return;
     glm_q2_K_pair_swiglu_simd_f32_impl<1>(
         args, gate, up, x, weights, mid, scratch,
-        tgpig, slot, token, selected_off, expert - args.tp_expert_base,
+        tgpig, slot, token, selected_off, expert,
         tiisg, sgitg);
 }
 
@@ -1201,17 +1203,11 @@ kernel void kernel_glm_q3_K_pair_swiglu_f32(
         }
         return;
     }
-    if (!ds4_tp_owns_expert(expert, args.n_total_expert,
-                            args.tp_rank, args.tp_world)) {
-        return;
-    }
-
-    const uint owned_expert = (uint)(expert - args.tp_expert_base);
     const uint64_t gate_base =
-        (uint64_t)owned_expert * args.gate_expert_bytes +
+        (uint64_t)(uint)expert * args.gate_expert_bytes +
         (uint64_t)row0 * args.gate_row_bytes;
     const uint64_t up_base =
-        (uint64_t)owned_expert * args.up_expert_bytes +
+        (uint64_t)(uint)expert * args.up_expert_bytes +
         (uint64_t)row0 * args.up_row_bytes;
     device const float *token_x =
         x + (uint64_t)token * args.in_dim;
@@ -1270,17 +1266,11 @@ kernel void kernel_glm_q3_K_pair_swiglu_r1_f32(
         }
         return;
     }
-    if (!ds4_tp_owns_expert(expert, args.n_total_expert,
-                            args.tp_rank, args.tp_world)) {
-        return;
-    }
-
-    const uint owned_expert = (uint)(expert - args.tp_expert_base);
     const uint64_t gate_base =
-        (uint64_t)owned_expert * args.gate_expert_bytes +
+        (uint64_t)(uint)expert * args.gate_expert_bytes +
         (uint64_t)row0 * args.gate_row_bytes;
     const uint64_t up_base =
-        (uint64_t)owned_expert * args.up_expert_bytes +
+        (uint64_t)(uint)expert * args.up_expert_bytes +
         (uint64_t)row0 * args.up_row_bytes;
     device const float *token_x =
         x + (uint64_t)token * args.in_dim;
@@ -1998,13 +1988,8 @@ kernel void kernel_glm_q3_K_down_f32(
         if (expert < 0 || (uint)expert >= args.n_total_expert) {
             continue;
         }
-        if (!ds4_tp_owns_expert(expert, args.n_total_expert,
-                                args.tp_rank, args.tp_world)) {
-            continue;
-        }
-        const uint owned_expert = (uint)(expert - args.tp_expert_base);
         const uint64_t down_base =
-            (uint64_t)owned_expert * args.down_expert_bytes +
+            (uint64_t)(uint)expert * args.down_expert_bytes +
             (uint64_t)row0 * args.down_row_bytes;
         device const float *slot_mid =
             mid + mid_base + (uint64_t)slot * args.mid_dim;
@@ -2054,13 +2039,8 @@ kernel void kernel_glm_q3_K_down_r1_f32(
         if (expert < 0 || (uint)expert >= args.n_total_expert) {
             continue;
         }
-        if (!ds4_tp_owns_expert(expert, args.n_total_expert,
-                                args.tp_rank, args.tp_world)) {
-            continue;
-        }
-        const uint owned_expert = (uint)(expert - args.tp_expert_base);
         const uint64_t down_base =
-            (uint64_t)owned_expert * args.down_expert_bytes +
+            (uint64_t)(uint)expert * args.down_expert_bytes +
             (uint64_t)row0 * args.down_row_bytes;
         device const float *slot_mid =
             mid + mid_base + (uint64_t)slot * args.mid_dim;
@@ -2108,11 +2088,9 @@ static inline void glm_q2_K_down_simd_f32_impl(
     for (uint slot = 0; slot < args.n_expert_used; slot++) {
         const int expert = selected[selected_base + slot];
         if (expert < 0 || (uint)expert >= args.n_total_expert) continue;
-        if (!ds4_tp_owns_expert(expert, args.n_total_expert,
-                                args.tp_rank, args.tp_world)) continue;
         device const block_q2_K *x =
             (device const block_q2_K *)(down +
-                (uint64_t)(uint)(expert - args.tp_expert_base) * args.down_expert_bytes +
+                (uint64_t)(uint)expert * args.down_expert_bytes +
                 (uint64_t)row0 * args.down_row_bytes);
         device const float *y = mid + mid_base + (uint64_t)slot * args.mid_dim;
         device const float *y4 = y + ix * QK_K + 128 * iq + 8 * ir;
@@ -2784,12 +2762,9 @@ struct ds4_metal_args_mul_mm_id {
     int32_t  ne1;
     int16_t  r2;
     int16_t  r3;
-    /* Tensor-parallel expert ownership; tp_world<=1 disables the split.
-     * tp_expert_base rebases expert ids when the bind covers only the
-     * owned contiguous range of the expert blob. */
-    int32_t  tp_rank;
-    int32_t  tp_world;
-    int32_t  tp_expert_base;
+    /* Retired TP fields remain zeroed reserved storage so pre-world-1
+     * exclusive source overrides read a compatible constant-buffer layout. */
+    int32_t  reserved[3];
 };
 
 template<int nr0, typename args_t>
@@ -7374,25 +7349,6 @@ kernel void kernel_mul_mm_id(
     const bool mma_active =
         !CULL_TAIL_SIMDGROUPS || 16*(short)(sgitg/2) < nr1;
 
-    if (!ds4_tp_owns_expert(im, args.ne02, args.tp_rank, args.tp_world)) {
-        /* Unowned expert under the TP split: zero this tile's output rows so
-         * the downstream swiglu/sum stages stay unchanged. Each (token,slot)
-         * row belongs to exactly one expert, so nothing else writes them. */
-        for (short j = sgitg; j < nr1; j += 4) {
-            const int idj = ids_i32[im*args.ne21 + r1 + j];
-
-            const short ide = idj % args.ne20;
-            const short idt = idj / args.ne20;
-
-            device float * D = (device float *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
-
-            for (int i = tiisg; i < nr0; i += 32) {
-                D[i] = 0.0f;
-            }
-        }
-        return;
-    }
-
     const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1;
     const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1;
 
@@ -7406,7 +7362,7 @@ kernel void kernel_mul_mm_id(
     const short i12 = (id / args.ne20);
     const short i13 = 0;
 
-    const uint64_t offset0 = (uint64_t)(im - args.tp_expert_base)*args.nb02 + i13*args.nb03;
+    const uint64_t offset0 = (uint64_t)im*args.nb02 + i13*args.nb03;
     const short    offset1 = il0/nl;
 
     device const block_q * x = (device const block_q *)(src0 + args.nb01*(r0 + lr0) + offset0) + offset1;
@@ -8211,18 +8167,6 @@ kernel void kernel_mul_mm_id_mpp(
     const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
     const short nr1 = (    neh1 - r1 < NR1) ? (    neh1 - r1) : NR1;
 
-    if (!ds4_tp_owns_expert(im, args.ne02, args.tp_rank, args.tp_world)) {
-        for (short j = sgitg; j < nr1; j += 4) {
-            const int idj = ids_i32[im*args.ne21 + r1 + j];
-            const short ide = idj % args.ne20;
-            const short idt = idj / args.ne20;
-            device float *D = (device float *)dst + r0 + ide*args.ne0 +
-                              idt*args.ne1*args.ne0;
-            for (int i = tiisg; i < nr0; i += 32) D[i] = 0.0f;
-        }
-        return;
-    }
-
     const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1;
     const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1;
 
@@ -8236,7 +8180,7 @@ kernel void kernel_mul_mm_id_mpp(
     const short i13 = 0;
 
     const uint64_t offset0 =
-        (uint64_t)(im - args.tp_expert_base)*args.nb02 + i13*args.nb03;
+        (uint64_t)im*args.nb02 + i13*args.nb03;
     const short    offset1 = il0/nl;
 
     device const block_q * x = (device const block_q *)(src0 + args.nb01*(r0 + lr0) + offset0) + offset1;

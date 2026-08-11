@@ -78,6 +78,11 @@ typedef struct {
     uint64_t support_consumed;
 } ds4_gpu_laguna_atlas_cb_evidence;
 static NSMutableArray<NSData *> *g_pending_laguna_atlas_evidence;
+#ifdef DS4_TEST_HOOKS
+/* One grouped-MoE completion record per committed batch command buffer.  It
+ * stays paired with g_pending_cbs until that exact buffer has been waited. */
+static NSMutableArray<NSNumber *> *g_pending_glm_grouped_moe_evidence;
+#endif
 static ds4_gpu_laguna_atlas_cb_evidence g_batch_laguna_atlas_evidence;
 static ds4_gpu_laguna_atlas_cb_evidence g_owned_laguna_atlas_evidence;
 static id<MTLSharedEvent> g_selected_readback_event;
@@ -334,6 +339,16 @@ static NSUInteger g_moe_q4_up_slots_bytes;
 static NSUInteger g_moe_q4_down_slots_bytes;
 static int g_initialized;
 #ifdef DS4_TEST_HOOKS
+/* -1 means no library has been checked in this lifecycle, 0 means the
+ * current source lacked the exact ABI fingerprint marker, and 1 means the
+ * marker was found.  This is test-only evidence; production dispatch never
+ * consults it. */
+static int g_metal_moe_abi_sentinel_status = -1;
+
+int ds4_gpu_test_moe_abi_sentinel_status(void) {
+    return g_metal_moe_abi_sentinel_status;
+}
+
 typedef enum {
     DS4_GPU_TEST_INIT_FAIL_NONE = 0,
     DS4_GPU_TEST_INIT_FAIL_DEVICE,
@@ -416,6 +431,13 @@ static uint64_t g_laguna_test_decode_route_batch[
     DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT];
 static uint64_t g_laguna_test_decode_route_inflight[
     DS4_LAGUNA_TEST_DECODE_ROUTE_COUNT];
+/* Completion-scoped grouped-MoE evidence.  The focused model-independent
+ * fixture resets these counters before its row-loop oracle and then asserts
+ * exactly one completed grouped command in the 32-token leg. */
+static uint64_t g_test_glm_grouped_moe_encoded_dispatches;
+static uint64_t g_test_glm_grouped_moe_batch_dispatches;
+static uint64_t g_test_glm_grouped_moe_owned_dispatches;
+static uint64_t g_test_glm_grouped_moe_completed_dispatches;
 #endif
 static double ds4_gpu_gib(uint64_t bytes);
 
@@ -736,6 +758,11 @@ static void ds4_gpu_laguna_atlas_register_pending(
     [g_pending_laguna_atlas_evidence addObject:
         [NSData dataWithBytes:e length:sizeof(*e)]];
     [g_pending_cbs addObject:cb];
+#ifdef DS4_TEST_HOOKS
+    [g_pending_glm_grouped_moe_evidence addObject:
+        @(g_test_glm_grouped_moe_batch_dispatches)];
+    g_test_glm_grouped_moe_batch_dispatches = 0;
+#endif
 }
 
 static id<MTLCommandBuffer> ds4_gpu_command_buffer(int *owned) {
@@ -901,6 +928,7 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     int ok = 1;
 #ifdef DS4_TEST_HOOKS
     int injected_failure = 0;
+    uint64_t grouped_completed = 0;
 #endif
     const NSUInteger count = [g_pending_cbs count];
     for (NSUInteger i = 0; i < count; i++) {
@@ -920,6 +948,16 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
             ok = 0;
         }
 #endif
+#ifdef DS4_TEST_HOOKS
+        const uint64_t grouped_evidence =
+            i < [g_pending_glm_grouped_moe_evidence count]
+                ? [[g_pending_glm_grouped_moe_evidence objectAtIndex:i]
+                    unsignedLongLongValue]
+                : 0;
+        if (completed && !injected_failure) {
+            grouped_completed += grouped_evidence;
+        }
+#endif
         if (completed
 #ifdef DS4_TEST_HOOKS
             && !injected_failure
@@ -936,11 +974,17 @@ static int ds4_gpu_wait_pending_command_buffers(const char *label) {
     [g_pending_cbs removeAllObjects];
     [g_pending_laguna_atlas_evidence removeAllObjects];
 #ifdef DS4_TEST_HOOKS
+    [g_pending_glm_grouped_moe_evidence removeAllObjects];
+#endif
+#ifdef DS4_TEST_HOOKS
     /* These command buffers were already committed by flush/submit (or by a
      * shared-event path).  Count them only after their completion wait, and
      * drop the evidence on an error or timeout. */
-    if (ok) g_laguna_router_fused_completed_dispatches +=
-        g_laguna_router_fused_pending_dispatches;
+    if (ok) {
+        g_laguna_router_fused_completed_dispatches +=
+            g_laguna_router_fused_pending_dispatches;
+        g_test_glm_grouped_moe_completed_dispatches += grouped_completed;
+    }
     g_laguna_router_fused_pending_dispatches = 0;
     ds4_gpu_laguna_test_decode_route_batch_completed(ok);
 #endif
@@ -980,6 +1024,11 @@ static int ds4_gpu_finish_command_buffer(id<MTLCommandBuffer> cb, int owned, con
         g_laguna_router_fused_owned_dispatches;
     g_laguna_router_fused_batch_dispatches = 0;
     g_laguna_router_fused_owned_dispatches = 0;
+    if (ok) g_test_glm_grouped_moe_completed_dispatches +=
+        g_test_glm_grouped_moe_batch_dispatches +
+        g_test_glm_grouped_moe_owned_dispatches;
+    g_test_glm_grouped_moe_batch_dispatches = 0;
+    g_test_glm_grouped_moe_owned_dispatches = 0;
 #endif
     return ok;
 }
@@ -2484,6 +2533,25 @@ int ds4_gpu_test_laguna_decode_route_counters(
     if (global_grouped) *global_grouped =
         g_laguna_test_decode_route_counts[
             DS4_LAGUNA_TEST_DECODE_GLOBAL_GROUPED];
+    return 1;
+}
+
+void ds4_gpu_test_glm_grouped_moe_counters_reset(void) {
+    g_test_glm_grouped_moe_encoded_dispatches = 0;
+    g_test_glm_grouped_moe_batch_dispatches = 0;
+    g_test_glm_grouped_moe_owned_dispatches = 0;
+    g_test_glm_grouped_moe_completed_dispatches = 0;
+}
+
+int ds4_gpu_test_glm_grouped_moe_counters(
+        uint64_t *encoded_dispatches,
+        uint64_t *completed_dispatches) {
+    if (encoded_dispatches) {
+        *encoded_dispatches = g_test_glm_grouped_moe_encoded_dispatches;
+    }
+    if (completed_dispatches) {
+        *completed_dispatches = g_test_glm_grouped_moe_completed_dispatches;
+    }
     return 1;
 }
 
@@ -4065,10 +4133,15 @@ typedef struct {
     int32_t  ne1;
     int16_t  r2;
     int16_t  r3;
-    int32_t  tp_rank;
-    int32_t  tp_world;
-    int32_t  tp_expert_base;
+    uint32_t reserved[3];
 } ds4_gpu_mul_mm_id_args;
+
+/* Keep the host mirror byte-sized and position-compatible with the pre-world-1
+ * source override.  The retired TP fields are now zeroed reserved storage. */
+_Static_assert(offsetof(ds4_gpu_mul_mm_id_args, reserved) == 92u,
+               "routed mul_mm_id reserved tail moved");
+_Static_assert(sizeof(ds4_gpu_mul_mm_id_args) == 104u,
+               "routed mul_mm_id ABI layout drifted");
 
 static ds4_gpu_mul_mm_id_map_args ds4_gpu_make_mul_mm_id_map_args(
         uint32_t src0_cols,
@@ -4385,9 +4458,7 @@ typedef struct {
     uint32_t n_tokens;
     uint32_t mid_token_stride;
     uint32_t down_type;
-    int32_t  tp_rank;
-    int32_t  tp_world;
-    int32_t  tp_expert_base;
+    uint32_t reserved[4];
     uint64_t gate_expert_bytes;
     uint64_t gate_row_bytes;
     uint64_t up_expert_bytes;
@@ -4395,6 +4466,13 @@ typedef struct {
     uint64_t down_expert_bytes;
     uint64_t down_row_bytes;
 } ds4_gpu_glm_routed_moe_args;
+
+_Static_assert(offsetof(ds4_gpu_glm_routed_moe_args, reserved) == 32u,
+               "routed GLM MoE reserved prefix moved");
+_Static_assert(offsetof(ds4_gpu_glm_routed_moe_args, gate_expert_bytes) == 48u,
+               "routed GLM MoE stride moved");
+_Static_assert(sizeof(ds4_gpu_glm_routed_moe_args) == 96u,
+               "routed GLM MoE ABI layout drifted");
 
 typedef struct {
     uint32_t width;
@@ -4438,6 +4516,10 @@ typedef struct {
 static int ds4_gpu_init_impl(void) {
     if (g_initialized) return 1;
 
+#ifdef DS4_TEST_HOOKS
+    g_metal_moe_abi_sentinel_status = -1;
+#endif
+
     /* Freeze the Q8 decode selector before any Metal graph or command buffer
      * can be admitted.  This is deliberately a process boundary:
      * ds4_gpu_cleanup() releases Metal resources but does not reopen the
@@ -4469,6 +4551,10 @@ static int ds4_gpu_init_impl(void) {
                sizeof(g_laguna_test_decode_route_batch));
         memset(g_laguna_test_decode_route_inflight, 0,
                sizeof(g_laguna_test_decode_route_inflight));
+        g_test_glm_grouped_moe_encoded_dispatches = 0;
+        g_test_glm_grouped_moe_batch_dispatches = 0;
+        g_test_glm_grouped_moe_owned_dispatches = 0;
+        g_test_glm_grouped_moe_completed_dispatches = 0;
 #endif
         g_device = MTLCreateSystemDefaultDevice();
         if (!g_device) {
@@ -4504,14 +4590,24 @@ static int ds4_gpu_init_impl(void) {
         g_transient_buffers = [NSMutableArray array];
         g_pending_cbs = [NSMutableArray array];
         g_pending_laguna_atlas_evidence = [NSMutableArray array];
+#ifdef DS4_TEST_HOOKS
+        g_pending_glm_grouped_moe_evidence = [NSMutableArray array];
+#endif
         if (!g_model_buffer_cache || !g_q4_expert_table_cache ||
             !g_q4_expert_layer_residency_cache ||
             !g_pipeline_cache ||
             !g_transient_buffers || !g_pending_cbs ||
-            !g_pending_laguna_atlas_evidence) {
+            !g_pending_laguna_atlas_evidence
+#ifdef DS4_TEST_HOOKS
+            || !g_pending_glm_grouped_moe_evidence
+#endif
+        ) {
             fprintf(stderr, "ds4: Metal bookkeeping allocation failed\n");
             g_pending_cbs = nil;
             g_pending_laguna_atlas_evidence = nil;
+#ifdef DS4_TEST_HOOKS
+            g_pending_glm_grouped_moe_evidence = nil;
+#endif
             g_transient_buffers = nil;
             g_pipeline_cache = nil;
             g_q4_expert_layer_residency_cache = nil;
@@ -4585,6 +4681,31 @@ static int ds4_gpu_init_impl(void) {
             return 0;
         }
         g_library = library;
+#ifdef DS4_TEST_HOOKS
+        g_metal_moe_abi_sentinel_status =
+            [library newFunctionWithName:
+                @"kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48"] ? 1 : 0;
+#else
+        id<MTLFunction> moe_abi_sentinel =
+            [library newFunctionWithName:
+                @"kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48"];
+#endif
+        if (
+#ifdef DS4_TEST_HOOKS
+            g_metal_moe_abi_sentinel_status == 0
+#else
+            !moe_abi_sentinel
+#endif
+        ) {
+            fprintf(stderr,
+                    "ds4: Metal MoE source ABI sentinel "
+                    "kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48 missing; "
+                    "DS4_METAL_MOE_SOURCE is stale or incompatible\n");
+            g_library = nil;
+            g_queue = nil;
+            g_device = nil;
+            return 0;
+        }
         g_metal_math_safe = drift_math_safe;
 
         id<MTLFunction> fn = [library newFunctionWithName:@"kernel_get_rows_f32"];
@@ -6394,6 +6515,8 @@ int ds4_gpu_discard_commands(void) {
     /* The current batch is discarded; only previously committed pending
      * batches, if any, remain eligible for completion accounting. */
     g_laguna_router_fused_batch_dispatches = 0;
+    g_test_glm_grouped_moe_batch_dispatches = 0;
+    g_test_glm_grouped_moe_owned_dispatches = 0;
     memset(g_laguna_test_decode_route_batch, 0,
            sizeof(g_laguna_test_decode_route_batch));
 #endif
@@ -6768,29 +6891,6 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
     return 0;
 }
 
-/* Expert-ownership split parameters for routed kernels. World 1 means TP is
- * not bound; world 2 assigns each rank one contiguous expert range. */
-static int32_t g_tp_split_rank;
-static int32_t g_tp_split_world = 1;
-
-/* Return the contiguous routed-expert range backed by this process. Rank 1
- * owns the high range and receives any odd-count remainder. */
-static void ds4_gpu_tp_expert_range(uint32_t n_total_expert,
-                                    uint32_t *first_expert,
-                                    uint32_t *n_expert) {
-    *first_expert = 0;
-    *n_expert = n_total_expert;
-    if (g_tp_split_world != 2) return;
-
-    const uint32_t low_experts = n_total_expert / 2u;
-    if (g_tp_split_rank == 1) {
-        *first_expert = low_experts;
-        *n_expert = n_total_expert - low_experts;
-    } else {
-        *n_expert = low_experts;
-    }
-}
-
 int ds4_gpu_wait_selected_readback_ready(uint64_t event_value, const char *label) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (event_value == 0) return 0;
@@ -7158,6 +7258,9 @@ void ds4_gpu_cleanup(void) {
         g_transient_buffers = nil;
         g_pending_cbs = nil;
         g_pending_laguna_atlas_evidence = nil;
+#ifdef DS4_TEST_HOOKS
+        g_pending_glm_grouped_moe_evidence = nil;
+#endif
         g_library = nil;
         g_queue = nil;
         g_device = nil;
@@ -7191,6 +7294,10 @@ void ds4_gpu_cleanup(void) {
         g_laguna_router_fused_owned_dispatches = 0;
         g_laguna_router_fused_pending_dispatches = 0;
         g_laguna_router_fused_completed_dispatches = 0;
+        g_test_glm_grouped_moe_encoded_dispatches = 0;
+        g_test_glm_grouped_moe_batch_dispatches = 0;
+        g_test_glm_grouped_moe_owned_dispatches = 0;
+        g_test_glm_grouped_moe_completed_dispatches = 0;
         memset(g_laguna_test_decode_route_counts, 0,
                sizeof(g_laguna_test_decode_route_counts));
         memset(g_laguna_test_decode_route_batch, 0,
@@ -7925,6 +8032,9 @@ int ds4_gpu_test_cleanup_state_is_clean(void) {
            !g_batch_cb && !g_batch_enc && !g_batch_encoder_concurrent &&
            !g_batch_has_work && g_command_batch_epoch == 0 &&
            !g_pending_cbs && !g_pending_laguna_atlas_evidence &&
+#ifdef DS4_TEST_HOOKS
+           !g_pending_glm_grouped_moe_evidence &&
+#endif
            !g_selected_readback_event &&
            g_selected_readback_event_value == 0 &&
            !g_model_buffer_cache && !g_q4_expert_table_cache &&
@@ -12592,6 +12702,7 @@ static ds4_gpu_mul_mm_id_args ds4_gpu_make_mul_mm_id_args_src1_size(
         .ne1 = (int32_t)selected_experts,
         .r2 = 1,
         .r3 = 1,
+        .reserved = {0u, 0u, 0u},
     };
 }
 
@@ -16166,16 +16277,6 @@ int ds4_gpu_glm_routed_moe_one_tensor(
         bool                    force_resident) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     (void)force_resident;
-    /* TP sharding: only the owned contiguous expert range is mapped,
-     * so bind from the owned base, validate only its bytes, and tell the
-     * kernels the first expert id present at that base. */
-    uint32_t first_expert = 0;
-    uint32_t n_bind_expert = 0;
-    ds4_gpu_tp_expert_range(n_total_expert, &first_expert, &n_bind_expert);
-    const int32_t tp_expert_base_host = (int32_t)first_expert;
-    gate_offset += (uint64_t)first_expert * gate_expert_bytes;
-    up_offset += (uint64_t)first_expert * up_expert_bytes;
-    down_offset += (uint64_t)first_expert * down_expert_bytes;
 
     if (!out || !mid || !model_map || !selected || !weights || !x ||
         n_total_expert == 0 || n_expert == 0 || n_expert > 256u ||
@@ -16201,9 +16302,9 @@ int ds4_gpu_glm_routed_moe_one_tensor(
         return 0;
     }
 
-    const uint64_t gate_tensor_bytes = (uint64_t)n_bind_expert * gate_expert_bytes;
-    const uint64_t up_tensor_bytes = (uint64_t)n_bind_expert * up_expert_bytes;
-    const uint64_t down_tensor_bytes = (uint64_t)n_bind_expert * down_expert_bytes;
+    const uint64_t gate_tensor_bytes = (uint64_t)n_total_expert * gate_expert_bytes;
+    const uint64_t up_tensor_bytes = (uint64_t)n_total_expert * up_expert_bytes;
+    const uint64_t down_tensor_bytes = (uint64_t)n_total_expert * down_expert_bytes;
     if (gate_expert_bytes != (uint64_t)expert_mid_dim * gate_row_bytes ||
         up_expert_bytes != (uint64_t)expert_mid_dim * up_row_bytes ||
         down_expert_bytes != (uint64_t)out_dim * down_row_bytes) {
@@ -16382,9 +16483,6 @@ int ds4_gpu_glm_routed_moe_one_tensor(
         } while (0)
 
         ds4_gpu_glm_routed_moe_args args = {
-            .tp_rank = g_tp_split_rank,
-            .tp_world = g_tp_split_world,
-            .tp_expert_base = tp_expert_base_host,
             .in_dim = expert_in_dim,
             .mid_dim = expert_mid_dim,
             .out_dim = out_dim,
@@ -16393,6 +16491,7 @@ int ds4_gpu_glm_routed_moe_one_tensor(
             .n_tokens = 1,
             .mid_token_stride = n_expert * expert_mid_dim,
             .down_type = down_type,
+            .reserved = {0u, 0u, 0u, 0u},
             .gate_expert_bytes = gate_expert_bytes,
             .gate_row_bytes = gate_row_bytes,
             .up_expert_bytes = up_expert_bytes,
@@ -16629,9 +16728,6 @@ int ds4_gpu_laguna_routed_shared_moe_one_tensor(
         }
 
         const ds4_gpu_glm_routed_moe_args routed_args = {
-            .tp_rank = 0,
-            .tp_world = 1,
-            .tp_expert_base = 0,
             .in_dim = expert_in_dim,
             .mid_dim = expert_mid_dim,
             .out_dim = out_dim,
@@ -16640,6 +16736,7 @@ int ds4_gpu_laguna_routed_shared_moe_one_tensor(
             .n_tokens = 1,
             .mid_token_stride = n_expert * expert_mid_dim,
             .down_type = routed->down_type,
+            .reserved = {0u, 0u, 0u, 0u},
             .gate_expert_bytes = routed->gate_expert_bytes,
             .gate_row_bytes = routed->gate_row_bytes,
             .up_expert_bytes = routed->up_expert_bytes,
@@ -16648,9 +16745,6 @@ int ds4_gpu_laguna_routed_shared_moe_one_tensor(
             .down_row_bytes = routed->down_row_bytes,
         };
         const ds4_gpu_glm_routed_moe_args shared_args = {
-            .tp_rank = 0,
-            .tp_world = 1,
-            .tp_expert_base = 0,
             .in_dim = expert_in_dim,
             .mid_dim = expert_mid_dim,
             .out_dim = out_dim,
@@ -16659,6 +16753,7 @@ int ds4_gpu_laguna_routed_shared_moe_one_tensor(
             .n_tokens = 1,
             .mid_token_stride = expert_mid_dim,
             .down_type = shared->down_type,
+            .reserved = {0u, 0u, 0u, 0u},
             .gate_expert_bytes = shared->gate_expert_bytes,
             .gate_row_bytes = shared->gate_row_bytes,
             .up_expert_bytes = shared->up_expert_bytes,
@@ -16841,15 +16936,9 @@ static int ds4_gpu_glm_routed_moe_batch_grouped_tensor(
         return 0;
     }
 
-    uint32_t first_expert = 0;
-    uint32_t n_bind_expert = 0;
-    ds4_gpu_tp_expert_range(n_total_expert, &first_expert, &n_bind_expert);
-    gate_offset += (uint64_t)first_expert * gate_expert_bytes;
-    up_offset += (uint64_t)first_expert * up_expert_bytes;
-    down_offset += (uint64_t)first_expert * down_expert_bytes;
-    const uint64_t gate_tensor_bytes = (uint64_t)n_bind_expert * gate_expert_bytes;
-    const uint64_t up_tensor_bytes = (uint64_t)n_bind_expert * up_expert_bytes;
-    const uint64_t down_tensor_bytes = (uint64_t)n_bind_expert * down_expert_bytes;
+    const uint64_t gate_tensor_bytes = (uint64_t)n_total_expert * gate_expert_bytes;
+    const uint64_t up_tensor_bytes = (uint64_t)n_total_expert * up_expert_bytes;
+    const uint64_t down_tensor_bytes = (uint64_t)n_total_expert * down_expert_bytes;
 
     @autoreleasepool {
         id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
@@ -16919,15 +17008,6 @@ static int ds4_gpu_glm_routed_moe_batch_grouped_tensor(
                                                     down_row_bytes, down_expert_bytes,
                                                     n_expert, n_expert, n_tokens,
                                                     mid_f16 ? sizeof(uint16_t) : sizeof(float));
-        gate_args.tp_rank = g_tp_split_rank;
-        gate_args.tp_world = g_tp_split_world;
-        gate_args.tp_expert_base = (int32_t)first_expert;
-        up_args.tp_rank = g_tp_split_rank;
-        up_args.tp_world = g_tp_split_world;
-        up_args.tp_expert_base = (int32_t)first_expert;
-        down_args.tp_rank = g_tp_split_rank;
-        down_args.tp_world = g_tp_split_world;
-        down_args.tp_expert_base = (int32_t)first_expert;
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
@@ -17054,6 +17134,14 @@ static int ds4_gpu_glm_routed_moe_batch_grouped_tensor(
         DS4_METAL_PROFILE_GLM_GROUPED_MOE_STAGE("sum");
         if (!ok) return 0;
 
+#ifdef DS4_TEST_HOOKS
+        g_test_glm_grouped_moe_encoded_dispatches++;
+        if (owned) {
+            g_test_glm_grouped_moe_owned_dispatches++;
+        } else {
+            g_test_glm_grouped_moe_batch_dispatches++;
+        }
+#endif
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM grouped routed batch MoE")) {
             return 0;
         }
@@ -17177,15 +17265,9 @@ static int ds4_gpu_glm_routed_moe_batch_tensor_impl(
                                                            n_tokens);
     }
 
-    uint32_t first_expert = 0;
-    uint32_t n_bind_expert = 0;
-    ds4_gpu_tp_expert_range(n_total_expert, &first_expert, &n_bind_expert);
-    gate_offset += (uint64_t)first_expert * gate_expert_bytes;
-    up_offset += (uint64_t)first_expert * up_expert_bytes;
-    down_offset += (uint64_t)first_expert * down_expert_bytes;
-    const uint64_t gate_tensor_bytes = (uint64_t)n_bind_expert * gate_expert_bytes;
-    const uint64_t up_tensor_bytes = (uint64_t)n_bind_expert * up_expert_bytes;
-    const uint64_t down_tensor_bytes = (uint64_t)n_bind_expert * down_expert_bytes;
+    const uint64_t gate_tensor_bytes = (uint64_t)n_total_expert * gate_expert_bytes;
+    const uint64_t up_tensor_bytes = (uint64_t)n_total_expert * up_expert_bytes;
+    const uint64_t down_tensor_bytes = (uint64_t)n_total_expert * down_expert_bytes;
 
     @autoreleasepool {
         id<MTLBuffer> xbuf = ds4_gpu_tensor_buffer(x);
@@ -17348,9 +17430,6 @@ static int ds4_gpu_glm_routed_moe_batch_tensor_impl(
         } while (0)
 
         ds4_gpu_glm_routed_moe_args args = {
-            .tp_rank = g_tp_split_rank,
-            .tp_world = g_tp_split_world,
-            .tp_expert_base = (int32_t)first_expert,
             .in_dim = expert_in_dim,
             .mid_dim = expert_mid_dim,
             .out_dim = out_dim,
@@ -17359,6 +17438,7 @@ static int ds4_gpu_glm_routed_moe_batch_tensor_impl(
             .n_tokens = n_tokens,
             .mid_token_stride = mid_token_stride,
             .down_type = down_type,
+            .reserved = {0u, 0u, 0u, 0u},
             .gate_expert_bytes = gate_expert_bytes,
             .gate_row_bytes = gate_row_bytes,
             .up_expert_bytes = up_expert_bytes,
@@ -17556,28 +17636,12 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         return 0;
     }
 
-    uint32_t first_expert = 0;
-    uint32_t n_bind_expert = 0;
-    ds4_gpu_tp_expert_range(
-        n_total_expert, &first_expert, &n_bind_expert);
-    if ((uint64_t)first_expert >
-            (UINT64_MAX - gate_offset) / gate_expert_bytes ||
-        (uint64_t)first_expert >
-            (UINT64_MAX - up_offset) / up_expert_bytes ||
-        (uint64_t)first_expert >
-            (UINT64_MAX - down_offset) / down_expert_bytes) {
-        return 0;
-    }
-    gate_offset += (uint64_t)first_expert * gate_expert_bytes;
-    up_offset += (uint64_t)first_expert * up_expert_bytes;
-    down_offset += (uint64_t)first_expert * down_expert_bytes;
-
     const uint64_t gate_tensor_bytes =
-        (uint64_t)n_bind_expert * gate_expert_bytes;
+        (uint64_t)n_total_expert * gate_expert_bytes;
     const uint64_t up_tensor_bytes =
-        (uint64_t)n_bind_expert * up_expert_bytes;
+        (uint64_t)n_total_expert * up_expert_bytes;
     const uint64_t down_tensor_bytes =
-        (uint64_t)n_bind_expert * down_expert_bytes;
+        (uint64_t)n_total_expert * down_expert_bytes;
     const uint64_t x_values = (uint64_t)n_tokens * expert_in_dim;
     const uint64_t out_values = (uint64_t)n_tokens * out_dim;
     const uint64_t mid_values =
@@ -17658,9 +17722,6 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
         const bool legacy_rows =
             getenv("DS4_METAL_DISABLE_Q23_EXACT_MULTIROW") != NULL;
         ds4_gpu_glm_routed_moe_args args = {
-            .tp_rank = g_tp_split_rank,
-            .tp_world = g_tp_split_world,
-            .tp_expert_base = (int32_t)first_expert,
             .in_dim = expert_in_dim,
             .mid_dim = expert_mid_dim,
             .out_dim = out_dim,
@@ -17670,6 +17731,7 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
             .mid_token_stride = legacy_rows ?
                 (uint32_t)per_token_mid : mid_token_stride,
             .down_type = down_type,
+            .reserved = {0u, 0u, 0u, 0u},
             .gate_expert_bytes = gate_expert_bytes,
             .gate_row_bytes = gate_row_bytes,
             .up_expert_bytes = up_expert_bytes,

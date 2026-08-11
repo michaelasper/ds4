@@ -125,9 +125,9 @@ speed-bench/metal_prefill_variant_bench: speed-bench/metal_prefill_variant_bench
 metal-prefill-variant-bench: speed-bench/metal_prefill_variant_bench
 
 tests/test_glm_q23_metal.o: tests/test_glm_q23_metal.c ds4_gpu.h
-	$(CC) $(CFLAGS) -I. -c -o $@ $<
+	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_glm_q23_metal: tests/test_glm_q23_metal.o ds4_metal.o | check-metal-sources
+tests/test_glm_q23_metal: tests/test_glm_q23_metal.o ds4_metal_test_hooks.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 test-glm-q23-metal: tests/test_glm_q23_metal
@@ -224,7 +224,8 @@ test-laguna-cli-options: ds4 ds4-server ds4-bench ds4-eval tests/test_laguna_cli
 
 test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options test-engine-lifecycle $(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-eval
 	@set -eu; \
-	./ds4_test --laguna-architecture --laguna-selector-parser --laguna-session-routes --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --laguna-dflash-exec --laguna-dflash-command-ownership --server; \
+	./ds4_test --laguna-moe-abi --laguna-architecture --laguna-selector-parser --laguna-session-routes --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --laguna-dflash-exec --laguna-dflash-command-ownership --server; \
+	DS4_METAL_MOE_SOURCE=metal/moe.metal DS4_TEST_MOE_ABI_MODE=current ./ds4_test --laguna-moe-abi; \
 	./ds4_test --dflash-payload-lifecycle; \
 	./tests/test_sampling; \
 	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
