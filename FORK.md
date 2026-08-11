@@ -47,6 +47,11 @@ The refactor branch already:
   feature/draft/KV allocation lifecycle in the private `lgn_dflash_graph.c` /
   `lgn_dflash_graph.h` module while command scheduling and target capture stay
   in `ds4.c`;
+- isolates borrowed DFlash support-model execution in the private
+  `lgn_dflash_exec.c` / `lgn_dflash_exec.h` module: BF16 weights use the F16
+  shadow map, quantized weights use the support GGUF map, and six-layer
+  injection only records into an already-owned command batch; scheduler,
+  target-output, rollback, and completion evidence remain in `ds4.c`;
 - makes DFlash speculative command ownership explicit: the scheduler owns the
   snapshot, draft, verifier, rollback, and terminal command boundaries;
   submitted snapshots and accepted-prefix restores must complete successfully

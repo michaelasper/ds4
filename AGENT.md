@@ -54,6 +54,9 @@ requirements.
   base Metal scratch, persistent KV caches, and their allocation lifecycle.
 - `lgn_dflash_graph.c` / `lgn_dflash_graph.h`: private DFlash support-graph
   storage owner for feature history, draft scratch, and six-layer KV caches.
+- `lgn_dflash_exec.c` / `lgn_dflash_exec.h`: borrowed DFlash support-map
+  execution and active-batch-only six-layer injection recording; it never owns
+  scheduler, target-output, rollback, or command completion state.
 - `ds4.c`: transitional tokenizer, Metal graph scheduling, sessions, and
   disk-cache payload serialisation; move supported Laguna code into `lgn_*`
   modules as obsolete model/backend paths are deleted.
