@@ -89,6 +89,12 @@ static void test_laguna_selector_parser(void) {
 }
 
 #ifndef DS4_NO_GPU
+static void test_laguna_graph_guard_routes(void) {
+    TEST_ASSERT(ds4_test_laguna_graph_guard_routes());
+}
+#endif
+
+#ifndef DS4_NO_GPU
 #include <math.h>
 
 /* DFlash restore invalidation is a GPU-only contract.  Keep both the hook
@@ -14585,6 +14591,9 @@ static const ds4_test_entry test_entries[] = {
      "serialized session ownership, structural close order, and Metal cleanup",
      test_engine_lifecycle, true},
 #ifndef DS4_NO_GPU
+    {"--laguna-graph-guards", "laguna-graph-guards",
+     "Laguna session paths reject generic GLM/raw graph access",
+     test_laguna_graph_guard_routes, false},
 #if defined(__APPLE__)
     {"--dflash-payload-lifecycle", "dflash-payload-lifecycle",
      "payload and snapshot restore invalidate Laguna DFlash support state",

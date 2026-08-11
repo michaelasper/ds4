@@ -52612,6 +52612,13 @@ static bool ds4_session_is_laguna(const ds4_session *s) {
 }
 
 #ifndef DS4_NO_GPU
+/* The sync debug postlude is a legacy GLM-only observer.  Laguna owns a
+ * different graph and must never use the GLM graph as a diagnostic side door.
+ * Keep this as a small routing predicate so the no-model guard is testable. */
+static bool ds4_session_sync_glm_postlude_allowed(const ds4_session *s) {
+    return ds4_session_is_glm(s);
+}
+
 /* The DFlash support graph owns a separate KV/feature history from the
  * Laguna target graph.  Any operation that invalidates the target timeline
  * must invalidate this history as one unit too; in particular, a deferred
@@ -55444,6 +55451,12 @@ static bool ds4_session_greedy_splitkv_replay_exact(
 }
 #endif
 
+/* Laguna evaluation owns its KV timeline and logits buffer.  Its argmax entry
+ * point must use ds4_session_eval(), never the legacy raw graph below. */
+static bool ds4_session_eval_argmax_uses_laguna_path(const ds4_session *s) {
+    return ds4_session_is_laguna(s);
+}
+
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
@@ -55451,7 +55464,8 @@ int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen)
             s->engine, "session argmax", err, errlen)) return -1;
 #endif
     ds4_session_note_logits_dirty(s);
-    if (ds4_session_is_cpu(s) || ds4_session_is_glm(s)) {
+    if (ds4_session_is_cpu(s) || ds4_session_is_glm(s) ||
+        ds4_session_eval_argmax_uses_laguna_path(s)) {
         if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
         return ds4_session_argmax(s);
     }
@@ -60846,6 +60860,40 @@ static void ds4_session_note_prefill_progress(void *ud, const char *event, int c
  */
 static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen);
 
+#ifndef DS4_NO_GPU
+/* Keep diagnostics on the graph family that owns the session.  In particular,
+ * the Laguna path must not inspect the generic GLM graph even when a stale
+ * debug environment variable is present. */
+static void ds4_session_sync_postlude(ds4_session *s,
+                                       const ds4_tokens *prompt,
+                                       int rc) {
+    if (rc != 0 || !ds4_session_sync_glm_postlude_allowed(s)) return;
+
+    glm_debug_dump_prefill_logits(s->logits);
+    const char *kvp = getenv("DS4_GLM_KV_DUMP");
+    if (kvp && kvp[0] && s->glm_graph.layer_kv_lora_cache[0]) {
+        const ds4_glm_gpu_graph *g = &s->glm_graph;
+        const uint32_t rows = prompt ? (uint32_t)prompt->len : 0;
+        const uint64_t eb = glm_graph_compact_cache_elem_bytes();
+        const struct { const char *sfx; ds4_gpu_tensor *t; uint64_t rb; } kd[2] = {
+            { "lora0", g->layer_kv_lora_cache[0], DS4_N_KV_LORA * eb },
+            { "rope0", g->layer_k_rope_cache[0],  DS4_N_ROT * eb },
+        };
+        for (int i = 0; i < 2 && rows; i++) {
+            char fp[1024];
+            snprintf(fp, sizeof(fp), "%s.%s", kvp, kd[i].sfx);
+            void *buf = malloc(rows * kd[i].rb);
+            if (buf &&
+                ds4_gpu_tensor_read(kd[i].t, 0, buf, rows * kd[i].rb)) {
+                FILE *f = fopen(fp, "wb");
+                if (f) { fwrite(buf, 1, rows * kd[i].rb, f); fclose(f); }
+            }
+            free(buf);
+        }
+    }
+}
+#endif
+
 int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
     if (s && !laguna_metal_swa_gqa9_preflight(
@@ -60856,30 +60904,7 @@ int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t
     ds4_session_note_logits_dirty(s);
     int rc = ds4_session_sync_internal(s, prompt, err, errlen);
 #ifndef DS4_NO_GPU
-    if (rc == 0) glm_debug_dump_prefill_logits(s->logits);
-    if (rc == 0) {
-        const char *kvp = getenv("DS4_GLM_KV_DUMP");
-        if (kvp && kvp[0] && s->glm_graph.layer_kv_lora_cache[0]) {
-            const ds4_glm_gpu_graph *g = &s->glm_graph;
-            const uint32_t rows = prompt ? (uint32_t)prompt->len : 0;
-            const uint64_t eb = glm_graph_compact_cache_elem_bytes();
-            const struct { const char *sfx; ds4_gpu_tensor *t; uint64_t rb; } kd[2] = {
-                { "lora0", g->layer_kv_lora_cache[0], DS4_N_KV_LORA * eb },
-                { "rope0", g->layer_k_rope_cache[0],  DS4_N_ROT * eb },
-            };
-            for (int i = 0; i < 2 && rows; i++) {
-                char fp[1024];
-                snprintf(fp, sizeof(fp), "%s.%s", kvp, kd[i].sfx);
-                void *buf = malloc(rows * kd[i].rb);
-                if (buf &&
-                    ds4_gpu_tensor_read(kd[i].t, 0, buf, rows * kd[i].rb)) {
-                    FILE *f = fopen(fp, "wb");
-                    if (f) { fwrite(buf, 1, rows * kd[i].rb, f); fclose(f); }
-                }
-                free(buf);
-            }
-        }
-    }
+    ds4_session_sync_postlude(s, prompt, rc);
 #endif
     return rc;
 }
@@ -63501,6 +63526,7 @@ static bool ds4_sessions_eval_batch_with_prefill_metal_supported(
         e->support_kind != DS4_SUPPORT_NONE ||
         ds4_session_is_cpu(prefill_session) ||
         ds4_session_is_glm(prefill_session) ||
+        ds4_session_is_laguna(prefill_session) ||
         prefill_session->graph.ssd_streaming ||
         ds4_session_cancelled(prefill_session) ||
         getenv("DS4_METAL_GRAPH_DUMP_PREFIX") != NULL ||
@@ -68333,3 +68359,57 @@ int ds4_session_ctx(ds4_session *s) {
 int ds4_session_prefill_cap(ds4_session *s) {
     return s ? (int)s->prefill_cap : 0;
 }
+
+#ifdef DS4_TEST_HOOKS
+#ifndef DS4_NO_GPU
+/* Exercise the three graph-deletion guards with a zero-initialized fake
+ * session.  The sentinel GLM tensor makes an accidental Laguna postlude read
+ * fail loudly; the supported result never touches it or the generic graph. */
+bool ds4_test_laguna_graph_guard_routes(void) {
+    ds4_test_laguna_shape_scope shape_scope;
+    ds4_test_laguna_shape_scope_begin(&shape_scope);
+
+    ds4_engine engine;
+    memset(&engine, 0, sizeof(engine));
+    engine.backend = DS4_BACKEND_METAL;
+
+    ds4_session session;
+    memset(&session, 0, sizeof(session));
+    session.engine = &engine;
+    session.glm_graph.layer_kv_lora_cache[0] =
+        (ds4_gpu_tensor *)(uintptr_t)1;
+
+    const char *saved_kv = getenv("DS4_GLM_KV_DUMP");
+    char *saved_kv_copy = saved_kv ? ds4_strdup(saved_kv) : NULL;
+    const char *saved_logits = getenv("DS4_GLM_LOGIT_DUMP");
+    char *saved_logits_copy = saved_logits ? ds4_strdup(saved_logits) : NULL;
+    setenv("DS4_GLM_KV_DUMP", "/dev/null", 1);
+    unsetenv("DS4_GLM_LOGIT_DUMP");
+
+    const ds4_tokens prompt = { .v = NULL, .len = 1, .cap = 0 };
+    ds4_decode_item item = { .session = &session, .token = 0 };
+    ds4_session_sync_postlude(&session, &prompt, 0);
+    const bool sync_safe = !ds4_session_sync_glm_postlude_allowed(&session);
+    const bool argmax_safe = ds4_session_eval_argmax_uses_laguna_path(&session);
+    const bool mixed_rejected =
+        !ds4_sessions_eval_batch_with_prefill_metal_supported(
+            &item, 1, &session, &prompt);
+
+    if (saved_kv_copy) {
+        setenv("DS4_GLM_KV_DUMP", saved_kv_copy, 1);
+        free(saved_kv_copy);
+    } else {
+        unsetenv("DS4_GLM_KV_DUMP");
+    }
+    if (saved_logits_copy) {
+        setenv("DS4_GLM_LOGIT_DUMP", saved_logits_copy, 1);
+        free(saved_logits_copy);
+    } else {
+        unsetenv("DS4_GLM_LOGIT_DUMP");
+    }
+
+    ds4_test_laguna_shape_scope_end(&shape_scope);
+    return sync_safe && argmax_safe && mixed_rejected;
+}
+#endif
+#endif

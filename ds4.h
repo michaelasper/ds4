@@ -307,6 +307,11 @@ bool ds4_test_engine_close_workspace_lifecycle(void);
  * command batch when the caller has arranged a malformed Q8 or unavailable
  * output-head preflight. */
 int ds4_test_raw_graph_preflight_failure_state(int valid_output_shape);
+#ifndef DS4_NO_GPU
+/* Model-independent guard coverage for the Laguna session/graph routing
+ * checkpoint.  This does not open a model or allocate an inference graph. */
+bool ds4_test_laguna_graph_guard_routes(void);
+#endif
 #endif
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k);
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out);
