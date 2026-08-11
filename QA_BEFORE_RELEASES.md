@@ -74,8 +74,9 @@ focused targets that cover the changed code. At minimum:
 make test-metal-laguna
 ```
 
-Do not substitute `test-extended` for the default Laguna suite. It is a temporary
-transition aid and may exercise code scheduled for deletion.
+Do not substitute `test-extended` for the default Laguna suite. It adds useful
+developer coverage, but it does not replace the strict source, selector, CLI,
+and model-independent gates in `test-metal-laguna`.
 
 ## 3. Model-backed integration
 
