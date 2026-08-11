@@ -187,6 +187,105 @@ static void test_s21_model_profile(void) {
           "paired output tensors form an output head");
 }
 
+static char *test_read_source_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    const long length = ftell(fp);
+    if (length < 0) {
+        fclose(fp);
+        return NULL;
+    }
+    rewind(fp);
+    char *contents = malloc((size_t)length + 1u);
+    if (!contents) {
+        fclose(fp);
+        return NULL;
+    }
+    const size_t nread = fread(contents, 1u, (size_t)length, fp);
+    fclose(fp);
+    if (nread != (size_t)length) {
+        free(contents);
+        return NULL;
+    }
+    contents[length] = '\0';
+    return contents;
+}
+
+static char *test_read_repo_source(const char *path) {
+    char *contents = test_read_source_file(path);
+    if (!contents) {
+        char parent_path[256];
+        const int n = snprintf(parent_path, sizeof(parent_path), "../%s", path);
+        if (n >= 0 && (size_t)n < sizeof(parent_path)) {
+            contents = test_read_source_file(parent_path);
+        }
+    }
+    return contents;
+}
+
+static void test_weight_table_contract(void) {
+    char *engine = test_read_repo_source("ds4.c");
+    char *model_header = test_read_repo_source("lgn_model.h");
+    CHECK(engine != NULL, "weight-table contract can read ds4.c");
+    CHECK(model_header != NULL, "weight-table contract can read lgn_model.h");
+    if (!engine || !model_header) {
+        free(engine);
+        free(model_header);
+        return;
+    }
+
+    static const char *const removed_fields[] = {
+        "hc_attn_fn", "hc_attn_scale", "hc_attn_base",
+        "attn_q_a", "attn_q_a_norm", "attn_q_b", "attn_kv",
+        "attn_kv_a_mqa", "attn_kv_a_norm", "attn_k_b", "attn_v_b",
+        "attn_sinks", "attn_output_a", "attn_output_b",
+        "attn_compressor_ape", "attn_compressor_kv",
+        "attn_compressor_gate", "attn_compressor_norm",
+        "indexer_attn_q_b", "indexer_attn_k", "indexer_k_norm",
+        "indexer_k_norm_b", "indexer_proj", "indexer_compressor_ape",
+        "indexer_compressor_kv", "indexer_compressor_gate",
+        "indexer_compressor_norm", "hc_ffn_fn", "hc_ffn_scale",
+        "hc_ffn_base", "ffn_gate_tid2eid", "nextn_eh_proj",
+        "nextn_enorm", "nextn_hnorm", "nextn_shared_head_norm",
+        "output_hc_base", "output_hc_fn", "output_hc_scale",
+    };
+    for (size_t i = 0; i < sizeof(removed_fields) / sizeof(removed_fields[0]); i++) {
+        CHECK(strstr(model_header, removed_fields[i]) == NULL,
+              "removed Laguna weight-table field stays absent");
+        CHECK(strstr(engine, removed_fields[i]) == NULL,
+              "removed Laguna weight-table field has no engine reference");
+    }
+
+    CHECK(strstr(model_header, "LGN_MODEL_MAX_LAYER = 48u") != NULL,
+          "private model tables use the 48-layer capacity");
+    CHECK(strstr(model_header, "LGN_MODEL_MAX_LAYER = 79u") == NULL,
+          "legacy 79-layer model capacity stays absent");
+    CHECK(strstr(engine, "DS4_MAX_LAYER            = 48") != NULL,
+          "engine layer capacity matches Laguna");
+    CHECK(strstr(engine, "DS4_MAX_EXPERT           = 256") != NULL,
+          "engine expert capacity matches Laguna");
+    CHECK(strstr(engine, "DS4_MAX_EXPERT_USED      = 10") != NULL,
+          "selected-expert capacity remains ten");
+    CHECK(strstr(engine, "DS4_MAX_LAYER            = 79") == NULL &&
+              strstr(engine, "DS4_MAX_EXPERT           = 384") == NULL,
+          "legacy engine capacities stay absent");
+    CHECK(sizeof(((ds4_weights *)0)->layer) /
+              sizeof(((ds4_weights *)0)->layer[0]) == LGN_LAYER_COUNT,
+          "runtime weight table has one slot per Laguna layer");
+    CHECK(lgn_model_shape()->n_layer == LGN_LAYER_COUNT &&
+              lgn_model_shape()->n_expert == 256u,
+          "runtime model profile matches contracted capacities");
+    CHECK(strstr(engine, "return lgn_weights_have_output_head(w);") != NULL,
+          "engine output-head check uses the Laguna contract");
+
+    free(engine);
+    free(model_header);
+}
+
 static bool synthetic_tensor_add(ds4_tensor *tensors,
                                  size_t *n_tensors,
                                  size_t capacity,
@@ -1363,6 +1462,7 @@ int main(void) {
     test_ladder_formatter();
     test_s21_topology();
     test_s21_model_profile();
+    test_weight_table_contract();
     test_whole_model_weight_bind();
     test_model_admission();
     test_dflash_profile_and_binding();

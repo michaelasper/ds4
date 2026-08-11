@@ -908,11 +908,14 @@ static void lgn_weights_bind_layer(ds4_layer_weights *l,
 void lgn_weights_bind(ds4_weights *w,
                       const ds4_model *m) {
     const uint32_t executable_layers = LGN_SHAPE_LAGUNA_S21.n_layer;
+    if (executable_layers != LGN_MODEL_MAX_LAYER) {
+        lgn_die("Laguna weight-table capacity does not match the immutable profile");
+    }
     memset(w, 0, sizeof(*w));
 
-    /* Laguna uses a whole-model mmap.  Every executable tensor, including
-     * token embeddings and the output head, is bound up front; partial layer
-     * loading is intentionally not part of the product contract. */
+    /* Laguna uses a whole-model mmap.  Every tensor in the exact 48-layer
+     * profile, including token embeddings and the output head, is bound up
+     * front; partial layer loading is not part of the product contract. */
     w->token_embd = lgn_required_tensor(m, "token_embd.weight");
     lgn_weights_bind_output(w, m, true, false);
     for (uint32_t il = 0; il < executable_layers; il++) {

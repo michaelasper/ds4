@@ -18,9 +18,8 @@
 #include "lgn.h"
 
 enum {
-    /* Retain the old ds4 weight-table capacity in this private facade while
-     * Laguna executes only its fixed 48-layer profile. */
-    LGN_MODEL_MAX_LAYER = 79u,
+    /* The private weight/cache tables match Laguna S2.1's immutable profile. */
+    LGN_MODEL_MAX_LAYER = 48u,
     LGN_MODEL_MAX_DIMS  = 8u,
 };
 
@@ -181,9 +180,6 @@ typedef struct ds4_model {
 } ds4_model;
 
 typedef struct ds4_layer_weights {
-    ds4_tensor *hc_attn_fn;
-    ds4_tensor *hc_attn_scale;
-    ds4_tensor *hc_attn_base;
     ds4_tensor *attn_norm;
     ds4_tensor *attn_q;
     ds4_tensor *attn_k;
@@ -191,36 +187,8 @@ typedef struct ds4_layer_weights {
     ds4_tensor *attn_gate;
     ds4_tensor *attn_q_norm;
     ds4_tensor *attn_k_norm;
-    ds4_tensor *attn_q_a;
-    ds4_tensor *attn_q_a_norm;
-    ds4_tensor *attn_q_b;
-    ds4_tensor *attn_kv;
-    ds4_tensor *attn_kv_a_mqa;
-    ds4_tensor *attn_kv_a_norm;
-    ds4_tensor *attn_k_b;
-    ds4_tensor *attn_v_b;
-    ds4_tensor *attn_sinks;
     ds4_tensor *attn_output;
-    ds4_tensor *attn_output_a;
-    ds4_tensor *attn_output_b;
-    ds4_tensor *attn_compressor_ape;
-    ds4_tensor *attn_compressor_kv;
-    ds4_tensor *attn_compressor_gate;
-    ds4_tensor *attn_compressor_norm;
-    ds4_tensor *indexer_attn_q_b;
-    ds4_tensor *indexer_attn_k;
-    ds4_tensor *indexer_k_norm;
-    ds4_tensor *indexer_k_norm_b;
-    ds4_tensor *indexer_proj;
-    ds4_tensor *indexer_compressor_ape;
-    ds4_tensor *indexer_compressor_kv;
-    ds4_tensor *indexer_compressor_gate;
-    ds4_tensor *indexer_compressor_norm;
-    ds4_tensor *hc_ffn_fn;
-    ds4_tensor *hc_ffn_scale;
-    ds4_tensor *hc_ffn_base;
     ds4_tensor *ffn_norm;
-    ds4_tensor *ffn_gate_tid2eid;
     ds4_tensor *ffn_gate;
     ds4_tensor *ffn_up;
     ds4_tensor *ffn_down;
@@ -232,17 +200,10 @@ typedef struct ds4_layer_weights {
     ds4_tensor *ffn_gate_shexp;
     ds4_tensor *ffn_up_shexp;
     ds4_tensor *ffn_down_shexp;
-    ds4_tensor *nextn_eh_proj;
-    ds4_tensor *nextn_enorm;
-    ds4_tensor *nextn_hnorm;
-    ds4_tensor *nextn_shared_head_norm;
 } ds4_layer_weights;
 
 typedef struct ds4_weights {
     ds4_tensor *token_embd;
-    ds4_tensor *output_hc_base;
-    ds4_tensor *output_hc_fn;
-    ds4_tensor *output_hc_scale;
     ds4_tensor *output_norm;
     ds4_tensor *output;
     ds4_layer_weights layer[LGN_MODEL_MAX_LAYER];

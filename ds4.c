@@ -1,12 +1,11 @@
 /* =========================================================================
- * ds4.c - DeepSeek V4 inference engine.
+ * ds4.c - Laguna inference engine.
  * =========================================================================
  *
  * This file is deliberately vertical: it owns GGUF loading, the fixed
- * DeepSeek V4 tensor layouts, CPU reference kernels, the whole-model Metal
- * graph driver, and tokenizer wiring.  Model shape selection is intentionally
- * narrow: validation accepts the known Flash and Pro layouts and fails early
- * for anything else.
+ * Laguna tensor layouts, CPU reference kernels, the whole-model Metal graph
+ * driver, and tokenizer wiring.  Model shape selection is intentionally
+ * narrow: validation accepts only the immutable Laguna S2.1 profile.
  *
  * Loading is mmap based.  The loader parses only the GGUF header, metadata
  * table, and tensor directory.  Tensor data stays in the kernel page cache
@@ -80,13 +79,13 @@ static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
  * =========================================================================
  *
  * The weight binder and metadata validator admit one Laguna S2.1 profile.
- * Arrays retain the historical maximum dimensions so tensor/layout capacity
- * and serialized interfaces remain unchanged during the transition.
+ * Private table capacities match that immutable profile; serialized
+ * interfaces remain unchanged during the transition.
  */
 
 enum {
-    DS4_MAX_LAYER            = 79,
-    DS4_MAX_EXPERT           = 384,
+    DS4_MAX_LAYER            = 48,
+    DS4_MAX_EXPERT           = 256,
     DS4_MAX_EXPERT_USED      = 10,
 };
 
@@ -1748,7 +1747,7 @@ static DS4_MAYBE_UNUSED void ds4_vec_dot_iq2_xxs_q8_K(int n, float *s, const blo
  *
  * The GGUF tensor directory is converted into a DS4-specific pointer table.
  * After this section, the rest of the program addresses tensors by semantic
- * fields such as layer->attn_q_a or layer->ffn_gate_exps rather than by string
+ * fields such as layer->attn_q or layer->ffn_gate_exps rather than by string
  * lookup.  Shape validation is intentionally strict.
  */
 
@@ -1783,15 +1782,7 @@ static double ds4_bytes_to_gib(uint64_t bytes) {
 }
 
 static bool weights_have_output_head(const ds4_weights *w) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        return lgn_weights_have_output_head(w);
-    }
-    return w &&
-           w->output_hc_base &&
-           w->output_hc_fn &&
-           w->output_hc_scale &&
-           w->output_norm &&
-           w->output;
+    return lgn_weights_have_output_head(w);
 }
 
 static void weights_validate_laguna_layout(
@@ -13045,8 +13036,8 @@ bool ds4_test_laguna_session_routes(void) {
  * that base storage teardown leaves extension/diagnostic state alone; the
  * wrapper leg proves the complete owner still gets an idempotent full free. */
 bool ds4_test_laguna_graph_lifecycle(void) {
-    _Static_assert(sizeof(lgn_gpu_graph) == 3248u,
-                   "Laguna graph layout changed on Apple");
+    _Static_assert(sizeof(lgn_gpu_graph) == 2128u,
+                   "Laguna graph layout changed after capacity contraction");
     const ds4_shape saved_shape = g_ds4_shape;
     g_ds4_shape = *lgn_model_shape();
 
