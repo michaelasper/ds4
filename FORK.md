@@ -43,6 +43,10 @@ The refactor branch already:
   accounting, and allocation/free lifecycle in the private `lgn_graph.c` /
   `lgn_graph.h` module while scheduler-owned speculative/evidence state remains
   in `ds4.c`;
+- isolates the complete DFlash support-graph tensor owner and its fixed
+  feature/draft/KV allocation lifecycle in the private `lgn_dflash_graph.c` /
+  `lgn_dflash_graph.h` module while command scheduling and target capture stay
+  in `ds4.c`;
 - enforces engine-outlives-session ownership and tears down command buffers,
   shared Metal tensors, backend caches, host aliases, and model mappings in
   lifetime-safe order, including partial initialization and GPU-error paths;

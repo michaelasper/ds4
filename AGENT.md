@@ -52,6 +52,8 @@ requirements.
   tensor binding, and BF16 shadow-map conversion.
 - `lgn_graph.c` / `lgn_graph.h`: private Laguna target-graph storage owner for
   base Metal scratch, persistent KV caches, and their allocation lifecycle.
+- `lgn_dflash_graph.c` / `lgn_dflash_graph.h`: private DFlash support-graph
+  storage owner for feature history, draft scratch, and six-layer KV caches.
 - `ds4.c`: transitional tokenizer, Metal graph scheduling, sessions, and
   disk-cache payload serialisation; move supported Laguna code into `lgn_*`
   modules as obsolete model/backend paths are deleted.
