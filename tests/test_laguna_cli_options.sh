@@ -62,6 +62,7 @@ assert_help_contract() {
         "--ssd-streaming-cache-experts" "--ssd-streaming-full-layers"
         "--ssd-streaming-preload-experts" "--simulate-used-memory"
         "--prefill-chunk" "--power"
+        "--expert-profile"
         "--dir-steering-file" "--dir-steering-ffn" "--dir-steering-attn"
         "--mtp" "--mtp-draft" "--mtp-margin" "--glm-mtp"
         "--glm-mtp-timing" "--dspark" "--dspark-confidence"
@@ -172,6 +173,7 @@ unsupported=(
     "--simulate-used-memory 1GB"
     "--prefill-chunk 128"
     "--power 50"
+    "--expert-profile profile.json"
     "--dir-steering-file direction.bin"
     "--dir-steering-ffn 1"
     "--dir-steering-attn 1"
@@ -217,6 +219,38 @@ for spec_name in ds4 ds4-server; do
             sed -n '1,40p' "$out" >&2
         fi
     done
+done
+
+for env_name in DS4_EXPERT_PROFILE DS4_EXPERT_HOTLIST; do
+    out="$test_tmp_dir/ds4.${env_name}.negative"
+    if env "$env_name=/tmp/laguna-profile-output" \
+        ./ds4 -m /tmp/laguna-missing-model.gguf >"$out" 2>&1; then
+        fail "ds4 accepts inert profile environment: $env_name"
+        continue
+    fi
+    if grep -Fq -- "expert profile/hotlist is unsupported" "$out" &&
+       ! grep -Eq -- "failed to open|unsupported model|architecture" "$out"; then
+        pass "ds4 rejects inert profile environment before model I/O: $env_name"
+    else
+        fail "ds4 performs model work before rejecting profile environment: $env_name"
+        sed -n '1,40p' "$out" >&2
+    fi
+done
+
+for spec_name in ds4-bench ds4-eval; do
+    bin=./$spec_name
+    out="$test_tmp_dir/${spec_name}.expert-profile.negative"
+    if "$bin" --expert-profile profile.json -m /dev/null >"$out" 2>&1; then
+        fail "$spec_name accepts retired --expert-profile"
+        continue
+    fi
+    if grep -Fq -- "$spec_name: unsupported option --expert-profile" "$out" &&
+       ! grep -Eq -- "failed to open|unsupported model|architecture" "$out"; then
+        pass "$spec_name rejects --expert-profile before model work"
+    else
+        fail "$spec_name gives non-product diagnostic for --expert-profile"
+        sed -n '1,40p' "$out" >&2
+    fi
 done
 
 # Legacy raw diagnostics must fail during CLI parsing, before a model is

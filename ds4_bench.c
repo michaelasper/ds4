@@ -30,7 +30,6 @@ typedef struct {
     const char *chat_prompt_path;
     const char *system;
     const char *csv_path;
-    const char *expert_profile_path;
     ds4_backend backend;
     int threads;
     int ctx_start;
@@ -125,6 +124,7 @@ static bool bench_option_is_unsupported(const char *arg) {
         "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
         "--ssd-streaming-preload-experts", "--simulate-used-memory",
         "--prefill-chunk", "--power",
+        "--expert-profile",
         "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
         "--mtp", "--mtp-draft", "--mtp-margin", "--glm-mtp",
         "--glm-mtp-timing", "--dspark", "--dspark-confidence",
@@ -250,8 +250,6 @@ static bench_config parse_options(int argc, char **argv) {
             c.dump_frontier_logits_dir = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--dump-frontier-logits-f32-dir")) {
             c.dump_frontier_logits_f32_dir = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--expert-profile")) {
-            c.expert_profile_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.threads = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--backend")) {
@@ -547,7 +545,6 @@ int main(int argc, char **argv) {
         .context_size = cfg.ctx_alloc,
         .warm_weights = cfg.warm_weights,
         .quality = cfg.quality,
-        .expert_profile_path = cfg.expert_profile_path,
     };
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &opt) != 0) {

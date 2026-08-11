@@ -52,7 +52,6 @@ METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
 CORE_OBJS = ds4.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o lgn_dflash_exec.o ds4_ssd.o ds4_metal.o
 
 DS4_TEST_METAL_OBJ := ds4_metal_test_hooks.o
-SSD_STREAMING_HOOK_TEST := tests/test_ssd_streaming_hooks
 DS4_TEST_DS4_OBJ := ds4_test_hooks.o
 TEST_CORE_OBJS := $(filter-out ds4.o ds4_metal.o,$(CORE_OBJS)) $(DS4_TEST_DS4_OBJ) $(DS4_TEST_METAL_OBJ)
 
@@ -242,15 +241,6 @@ ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h
 ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-tests/test_ssd_streaming_hooks.o: tests/test_ssd_streaming_hooks.c
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
-
-ds4_streaming_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
-	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
-
-tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o lgn_dflash_exec.o ds4_help.o ds4_kvstore.o rax.o ds4_ssd.o ds4_metal_test_hooks.o | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
-
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
 	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
 
@@ -258,17 +248,18 @@ test-engine-lifecycle: ds4_test
 	./ds4_test --engine-lifecycle
 
 test-legacy: test-lgn ds4-eval q4k-dot-test mxfp4-dot-test \
-	$(SAMPLING_TEST) $(METAL_EXACT_TEST) $(SSD_STREAMING_HOOK_TEST) ds4 ds4-server ds4-bench test-engine-lifecycle
+	$(SAMPLING_TEST) $(METAL_EXACT_TEST) ds4 ds4-server ds4-bench test-engine-lifecycle
 	./ds4-eval --self-test-extractors
-	$(if $(SSD_STREAMING_HOOK_TEST),./$(SSD_STREAMING_HOOK_TEST),:)
 	./tests/test_sampling
 
-test-laguna-cli-options: ds4 ds4-server tests/test_laguna_cli_options.sh
+test-laguna-cli-options: ds4 ds4-server ds4-bench ds4-eval tests/test_laguna_cli_options.sh
 	./tests/test_laguna_cli_options.sh
 
-test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options test-engine-lifecycle ds4 ds4-server ds4-bench ds4-eval
+test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options test-engine-lifecycle $(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-eval
 	@set -eu; \
 	./ds4_test --laguna-architecture --laguna-selector-parser --laguna-session-routes --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --laguna-dflash-exec --laguna-dflash-command-ownership --server; \
+	./ds4_test --dflash-payload-lifecycle; \
+	./tests/test_sampling; \
 	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
 	./ds4_test --laguna-metal-core
 
@@ -313,4 +304,4 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 	./tests/test_mxfp4_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o ds4_streaming_test_hooks.o tests/test_ssd_streaming_hooks tests/test_ssd_streaming_hooks.o quality/score_official quality/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_metal_session_batch tests/test_sampling tests/*.o *.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o quality/score_official quality/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_metal_session_batch tests/test_sampling tests/*.o *.o

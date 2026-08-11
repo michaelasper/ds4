@@ -276,7 +276,6 @@ static void test_laguna_dflash_exec(void) {
 
 /* DFlash restore invalidation is a GPU-only contract.  Keep both the hook
  * declaration and its explicit test entry out of DS4_NO_GPU binaries. */
-bool ds4_test_dspark_cache_window_crop(void);
 bool ds4_test_dflash_payload_invalidation(void);
 
 static ds4_engine *test_engine_fast;
@@ -955,10 +954,6 @@ static void test_metal_store_raw_kv_batch_wrap(void) {
 
     ds4_gpu_tensor_free(kv);
     ds4_gpu_tensor_free(raw);
-}
-
-static void test_dspark_cache_window_crop(void) {
-    TEST_ASSERT(ds4_test_dspark_cache_window_crop());
 }
 
 static void test_laguna_decode_ladder_parser(void) {
@@ -13899,7 +13894,6 @@ static void test_metal_kernel_group(void) {
     test_metal_q8_0_prefill_matmul();
     test_metal_pack_slot_rows_f32();
     test_metal_store_raw_kv_batch_wrap();
-    test_dspark_cache_window_crop();
     test_metal_q8_0_decode_pair_exact();
 #if defined(__APPLE__)
     test_metal_q8_decode_lifecycle_snapshot();
@@ -14701,7 +14695,9 @@ static void test_engine_lifecycle(void) {
     TEST_ASSERT(ds4_test_engine_session_lifecycle());
     TEST_ASSERT(ds4_test_engine_close_order());
 #ifndef DS4_NO_GPU
-    TEST_ASSERT(ds4_test_engine_close_workspace_lifecycle());
+    #if defined(__APPLE__)
+    TEST_ASSERT(ds4_test_engine_close_drain_failure());
+    #endif
     TEST_ASSERT(ds4_gpu_test_lifecycle_cleanup());
 #endif
 }

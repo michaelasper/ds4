@@ -1469,6 +1469,7 @@ static bool eval_option_is_unsupported(const char *arg) {
         "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
         "--ssd-streaming-preload-experts", "--simulate-used-memory",
         "--prefill-chunk", "--power",
+        "--expert-profile",
         "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
         "--mtp", "--mtp-draft", "--mtp-margin", "--glm-mtp",
         "--glm-mtp-timing", "--dspark", "--dspark-confidence",

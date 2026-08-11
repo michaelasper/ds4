@@ -160,9 +160,6 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
         if (tool != DS4_HELP_BENCH) print_laguna_dflash_options(fp, c);
         opt(fp, c, "--quality", "Prefer exact kernels where faster approximate paths exist.");
         opt(fp, c, "--warm-weights", "Touch mapped tensor pages at startup to reduce first-use stalls.");
-        if (tool == DS4_HELP_DS4 || tool == DS4_HELP_BENCH) {
-            opt(fp, c, "--expert-profile FILE", "Metal-only: write routed expert locality/cache simulation JSON.");
-        }
     }
     if (!full && (tool == DS4_HELP_DS4 || tool == DS4_HELP_SERVER)) {
         print_laguna_dflash_options(fp, c);
@@ -212,7 +209,6 @@ static void print_cli_diagnostics(FILE *fp, const help_colors *c) {
     opt(fp, c, "--dump-logprobs FILE", "Write greedy continuation top-logprobs as JSON.");
     opt(fp, c, "--logprobs-top-k N", "Alternatives stored by --dump-logprobs. Default: 20");
     opt(fp, c, "--decode-consistency N", "Compare N-token decode logits with a fresh full prefill.");
-    opt(fp, c, "--expert-profile FILE", "Metal-only: write routed expert locality/cache simulation JSON.");
     opt(fp, c, "--perplexity-file FILE", "Score raw text with teacher-forced NLL.");
     fputc('\n', fp);
 }

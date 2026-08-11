@@ -12252,6 +12252,7 @@ static bool server_option_is_unsupported(const char *arg) {
         "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
         "--ssd-streaming-preload-experts", "--simulate-used-memory",
         "--prefill-chunk", "--power",
+        "--expert-profile",
         "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
         "--mtp", "--mtp-draft", "--mtp-margin", "--glm-mtp",
         "--glm-mtp-timing", "--dspark", "--dspark-confidence",
@@ -12427,7 +12428,6 @@ int main(int argc, char **argv) {
     }
 
     cfg.engine.context_size = cfg.ctx_size;
-    cfg.engine.share_session_prefill_workspace = cfg.batched_sessions > 0;
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &cfg.engine) != 0) {
         return 1;

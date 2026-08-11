@@ -82,7 +82,6 @@ typedef struct {
     int dflash_draft_tokens;
     float dflash_p_min;
     const char *directional_steering_file;
-    const char *expert_profile_path;
     float directional_steering_attn;
     float directional_steering_ffn;
     int power_percent;
@@ -98,8 +97,6 @@ typedef struct {
     bool ssd_streaming_cold;
     bool ssd_streaming_full_layers_set;
     bool inspect_only;
-    /* Server batch mode serializes execution and can share prefill scratch. */
-    bool share_session_prefill_workspace;
     bool load_slice;
     uint32_t load_layer_start;
     uint32_t load_layer_end;
@@ -143,6 +140,7 @@ void ds4_engine_summary(ds4_engine *e);
 int ds4_engine_vocab_size(ds4_engine *e);
 uint32_t ds4_engine_prefill_chunk(ds4_engine *e);
 int ds4_engine_power(ds4_engine *e);
+/* Laguna currently accepts only the full-power setting (100). */
 int ds4_engine_set_power(ds4_engine *e, int power_percent);
 const char *ds4_engine_model_name(ds4_engine *e);
 int ds4_engine_layer_count(ds4_engine *e);
@@ -278,7 +276,9 @@ int ds4_test_logprob_cache_probe(void);
 int ds4_test_sample_arena_lifecycle(void);
 bool ds4_test_engine_session_lifecycle(void);
 bool ds4_test_engine_close_order(void);
-bool ds4_test_engine_close_workspace_lifecycle(void);
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+bool ds4_test_engine_close_drain_failure(void);
+#endif
 #ifndef DS4_NO_GPU
 /* Model-independent session-route contract: Laguna argmax uses the Laguna
  * evaluator and mixed raw-graph prefill is rejected before graph access. */

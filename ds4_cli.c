@@ -123,6 +123,7 @@ static bool cli_option_is_unsupported(const char *arg) {
         "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
         "--ssd-streaming-preload-experts", "--simulate-used-memory",
         "--prefill-chunk", "--power",
+        "--expert-profile",
         "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
         "--mtp", "--mtp-draft", "--mtp-margin", "--glm-mtp",
         "--glm-mtp-timing", "--dspark", "--dspark-confidence",
@@ -1659,8 +1660,6 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.seed = parse_u64(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--quality")) {
             c.engine.quality = true;
-        } else if (!strcmp(arg, "--expert-profile")) {
-            c.engine.expert_profile_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--backend")) {
