@@ -43,6 +43,7 @@
 #include "ds4.h"
 #include "lgn.h"
 #include "lgn_dflash.h"
+#include "lgn_dflash_graph.h"
 #include "lgn_graph.h"
 #include "lgn_model.h"
 
@@ -46788,42 +46789,6 @@ typedef struct {
     uint32_t n_rows;
 } ds4_laguna_feature_capture;
 
-typedef struct {
-    uint32_t feature_cap;
-    uint32_t block_cap;
-    uint32_t cache_cap;
-    uint64_t scratch_bytes;
-    uint64_t kv_bytes;
-
-    ds4_gpu_tensor *features;
-    ds4_gpu_tensor *encoder;
-    ds4_gpu_tensor *encoder_norm;
-    ds4_gpu_tensor *norm;
-    ds4_gpu_tensor *tokens;
-    ds4_gpu_tensor *cur;
-    ds4_gpu_tensor *next;
-    ds4_gpu_tensor *q;
-    ds4_gpu_tensor *k;
-    ds4_gpu_tensor *v;
-    ds4_gpu_tensor *gate;
-    ds4_gpu_tensor *heads;
-    ds4_gpu_tensor *attn_out;
-    ds4_gpu_tensor *after_attn;
-    ds4_gpu_tensor *ffn_norm;
-    ds4_gpu_tensor *ffn_gate;
-    ds4_gpu_tensor *ffn_up;
-    ds4_gpu_tensor *ffn_mid;
-    ds4_gpu_tensor *ffn_out;
-    ds4_gpu_tensor *staged_key;
-    ds4_gpu_tensor *staged_value;
-    ds4_gpu_tensor *output_norm;
-    ds4_gpu_tensor *logits;
-    ds4_gpu_tensor *argmax;
-    ds4_gpu_tensor *probabilities;
-    ds4_gpu_tensor *key_cache[DS4_DFLASH_N_LAYER];
-    ds4_gpu_tensor *value_cache[DS4_DFLASH_N_LAYER];
-} ds4_dflash_gpu_graph;
-
 #ifdef __APPLE__
 static void laguna_graph_report_q8_lmhead_screen(
         const ds4_laguna_gpu_graph *g);
@@ -47869,42 +47834,7 @@ static bool laguna_graph_router_decode_rows(
 }
 
 static void dflash_graph_free(ds4_dflash_gpu_graph *g) {
-    if (!g) return;
-#define DS4_DFLASH_FREE(name) do { \
-        ds4_gpu_tensor_free(g->name); \
-        g->name = NULL; \
-    } while (0)
-    DS4_DFLASH_FREE(features);
-    DS4_DFLASH_FREE(encoder);
-    DS4_DFLASH_FREE(encoder_norm);
-    DS4_DFLASH_FREE(norm);
-    DS4_DFLASH_FREE(tokens);
-    DS4_DFLASH_FREE(cur);
-    DS4_DFLASH_FREE(next);
-    DS4_DFLASH_FREE(q);
-    DS4_DFLASH_FREE(k);
-    DS4_DFLASH_FREE(v);
-    DS4_DFLASH_FREE(gate);
-    DS4_DFLASH_FREE(heads);
-    DS4_DFLASH_FREE(attn_out);
-    DS4_DFLASH_FREE(after_attn);
-    DS4_DFLASH_FREE(ffn_norm);
-    DS4_DFLASH_FREE(ffn_gate);
-    DS4_DFLASH_FREE(ffn_up);
-    DS4_DFLASH_FREE(ffn_mid);
-    DS4_DFLASH_FREE(ffn_out);
-    DS4_DFLASH_FREE(staged_key);
-    DS4_DFLASH_FREE(staged_value);
-    DS4_DFLASH_FREE(output_norm);
-    DS4_DFLASH_FREE(logits);
-    DS4_DFLASH_FREE(argmax);
-    DS4_DFLASH_FREE(probabilities);
-#undef DS4_DFLASH_FREE
-    for (uint32_t il = 0; il < DS4_DFLASH_N_LAYER; il++) {
-        ds4_gpu_tensor_free(g->key_cache[il]);
-        ds4_gpu_tensor_free(g->value_cache[il]);
-    }
-    memset(g, 0, sizeof(*g));
+    lgn_dflash_graph_free(g);
 }
 
 static bool dflash_graph_alloc(ds4_dflash_gpu_graph *g) {
@@ -47915,80 +47845,7 @@ static bool dflash_graph_alloc(ds4_dflash_gpu_graph *g) {
                                          NULL, 0)) return false;
 #endif
     memset(g, 0, sizeof(*g));
-    g->feature_cap = DS4_DFLASH_CACHE_CAP;
-    g->block_cap = DS4_DFLASH_BLOCK_SIZE;
-    g->cache_cap = DS4_DFLASH_CACHE_CAP;
-
-    const uint64_t f32 = sizeof(float);
-    const uint64_t embd = DS4_SHAPE_LAGUNA_S21.n_embd;
-    const uint64_t q_dim =
-        (uint64_t)DS4_SHAPE_LAGUNA_S21.n_head *
-        DS4_SHAPE_LAGUNA_S21.n_head_dim;
-    const uint64_t kv_dim =
-        (uint64_t)DS4_SHAPE_LAGUNA_S21.n_head_kv *
-        DS4_SHAPE_LAGUNA_S21.n_head_dim;
-    const uint64_t ff = DS4_SHAPE_LAGUNA_S21.n_ff_dense;
-    const uint64_t feature_rows = g->feature_cap;
-    const uint64_t block_rows = g->block_cap;
-
-#define DS4_DFLASH_ALLOC(name, bytes) do { \
-        const uint64_t ds4_dflash_bytes_ = (uint64_t)(bytes); \
-        g->name = ds4_gpu_tensor_alloc(ds4_dflash_bytes_); \
-        if (!g->name) goto fail; \
-        g->scratch_bytes += ds4_dflash_bytes_; \
-    } while (0)
-    DS4_DFLASH_ALLOC(features,
-                     feature_rows * DS4_DFLASH_N_AUX * embd * f32);
-    DS4_DFLASH_ALLOC(encoder, feature_rows * embd * f32);
-    DS4_DFLASH_ALLOC(encoder_norm, feature_rows * embd * f32);
-    DS4_DFLASH_ALLOC(norm, feature_rows * embd * f32);
-    DS4_DFLASH_ALLOC(tokens, block_rows * sizeof(uint32_t));
-    DS4_DFLASH_ALLOC(cur, block_rows * embd * f32);
-    DS4_DFLASH_ALLOC(next, block_rows * embd * f32);
-    DS4_DFLASH_ALLOC(q, block_rows * q_dim * f32);
-    DS4_DFLASH_ALLOC(k, feature_rows * kv_dim * f32);
-    DS4_DFLASH_ALLOC(v, feature_rows * kv_dim * f32);
-    DS4_DFLASH_ALLOC(gate,
-                     block_rows * DS4_SHAPE_LAGUNA_S21.n_head * f32);
-    DS4_DFLASH_ALLOC(heads, block_rows * q_dim * f32);
-    DS4_DFLASH_ALLOC(attn_out, block_rows * embd * f32);
-    DS4_DFLASH_ALLOC(after_attn, block_rows * embd * f32);
-    DS4_DFLASH_ALLOC(ffn_norm, block_rows * embd * f32);
-    DS4_DFLASH_ALLOC(ffn_gate, block_rows * ff * f32);
-    DS4_DFLASH_ALLOC(ffn_up, block_rows * ff * f32);
-    DS4_DFLASH_ALLOC(ffn_mid, block_rows * ff * f32);
-    DS4_DFLASH_ALLOC(ffn_out, block_rows * embd * f32);
-    DS4_DFLASH_ALLOC(staged_key,
-                     block_rows * kv_dim * sizeof(uint16_t));
-    DS4_DFLASH_ALLOC(staged_value,
-                     block_rows * kv_dim * sizeof(uint16_t));
-    DS4_DFLASH_ALLOC(output_norm, block_rows * embd * f32);
-    DS4_DFLASH_ALLOC(logits, block_rows * DS4_N_VOCAB * f32);
-    DS4_DFLASH_ALLOC(argmax, block_rows * sizeof(int32_t));
-    DS4_DFLASH_ALLOC(probabilities, block_rows * f32);
-#undef DS4_DFLASH_ALLOC
-
-    const uint64_t cache_bytes =
-        (uint64_t)g->cache_cap * kv_dim * sizeof(uint16_t);
-    for (uint32_t il = 0; il < DS4_DFLASH_N_LAYER; il++) {
-        g->key_cache[il] = ds4_gpu_tensor_alloc(cache_bytes);
-        g->value_cache[il] = ds4_gpu_tensor_alloc(cache_bytes);
-        if (!g->key_cache[il] || !g->value_cache[il]) {
-            goto fail;
-        }
-        g->kv_bytes += 2u * cache_bytes;
-    }
-
-    fprintf(stderr,
-            "ds4: DFlash graph: block=%u, history=%u, KV %.2f MiB, "
-            "scratch %.2f MiB\n",
-            g->block_cap,
-            g->cache_cap,
-            (double)g->kv_bytes / 1048576.0,
-            (double)g->scratch_bytes / 1048576.0);
-    return true;
-
-fail:
+    if (lgn_dflash_graph_alloc(g)) return true;
     fprintf(stderr, "ds4: failed to allocate DFlash GPU graph\n");
     dflash_graph_free(g);
     return false;
@@ -68271,6 +68128,149 @@ bool ds4_test_laguna_graph_lifecycle(void) {
     }
     laguna_graph_free(&wrapped);
     laguna_graph_free(&wrapped);
+    for (size_t i = 0; i < sizeof(wrapped); i++) {
+        if (((const unsigned char *)&wrapped)[i] != 0u) ok = false;
+    }
+
+    uint64_t handles_after = 0;
+    uint64_t bytes_after = 0;
+    ok = ok && ds4_gpu_test_tensor_tracking_state(&handles_after,
+                                                    &bytes_after) &&
+         handles_after == handles_before && bytes_after == bytes_before;
+    g_ds4_shape = saved_shape;
+    return ok;
+}
+
+/* Verify the DFlash module owns a complete storage-only owner while the
+ * ds4.c wrapper still owns admission and failure diagnostics. */
+bool ds4_test_laguna_dflash_graph_lifecycle(void) {
+    _Static_assert(sizeof(lgn_dflash_graph) == 328u,
+                   "DFlash graph layout changed on Apple");
+    const ds4_shape saved_shape = g_ds4_shape;
+    g_ds4_shape = *lgn_model_shape();
+    const lgn_dflash_profile *profile = lgn_dflash_profile_get();
+
+    uint64_t handles_before = 0;
+    uint64_t bytes_before = 0;
+    if (!profile ||
+        !ds4_gpu_test_tensor_tracking_state(&handles_before, &bytes_before)) {
+        g_ds4_shape = saved_shape;
+        return false;
+    }
+
+    bool ok = true;
+    lgn_dflash_graph partial = {0};
+    partial.key_cache[0] = ds4_gpu_tensor_alloc(16u);
+    if (!partial.key_cache[0]) ok = false;
+    lgn_dflash_graph_free(&partial);
+    lgn_dflash_graph_free(&partial);
+    for (size_t i = 0; i < sizeof(partial); i++) {
+        if (((const unsigned char *)&partial)[i] != 0u) ok = false;
+    }
+
+    lgn_dflash_graph direct = {0};
+    if (!lgn_dflash_graph_alloc(&direct) ||
+        direct.feature_cap != LGN_DFLASH_CACHE_CAP ||
+        direct.block_cap != LGN_DFLASH_BLOCK_SIZE ||
+        direct.cache_cap != LGN_DFLASH_CACHE_CAP) {
+        ok = false;
+    }
+#define LGN_DFLASH_TEST_REQUIRED(name) \
+    do { if (!direct.name) ok = false; } while (0)
+    LGN_DFLASH_TEST_REQUIRED(features);
+    LGN_DFLASH_TEST_REQUIRED(encoder);
+    LGN_DFLASH_TEST_REQUIRED(encoder_norm);
+    LGN_DFLASH_TEST_REQUIRED(norm);
+    LGN_DFLASH_TEST_REQUIRED(tokens);
+    LGN_DFLASH_TEST_REQUIRED(cur);
+    LGN_DFLASH_TEST_REQUIRED(next);
+    LGN_DFLASH_TEST_REQUIRED(q);
+    LGN_DFLASH_TEST_REQUIRED(k);
+    LGN_DFLASH_TEST_REQUIRED(v);
+    LGN_DFLASH_TEST_REQUIRED(gate);
+    LGN_DFLASH_TEST_REQUIRED(heads);
+    LGN_DFLASH_TEST_REQUIRED(attn_out);
+    LGN_DFLASH_TEST_REQUIRED(after_attn);
+    LGN_DFLASH_TEST_REQUIRED(ffn_norm);
+    LGN_DFLASH_TEST_REQUIRED(ffn_gate);
+    LGN_DFLASH_TEST_REQUIRED(ffn_up);
+    LGN_DFLASH_TEST_REQUIRED(ffn_mid);
+    LGN_DFLASH_TEST_REQUIRED(ffn_out);
+    LGN_DFLASH_TEST_REQUIRED(staged_key);
+    LGN_DFLASH_TEST_REQUIRED(staged_value);
+    LGN_DFLASH_TEST_REQUIRED(output_norm);
+    LGN_DFLASH_TEST_REQUIRED(logits);
+    LGN_DFLASH_TEST_REQUIRED(argmax);
+    LGN_DFLASH_TEST_REQUIRED(probabilities);
+#undef LGN_DFLASH_TEST_REQUIRED
+    uint64_t scratch_sum = 0;
+#define LGN_DFLASH_TEST_SUM(name) \
+    do { scratch_sum += ds4_gpu_tensor_bytes(direct.name); } while (0)
+    LGN_DFLASH_TEST_SUM(features);
+    LGN_DFLASH_TEST_SUM(encoder);
+    LGN_DFLASH_TEST_SUM(encoder_norm);
+    LGN_DFLASH_TEST_SUM(norm);
+    LGN_DFLASH_TEST_SUM(tokens);
+    LGN_DFLASH_TEST_SUM(cur);
+    LGN_DFLASH_TEST_SUM(next);
+    LGN_DFLASH_TEST_SUM(q);
+    LGN_DFLASH_TEST_SUM(k);
+    LGN_DFLASH_TEST_SUM(v);
+    LGN_DFLASH_TEST_SUM(gate);
+    LGN_DFLASH_TEST_SUM(heads);
+    LGN_DFLASH_TEST_SUM(attn_out);
+    LGN_DFLASH_TEST_SUM(after_attn);
+    LGN_DFLASH_TEST_SUM(ffn_norm);
+    LGN_DFLASH_TEST_SUM(ffn_gate);
+    LGN_DFLASH_TEST_SUM(ffn_up);
+    LGN_DFLASH_TEST_SUM(ffn_mid);
+    LGN_DFLASH_TEST_SUM(ffn_out);
+    LGN_DFLASH_TEST_SUM(staged_key);
+    LGN_DFLASH_TEST_SUM(staged_value);
+    LGN_DFLASH_TEST_SUM(output_norm);
+    LGN_DFLASH_TEST_SUM(logits);
+    LGN_DFLASH_TEST_SUM(argmax);
+    LGN_DFLASH_TEST_SUM(probabilities);
+#undef LGN_DFLASH_TEST_SUM
+    uint64_t kv_sum = 0;
+    for (uint32_t il = 0; il < LGN_DFLASH_N_LAYER; il++) {
+        if (!direct.key_cache[il] || !direct.value_cache[il]) ok = false;
+        kv_sum += ds4_gpu_tensor_bytes(direct.key_cache[il]);
+        kv_sum += ds4_gpu_tensor_bytes(direct.value_cache[il]);
+    }
+    if (direct.scratch_bytes != scratch_sum ||
+        direct.kv_bytes != kv_sum ||
+        direct.scratch_bytes == 0u || direct.kv_bytes == 0u ||
+        direct.features == NULL || direct.key_cache[0] == NULL ||
+        ds4_gpu_commands_active() != 0) {
+        ok = false;
+    }
+    lgn_dflash_graph_free(&direct);
+    lgn_dflash_graph_free(&direct);
+    for (size_t i = 0; i < sizeof(direct); i++) {
+        if (((const unsigned char *)&direct)[i] != 0u) ok = false;
+    }
+
+    ds4_dflash_gpu_graph wrapped = {0};
+    ds4_shape wrong_family = g_ds4_shape;
+    wrong_family.family = DS4_MODEL_FAMILY_DEEPSEEK4;
+    g_ds4_shape = wrong_family;
+    if (dflash_graph_alloc(&wrapped)) ok = false;
+    for (size_t i = 0; i < sizeof(wrapped); i++) {
+        if (((const unsigned char *)&wrapped)[i] != 0u) ok = false;
+    }
+    g_ds4_shape = *lgn_model_shape();
+    if (!dflash_graph_alloc(&wrapped) ||
+        wrapped.feature_cap != LGN_DFLASH_CACHE_CAP ||
+        wrapped.block_cap != LGN_DFLASH_BLOCK_SIZE ||
+        wrapped.cache_cap != LGN_DFLASH_CACHE_CAP ||
+        !wrapped.features || !wrapped.logits || !wrapped.argmax ||
+        !wrapped.probabilities || !wrapped.key_cache[0] ||
+        !wrapped.value_cache[LGN_DFLASH_N_LAYER - 1u]) {
+        ok = false;
+    }
+    dflash_graph_free(&wrapped);
+    dflash_graph_free(&wrapped);
     for (size_t i = 0; i < sizeof(wrapped); i++) {
         if (((const unsigned char *)&wrapped)[i] != 0u) ok = false;
     }

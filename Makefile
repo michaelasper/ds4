@@ -49,7 +49,7 @@ DS4_TEST_DFLASH ?=
 LAGUNA_TEST_MODEL ?=
 
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
-CORE_OBJS = ds4.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o ds4_ssd.o ds4_metal.o
+CORE_OBJS = ds4.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o ds4_ssd.o ds4_metal.o
 
 DS4_TEST_METAL_OBJ := ds4_metal_test_hooks.o
 SSD_STREAMING_HOOK_TEST := tests/test_ssd_streaming_hooks
@@ -179,7 +179,7 @@ tests/test_lgn: tests/test_lgn.o lgn.o lgn_model.o lgn_dflash.o
 test-lgn: tests/test_lgn
 	./tests/test_lgn
 
-ds4.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h
+ds4.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
 
 lgn.o: lgn.c lgn.h
@@ -193,6 +193,9 @@ lgn_dflash.o: lgn_dflash.c lgn_dflash.h lgn_model.h lgn.h
 
 lgn_graph.o: lgn_graph.c lgn_graph.h ds4_gpu.h lgn_model.h lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn_graph.c
+
+lgn_dflash_graph.o: lgn_dflash_graph.c lgn_dflash_graph.h lgn_dflash.h lgn_model.h ds4_gpu.h lgn.h
+	$(CC) $(CFLAGS) -c -o $@ lgn_dflash_graph.c
 
 ds4_ssd.o: ds4_ssd.c ds4_ssd.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_ssd.c
@@ -215,7 +218,7 @@ ds4_eval.o: ds4_eval.c ds4.h ds4_ssd.h ds4_help.h
 ds4_kvstore.o: ds4_kvstore.c ds4_kvstore.h ds4.h ds4_ssd.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_kvstore.c
 
-ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_gpu.h ds4_ssd.h ds4_help.h ds4_kvstore.h rax.h lgn.h lgn_graph.h
+ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_gpu.h ds4_ssd.h ds4_help.h ds4_kvstore.h rax.h lgn.h lgn_graph.h lgn_dflash_graph.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ tests/ds4_test.c
 
 rax.o: rax.c rax.h rax_malloc.h
@@ -230,19 +233,19 @@ ds4_metal.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -DDS4_TEST_HOOKS -c -o $@ ds4_metal.m
 
-ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h ds4_gpu_mgpu.h
+ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h ds4_gpu_mgpu.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h
+ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
 tests/test_ssd_streaming_hooks.o: tests/test_ssd_streaming_hooks.c
 	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
-ds4_streaming_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h
+ds4_streaming_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o ds4_help.o ds4_kvstore.o rax.o ds4_ssd.o ds4_metal_test_hooks.o | check-metal-sources
+tests/test_ssd_streaming_hooks: tests/test_ssd_streaming_hooks.o ds4_streaming_test_hooks.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o ds4_help.o ds4_kvstore.o rax.o ds4_ssd.o ds4_metal_test_hooks.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
@@ -262,7 +265,7 @@ test-laguna-cli-options: ds4 ds4-server tests/test_laguna_cli_options.sh
 
 test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options test-engine-lifecycle ds4 ds4-server ds4-bench ds4-eval
 	@set -eu; \
-	./ds4_test --laguna-architecture --laguna-selector-parser --laguna-graph-guards --laguna-graph-lifecycle --server; \
+	./ds4_test --laguna-architecture --laguna-selector-parser --laguna-graph-guards --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --server; \
 	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
 	./ds4_test --laguna-metal-core
 
