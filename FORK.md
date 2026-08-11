@@ -39,6 +39,9 @@ The refactor branch already:
 - isolates the retained DFlash support profile, metadata/layout validation,
   tensor binding, and parallel BF16 shadow-map conversion in the private
   `lgn_dflash.c` / `lgn_dflash.h` module;
+- enforces engine-outlives-session ownership and tears down command buffers,
+  shared Metal tensors, backend caches, host aliases, and model mappings in
+  lifetime-safe order, including partial initialization and GPU-error paths;
 - fixes the product name as **LagoonNebula** and the eventual repository name
   as **`lgn2`**, while deliberately postponing the mechanical identifier
   rename until unsupported implementation paths are gone;
