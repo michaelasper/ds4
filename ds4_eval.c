@@ -3753,10 +3753,10 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
         int token = -1;
         eval_think_close_kind close_kind = EVAL_THINK_CLOSE_NONE;
 
-        /* Benchmarks usually cap generation length, but DeepSeek can spend the
-         * entire budget in <think>.  This controller only acts while the model is
-         * still in thinking mode.  The soft limit is conservative: it accepts the
-         * model's own desire to end thinking when </think> is already near the
+        /* Benchmarks usually cap generation length, but long thinking runs can
+         * spend the entire budget in <think>.  This controller only acts while the
+         * model is still in thinking mode.  The soft limit is conservative: it
+         * accepts the model's own desire to end thinking when </think> is already near the
          * top of the distribution.  The hard limit is a uniform benchmark rule:
          * leave a fixed answer reserve instead of failing a case because all
          * tokens were spent before the visible answer could start. */

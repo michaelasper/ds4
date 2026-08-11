@@ -69,7 +69,7 @@ static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
     "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n";
 
-/* DeepSeek recommends Think Max only with at least a 384K-token context window.
+/* Think Max requires at least a 384K-token context window.
  * Below that size we keep ordinary thinking to avoid injecting a prompt that
  * asks for a reasoning budget the allocated context is not meant to hold. */
 #define DS4_THINK_MAX_MIN_CONTEXT 393216u
@@ -174,7 +174,7 @@ static const char DS4_RUNTIME_NAME[] DS4_MAYBE_UNUSED = "metal";
  * reduced to only the formats ds4.c currently reads or sizes:
  *   - Q2_K/Q3_K routed experts
  *   - Q4_K routed experts in the high-memory variant
- *   - Q5_K/Q6_K GLM routed experts
+ *   - Q5_K/Q6_K routed experts
  *   - IQ2_XXS routed gate/up experts
  *   - MXFP4 routed experts preserved from native checkpoints
  */

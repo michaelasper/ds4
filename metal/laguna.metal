@@ -1,6 +1,6 @@
 // Laguna-specific primitives. The C graph owns model semantics and scheduling;
 // these kernels only cover operations that are not represented by the shared
-// DeepSeek/GLM Metal API.
+// Laguna/DFlash Metal API.
 
 static float rope_yarn_ramp(const float low, const float high, const int i0) {
     const float y = (i0 / 2 - low) / max(0.001f, high - low);
@@ -2230,7 +2230,7 @@ struct ds4_metal_args_laguna_q6_matmul {
 };
 
 // Dense Q6_K projection used by Laguna's down projections and output head.
-// The quantized arithmetic follows DwarfStar's existing Q6_K routed-down
+// The quantized arithmetic follows the existing Q6_K routed-down
 // implementation, but addresses a single dense matrix directly.
 kernel void kernel_laguna_q6_K_matmul_f32(
         constant ds4_metal_args_laguna_q6_matmul &args,
