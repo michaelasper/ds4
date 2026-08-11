@@ -92,6 +92,9 @@ static void test_laguna_selector_parser(void) {
 #ifndef DS4_NO_GPU
 bool ds4_test_laguna_graph_lifecycle(void);
 bool ds4_test_laguna_dflash_graph_lifecycle(void);
+#if defined(__APPLE__)
+bool ds4_test_laguna_dflash_command_ownership(void);
+#endif
 
 static void test_laguna_graph_guard_routes(void) {
     TEST_ASSERT(ds4_test_laguna_graph_guard_routes());
@@ -114,6 +117,17 @@ static void test_laguna_dflash_graph_lifecycle(void) {
     TEST_ASSERT(ds4_test_laguna_dflash_graph_lifecycle());
     ds4_gpu_cleanup();
 }
+
+#if defined(__APPLE__)
+static void test_laguna_dflash_command_ownership(void) {
+    if (!ds4_gpu_init()) {
+        TEST_ASSERT(false);
+        return;
+    }
+    TEST_ASSERT(ds4_test_laguna_dflash_command_ownership());
+    ds4_gpu_cleanup();
+}
+#endif
 #endif
 
 #ifndef DS4_NO_GPU
@@ -14623,6 +14637,9 @@ static const ds4_test_entry test_entries[] = {
      "Laguna DFlash graph storage allocation, layout, reset, and cleanup",
      test_laguna_dflash_graph_lifecycle, false},
 #if defined(__APPLE__)
+    {"--laguna-dflash-command-ownership", "laguna-dflash-command-ownership",
+     "DFlash draft record-only batches preserve queued-write rollback and flush ownership",
+     test_laguna_dflash_command_ownership, false},
     {"--dflash-payload-lifecycle", "dflash-payload-lifecycle",
      "payload and snapshot restore invalidate Laguna DFlash support state",
      test_dflash_payload_lifecycle, true},

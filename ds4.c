@@ -48037,6 +48037,19 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
         ds4_laguna_gpu_graph *g);
 #endif
 
+static bool dflash_graph_commands_active(void) {
+    return ds4_gpu_commands_active() != 0;
+}
+
+static void dflash_graph_restore_cursors(
+        ds4_dflash_gpu_graph *g,
+        ds4_gpu_tensor       *saved_cur,
+        ds4_gpu_tensor       *saved_next) {
+    if (!g) return;
+    g->cur = saved_cur;
+    g->next = saved_next;
+}
+
 static bool dflash_graph_draft_block(
         ds4_dflash_gpu_graph *g,
         const ds4_engine     *e,
@@ -48048,6 +48061,12 @@ static bool dflash_graph_draft_block(
         n_draft == 0u || n_draft + 1u > g->block_cap) {
         return false;
     }
+    /* The verifier snapshot owns this batch.  Draft recording only appends
+     * work to it; it must never create, submit, or discard a caller-owned
+     * transaction behind the caller's back. */
+    if (!dflash_graph_commands_active()) return false;
+    ds4_gpu_tensor *saved_cur = g->cur;
+    ds4_gpu_tensor *saved_next = g->next;
     const uint32_t n_rows = n_draft + 1u;
     uint32_t token_ids[DS4_DFLASH_BLOCK_SIZE];
     token_ids[0] = (uint32_t)first_token;
@@ -48074,8 +48093,7 @@ static bool dflash_graph_draft_block(
     const uint64_t weight_map_size = lgn_dflash_weight_map_size(
         &e->dflash_model, e->dflash_f16_map, e->dflash_f16_map_size);
 
-    bool ok = ds4_gpu_commands_active() ||
-              ds4_gpu_begin_commands() != 0;
+    bool ok = true;
     if (ok) {
         ok = ds4_gpu_embed_tokens_quant_tensor(
                  g->cur,
@@ -48262,12 +48280,11 @@ static bool dflash_graph_draft_block(
                  n_rows,
                  DS4_N_VOCAB) != 0;
     }
-    if (ds4_gpu_commands_active()) {
-        if (ok) {
-            ok = ds4_gpu_end_commands() != 0;
-        } else if (ds4_gpu_discard_commands() == 0) {
-            ok = false;
-        }
+    if (!ok) {
+        /* The caller will discard the active batch.  Restore the host-side
+         * ping-pong state before it does so, so a subsequent fallback cannot
+         * observe a half-recorded support graph. */
+        dflash_graph_restore_cursors(g, saved_cur, saved_next);
     }
     (void)q_dim;
     (void)kv_dim;
@@ -60282,6 +60299,9 @@ static bool ds4_session_dflash_finish_capture(
                                     pos0,
                                     n_rows)) {
         s->dflash_synced = false;
+        /* end/wait may have executed part of the injection before reporting
+         * failure; the host checkpoint must not continue to certify it. */
+        s->checkpoint_valid = false;
         return false;
     }
 #ifdef __APPLE__
@@ -60293,6 +60313,7 @@ static bool ds4_session_dflash_finish_capture(
         !laguna_metal_rope_atlas_target_evidence_complete(
             &s->laguna_graph)) {
         s->dflash_synced = false;
+        s->checkpoint_valid = false;
         return false;
     }
 #endif
@@ -66858,6 +66879,22 @@ static int ds4_session_eval_dflash_speculative_argmax(
                                   n_draft)) {
         fprintf(stderr,
                 "ds4: DFlash draft failed; falling back to Laguna decode\n");
+        bool draft_discard_ok = true;
+        if (ds4_gpu_commands_active()) {
+            draft_discard_ok = ds4_gpu_discard_commands() != 0;
+        }
+#ifdef __APPLE__
+        laguna_metal_target_evidence_discard(&s->laguna_graph);
+#endif
+        s->dflash_synced = false;
+        if (!draft_discard_ok) {
+            /* A failed discard may have waited work that was already
+             * submitted.  Do not let the old checkpoint certify it. */
+            s->checkpoint_valid = false;
+            if (errlen) snprintf(err, errlen,
+                                 "DFlash draft rollback failed");
+            return -1;
+        }
         if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;
         return 1;
@@ -66865,7 +66902,21 @@ static int ds4_session_eval_dflash_speculative_argmax(
     const double submit_done = now_sec();
     bool target_preencoded = false;
 #ifdef __APPLE__
-    if (draft_p_min > 0.0f && ds4_gpu_flush_commands() != 0) {
+    if (draft_p_min > 0.0f) {
+        if (ds4_gpu_flush_commands() == 0) {
+            /* The draft may already be in flight even when creation of the
+             * replacement batch fails.  Treat this as terminal and poison
+             * both sync and checkpoint state. */
+            if (ds4_gpu_commands_active()) {
+                (void)ds4_gpu_discard_commands();
+            }
+            laguna_metal_target_evidence_discard(&s->laguna_graph);
+            s->dflash_synced = false;
+            s->checkpoint_valid = false;
+            if (errlen) snprintf(err, errlen,
+                                 "DFlash draft batch flush failed");
+            return -1;
+        }
         /*
          * Confidence keeps the full draft on most cycles. Encode that common
          * verifier while the draft is executing, then either commit it after
@@ -66889,7 +66940,14 @@ static int ds4_session_eval_dflash_speculative_argmax(
             NULL,
             0);
         if (!target_preencoded && ds4_gpu_commands_active()) {
-            (void)ds4_gpu_discard_commands();
+            if (ds4_gpu_discard_commands() == 0) {
+                laguna_metal_target_evidence_discard(&s->laguna_graph);
+                s->dflash_synced = false;
+                s->checkpoint_valid = false;
+                if (errlen) snprintf(err, errlen,
+                                     "DFlash target pre-encode rollback failed");
+                return -1;
+            }
         }
     }
 #endif
@@ -66959,6 +67017,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
             laguna_metal_target_evidence_discard(&s->laguna_graph);
 #endif
             s->dflash_synced = false;
+            s->checkpoint_valid = false;
             if (errlen) snprintf(err, errlen,
                                  "DFlash confidence cutoff failed");
             return -1;
@@ -67008,6 +67067,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
 #endif
         (void)laguna_graph_spec_restore(
             &s->laguna_graph, pos0, 0, n_rows);
+        s->checkpoint_valid = false;
         s->dflash_synced = false;
         if (errlen) snprintf(err, errlen,
                              "%s DFlash target verification failed",
@@ -68283,5 +68343,214 @@ bool ds4_test_laguna_dflash_graph_lifecycle(void) {
     g_ds4_shape = saved_shape;
     return ok;
 }
+#ifdef __APPLE__
+/* Model-independent command-ownership seam.  Each iteration queues a real
+ * Metal blit plus the production DFlash support-K/RoPE kernel; fail_after
+ * injects the caller's post-layer failure before the next layer.  This keeps
+ * rollback coverage on actual queued writes without fabricating a model graph
+ * or moving scheduler policy into the storage module. */
+static bool dflash_graph_test_record_layers(
+        ds4_dflash_gpu_graph *g,
+        ds4_gpu_tensor       *source,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint32_t              fail_after_layer) {
+    const uint32_t n_tokens = 1u;
+    const uint32_t n_head = 8u;
+    const uint32_t head_dim = 128u;
+    const uint64_t row_bytes =
+        (uint64_t)n_tokens * n_head * head_dim * sizeof(float);
+    if (!g || !g->cur || !g->next || !source || !model_map ||
+        !dflash_graph_commands_active() ||
+        ds4_gpu_tensor_bytes(source) < row_bytes ||
+        ds4_gpu_tensor_bytes(g->cur) < row_bytes ||
+        ds4_gpu_tensor_bytes(g->next) < row_bytes) {
+        return false;
+    }
+    ds4_gpu_tensor *saved_cur = g->cur;
+    ds4_gpu_tensor *saved_next = g->next;
+    for (uint32_t il = 0; il < 2u; il++) {
+        if (il == fail_after_layer) {
+            dflash_graph_restore_cursors(g, saved_cur, saved_next);
+            return false;
+        }
+        if (!ds4_gpu_tensor_copy(g->cur, 0, source, 0, row_bytes) ||
+            !ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+                g->cur,
+                model_map,
+                model_size,
+                (uint64_t)getpagesize(),
+                n_tokens,
+                n_head,
+                head_dim,
+                head_dim,
+                0u,
+                262144u,
+                500000.0f,
+                1.0f,
+                0.0f,
+                1.0f,
+                0.0f,
+                0.0f,
+                1e-6f)) {
+            dflash_graph_restore_cursors(g, saved_cur, saved_next);
+            return false;
+        }
+        ds4_gpu_tensor *tmp = g->cur;
+        g->cur = g->next;
+        g->next = tmp;
+    }
+    return true;
+}
+
+bool ds4_test_laguna_dflash_command_ownership(void) {
+    const char *atlas_env_name = "DS4_METAL_LAGUNA_ROPE_ATLAS";
+    const char *simd_env_name = "DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32";
+    const char *saved_atlas_value = getenv(atlas_env_name);
+    const char *saved_simd_value = getenv(simd_env_name);
+    char *saved_atlas = NULL;
+    char *saved_simd = NULL;
+    if (saved_atlas_value) {
+        saved_atlas = ds4_strdup(saved_atlas_value);
+        if (!saved_atlas) return false;
+    }
+    if (saved_simd_value) {
+        saved_simd = ds4_strdup(saved_simd_value);
+        if (!saved_simd) {
+            free(saved_atlas);
+            return false;
+        }
+    }
+
+    bool ok = false;
+    void *model_raw = NULL;
+    ds4_gpu_tensor *source = NULL;
+    ds4_gpu_tensor *cache = NULL;
+    ds4_gpu_tensor *next = NULL;
+    ds4_dflash_gpu_graph graph;
+    memset(&graph, 0, sizeof(graph));
+    enum { TEST_VALUES = 8 * 128 };
+    float source_host[TEST_VALUES];
+    float poison_host[TEST_VALUES];
+    float readback[TEST_VALUES];
+    for (size_t i = 0; i < TEST_VALUES; i++) {
+        source_host[i] = 0.25f + (float)(i % 31u) / 37.0f;
+    }
+    memset(poison_host, 0xa5, sizeof(poison_host));
+
+    if (setenv(atlas_env_name, "1", 1) != 0 ||
+        setenv(simd_env_name, "0", 1) != 0 ||
+        ds4_gpu_laguna_rope_atlas_plan_reset_for_test() != 1 ||
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test() != 1 ||
+        ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+            48u, 8u, 128u, 64u) != 0 ||
+        ds4_gpu_laguna_rope_atlas_preflight(
+            72u, 8u, 128u, 128u) != 1) {
+        goto cleanup;
+    }
+
+    const uint64_t page = (uint64_t)getpagesize();
+    const uint64_t model_size = 2u * page;
+    if (posix_memalign(&model_raw, (size_t)page, (size_t)model_size) != 0 ||
+        !model_raw) {
+        goto cleanup;
+    }
+    memset(model_raw, 0, (size_t)model_size);
+    float *weight = (float *)((uint8_t *)model_raw + page);
+    for (uint32_t i = 0; i < 128u; i++) weight[i] = 1.0f;
+    if (!ds4_gpu_set_model_map(model_raw, model_size)) goto cleanup;
+
+    const uint64_t tensor_bytes = sizeof(source_host);
+    source = ds4_gpu_tensor_alloc(tensor_bytes);
+    cache = ds4_gpu_tensor_alloc(tensor_bytes);
+    next = ds4_gpu_tensor_alloc(tensor_bytes);
+    if (!source || !cache || !next ||
+        !ds4_gpu_tensor_write(source, 0, source_host, tensor_bytes) ||
+        !ds4_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
+        !ds4_gpu_tensor_write(next, 0, poison_host, tensor_bytes)) {
+        goto cleanup;
+    }
+    graph.cur = cache;
+    graph.next = next;
+
+    /* A draft recorder cannot manufacture its own transaction. */
+    if (dflash_graph_commands_active() ||
+        dflash_graph_test_record_layers(
+            &graph, source, model_raw, model_size, 0u)) {
+        goto cleanup;
+    }
+
+    const uint64_t generated_before =
+        ds4_gpu_laguna_rope_support_atlas_completed_generated_count();
+    const uint64_t consumed_before =
+        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
+    if (ds4_gpu_begin_commands() != 1 ||
+        dflash_graph_test_record_layers(
+            &graph, source, model_raw, model_size, 1u) ||
+        graph.cur != cache || graph.next != next ||
+        ds4_gpu_discard_commands() != 1 ||
+        ds4_gpu_commands_active() != 0 ||
+        ds4_gpu_tensor_read(cache, 0, readback, tensor_bytes) == 0 ||
+        memcmp(readback, poison_host, tensor_bytes) != 0 ||
+        ds4_gpu_tensor_read(next, 0, readback, tensor_bytes) == 0 ||
+        memcmp(readback, poison_host, tensor_bytes) != 0 ||
+        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+            generated_before ||
+        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+            consumed_before) {
+        goto cleanup;
+    }
+
+    if (!ds4_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
+        !ds4_gpu_tensor_write(next, 0, poison_host, tensor_bytes) ||
+        ds4_gpu_begin_commands() != 1 ||
+        !dflash_graph_test_record_layers(
+            &graph, source, model_raw, model_size, UINT32_MAX) ||
+        !dflash_graph_commands_active() ||
+        ds4_gpu_flush_commands() != 1 ||
+        !dflash_graph_commands_active() ||
+        ds4_gpu_wait_submitted_commands() != 1 ||
+        ds4_gpu_discard_commands() != 1 ||
+        ds4_gpu_commands_active() != 0 ||
+        graph.cur != cache || graph.next != next ||
+        ds4_gpu_tensor_read(cache, 0, readback, tensor_bytes) == 0 ||
+        memcmp(readback, poison_host, tensor_bytes) == 0) {
+        goto cleanup;
+    }
+    float next_readback[TEST_VALUES];
+    if (ds4_gpu_tensor_read(next, 0, next_readback, tensor_bytes) == 0 ||
+        memcmp(next_readback, poison_host, tensor_bytes) == 0 ||
+        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+            generated_before + 1u ||
+        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+            consumed_before + 2u) {
+        goto cleanup;
+    }
+    ok = true;
+
+cleanup:
+    if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
+    (void)ds4_gpu_wait_submitted_commands();
+    (void)ds4_gpu_laguna_rope_atlas_plan_reset_for_test();
+    (void)ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+    ds4_gpu_tensor_free(next);
+    ds4_gpu_tensor_free(cache);
+    ds4_gpu_tensor_free(source);
+    free(model_raw);
+    if (saved_atlas) {
+        (void)setenv(atlas_env_name, saved_atlas, 1);
+        free(saved_atlas);
+    } else {
+        (void)unsetenv(atlas_env_name);
+    }
+    if (saved_simd) {
+        (void)setenv(simd_env_name, saved_simd, 1);
+        free(saved_simd);
+    } else {
+        (void)unsetenv(simd_env_name);
+    }
+    return ok;
+}
+#endif
 #endif
 #endif
