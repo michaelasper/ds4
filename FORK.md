@@ -73,6 +73,23 @@ The refactor branch already:
   imatrix diagnostic APIs and CLI switches. Removed switches now fail during
   option parsing, before model I/O, so the private raw graph can be deleted
   without leaving a crashable Laguna entry point;
+- contracts the public engine and session runtime to the Laguna target graph
+  plus optional DFlash support: generic graph workspaces, MTP/DSpark support
+  loading, native/backend batch dispatch, and legacy speculative schedulers no
+  longer own a public execution route;
+- preserves DSV4 v2 byte layout and logical KV-ring ordering, keeps DSVL
+  fail-closed for Laguna, and invalidates DFlash state before payload restore
+  validation so a partial load can never publish a mixed checkpoint;
+- serializes public multi-session batches after validating the entire set,
+  propagates mixed-prefill interruption before any decoder runs, and reduces
+  the no-DFlash speculative fallback to exactly one ordinary target token;
+- refuses engine teardown while sessions remain live, then drains and destroys
+  Metal state while the main model, DFlash model, and optional F16 shadow maps
+  are still mapped; DFlash graph storage is released before Laguna storage;
+- retires inert expert-profile/hotlist controls and makes the historical power
+  setting honestly full-power-only. The model-independent default gate now
+  includes sampling, DFlash payload lifecycle, serial-route, and terminal
+  drain-failure coverage;
 - fixes the product name as **LagoonNebula** and the eventual repository name
   as **`lgn2`**, while deliberately postponing the mechanical identifier
   rename until unsupported implementation paths are gone;
@@ -82,11 +99,12 @@ The refactor branch already:
 
 The separate generic raw graph, low-level CUDA-oriented tensor-parallel and
 tier-aware helpers, SSD expert streaming, legacy model helpers, and broad
-shared-backend Metal code still remain internally, but the raw graph no longer
-has a public diagnostic or imatrix entry point. Graph scalarization is not
-complete. Their presence is transitional and must not be interpreted as
-supported behavior. A `glm_` name on one of the six retained router/MoE Metal
-helpers describes inherited implementation naming, not GLM product support.
+shared-backend Metal code still remain internally, but no public engine,
+session, diagnostic, imatrix, or support-model route owns that graph. Graph
+scalarization is not complete. Their presence is transitional and must not be
+interpreted as supported behavior. A `glm_` name on one of the six retained
+router/MoE Metal helpers describes inherited implementation naming, not GLM
+product support.
 
 ## Staged deletion and extraction order
 
