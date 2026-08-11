@@ -1369,6 +1369,8 @@ int main(void) {
     test_dflash_binding_fixture();
 #ifdef DS4_TEST_HOOKS
     test_production_model_summary();
+    CHECK(ds4_test_laguna_chat(),
+          "Laguna chat/tokenizer and stop-token contract");
 #endif
     test_dflash_shadow_map();
     test_laguna_pretokenizer();

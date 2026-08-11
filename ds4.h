@@ -237,6 +237,10 @@ bool ds4_test_engine_session_lifecycle(void);
 bool ds4_test_engine_close_order(void);
 bool ds4_test_laguna_context_memory_estimator(void);
 bool ds4_test_model_summary(const struct ds4_model *model, FILE *out);
+/* Model-free tokenizer/chat contract coverage using a synthetic Laguna BPE
+ * vocabulary.  This keeps chat behavior tests independent of a multi-GiB
+ * production GGUF while still exercising the public token APIs. */
+bool ds4_test_laguna_chat(void);
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
 bool ds4_test_engine_close_drain_failure(void);
 #endif

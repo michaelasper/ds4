@@ -3145,7 +3145,7 @@ typedef struct ds4_vocab ds4_vocab;
  * Tokenizer and Chat Prompt Encoding.
  * =========================================================================
  *
- * DeepSeek V4 Flash stores a GPT-2 style byte-level BPE tokenizer in GGUF.
+ * Laguna S2.1 stores a GPT-2 style byte-level BPE tokenizer in GGUF.
  * The implementation below is intentionally small.  It loads token strings
  * and merge ranks from the mmaped file, builds two open-addressed hash tables,
  * and applies BPE to user text.  Chat special tokens are inserted directly by
@@ -3663,52 +3663,29 @@ static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
         table_put(&vocab->merge_rank, merge, (int)i);
     }
 
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        if (!model_get_token_id(model, "tokenizer.ggml.bos_token_id", &vocab->bos_id) ||
-            !model_get_token_id(model, "tokenizer.ggml.eos_token_id", &vocab->eos_id)) {
-            ds4_die("Laguna tokenizer is missing BOS/EOS token metadata");
-        }
-        if (!model_get_token_id(model, "tokenizer.ggml.eot_token_id", &vocab->eot_id)) {
-            vocab->eot_id = vocab_lookup(vocab, "</assistant>");
-        }
-        vocab->system_id = -1;
-        vocab->user_id = -1;
-        vocab->assistant_id = vocab_lookup(vocab, "<assistant>");
-        vocab->observation_id = -1;
-        vocab->sop_id = -1;
-        vocab->think_start_id = vocab_lookup(vocab, "<think>");
-        vocab->think_end_id = vocab_lookup(vocab, "</think>");
-        vocab->tool_call_start_id = vocab_lookup(vocab, "<tool_call>");
-        vocab->tool_call_end_id = vocab_lookup(vocab, "</tool_call>");
-        vocab->tool_response_start_id = -1;
-        vocab->tool_response_end_id = -1;
-        vocab->arg_key_start_id = -1;
-        vocab->arg_key_end_id = -1;
-        vocab->arg_value_start_id = -1;
-        vocab->arg_value_end_id = -1;
-        vocab->dsml_id = -1;
-        return;
+    if (!model_get_token_id(model, "tokenizer.ggml.bos_token_id", &vocab->bos_id) ||
+        !model_get_token_id(model, "tokenizer.ggml.eos_token_id", &vocab->eos_id)) {
+        ds4_die("Laguna tokenizer is missing BOS/EOS token metadata");
     }
-
-    vocab->bos_id       = vocab_lookup(vocab, "<｜begin▁of▁sentence｜>");
-    vocab->eos_id       = vocab_lookup(vocab, "<｜end▁of▁sentence｜>");
-    vocab->system_id    = -1;
-    vocab->user_id      = vocab_lookup(vocab, "<｜User｜>");
-    vocab->assistant_id = vocab_lookup(vocab, "<｜Assistant｜>");
+    if (!model_get_token_id(model, "tokenizer.ggml.eot_token_id", &vocab->eot_id)) {
+        vocab->eot_id = vocab_lookup(vocab, "</assistant>");
+    }
+    vocab->system_id = -1;
+    vocab->user_id = -1;
+    vocab->assistant_id = vocab_lookup(vocab, "<assistant>");
     vocab->observation_id = -1;
     vocab->sop_id = -1;
     vocab->think_start_id = vocab_lookup(vocab, "<think>");
     vocab->think_end_id = vocab_lookup(vocab, "</think>");
-    vocab->tool_call_start_id = -1;
-    vocab->tool_call_end_id = -1;
+    vocab->tool_call_start_id = vocab_lookup(vocab, "<tool_call>");
+    vocab->tool_call_end_id = vocab_lookup(vocab, "</tool_call>");
     vocab->tool_response_start_id = -1;
     vocab->tool_response_end_id = -1;
     vocab->arg_key_start_id = -1;
     vocab->arg_key_end_id = -1;
     vocab->arg_value_start_id = -1;
     vocab->arg_value_end_id = -1;
-    vocab->dsml_id = vocab_lookup(vocab, "｜DSML｜");
-    vocab->eot_id = -1;
+    vocab->dsml_id = -1;
 }
 
 static void vocab_free(ds4_vocab *vocab) {
@@ -3723,15 +3700,6 @@ static void vocab_free(ds4_vocab *vocab) {
  * thinking is only a prompt prefix: the model still enters through <think>. */
 static void chat_push_bos_sequence(const ds4_vocab *vocab, token_vec *out) {
     token_vec_push(out, vocab->bos_id);
-}
-
-static void chat_push_think_prefix(const ds4_vocab *vocab,
-                                   ds4_think_mode   think_mode,
-                                   token_vec       *out) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK4 &&
-        think_mode == DS4_THINK_MAX) {
-        bpe_tokenize_text(vocab, DS4_REASONING_EFFORT_MAX_PREFIX, out);
-    }
 }
 
 static void tokenize_rendered_chat_vocab(const ds4_vocab *vocab,
@@ -3772,46 +3740,20 @@ static void encode_chat_prompt(
         const char      *prompt,
         ds4_think_mode   think_mode,
         token_vec       *out) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        if (vocab->bos_id < 0 ||
-            vocab->assistant_id < 0 ||
-            vocab->think_start_id < 0 ||
-            vocab->think_end_id < 0) {
-            ds4_die("this tokenizer does not provide the Laguna chat markers; use raw prompt tokenization");
-        }
-        chat_push_bos_sequence(vocab, out);
-        if (system && system[0]) {
-            laguna_chat_append_wrapped(vocab, out, "<system>", system, "</system>");
-        }
-        laguna_chat_append_wrapped(vocab, out, "<user>", prompt, "</user>");
-        token_vec_push(out, vocab->assistant_id);
-        token_vec_push(out, ds4_think_mode_enabled(think_mode) ?
-                       vocab->think_start_id : vocab->think_end_id);
-        return;
-    }
-
-    const bool need_think_start = ds4_think_mode_enabled(think_mode);
     if (vocab->bos_id < 0 ||
-        vocab->user_id < 0 ||
         vocab->assistant_id < 0 ||
-        vocab->think_end_id < 0 ||
-        (need_think_start && vocab->think_start_id < 0)) {
-        ds4_die("this tokenizer does not provide the DeepSeek chat markers; use raw prompt tokenization");
+        vocab->think_start_id < 0 ||
+        vocab->think_end_id < 0) {
+        ds4_die("this tokenizer does not provide the Laguna chat markers; use raw prompt tokenization");
     }
-
     chat_push_bos_sequence(vocab, out);
-    chat_push_think_prefix(vocab, think_mode, out);
     if (system && system[0]) {
-        bpe_tokenize_text(vocab, system, out);
+        laguna_chat_append_wrapped(vocab, out, "<system>", system, "</system>");
     }
-    token_vec_push(out, vocab->user_id);
-    bpe_tokenize_text(vocab, prompt, out);
+    laguna_chat_append_wrapped(vocab, out, "<user>", prompt, "</user>");
     token_vec_push(out, vocab->assistant_id);
-    if (ds4_think_mode_enabled(think_mode)) {
-        token_vec_push(out, vocab->think_start_id);
-    } else {
-        token_vec_push(out, vocab->think_end_id);
-    }
+    token_vec_push(out, ds4_think_mode_enabled(think_mode) ?
+                   vocab->think_start_id : vocab->think_end_id);
 }
 
 void ds4_tokenize_text(ds4_engine *e, const char *text, ds4_tokens *out) {
@@ -3965,24 +3907,21 @@ void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role
     if (!role) role = "user";
     if (!content) content = "";
 
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        if (!strcmp(role, "system") || !strcmp(role, "developer")) {
-            laguna_chat_append_wrapped(vocab, tokens, "<system>", content, "</system>");
-        } else if (!strcmp(role, "assistant")) {
-            token_vec_push(tokens, vocab->assistant_id);
-            if (strncmp(content, "<think>", 7) != 0 &&
-                strncmp(content, "</think>", 8) != 0) {
-                token_vec_push(tokens, vocab->think_end_id);
-            }
-            tokenize_rendered_chat_vocab(vocab, content, tokens);
-            token_vec_push(tokens, vocab->eot_id);
-            bpe_tokenize_text(vocab, "\n", tokens);
-        } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
-            laguna_chat_append_tool_response(vocab, tokens, content);
-        } else {
-            laguna_chat_append_wrapped(vocab, tokens, "<user>", content, "</user>");
+    if (!strcmp(role, "system") || !strcmp(role, "developer")) {
+        laguna_chat_append_wrapped(vocab, tokens, "<system>", content, "</system>");
+    } else if (!strcmp(role, "assistant")) {
+        token_vec_push(tokens, vocab->assistant_id);
+        if (strncmp(content, "<think>", 7) != 0 &&
+            strncmp(content, "</think>", 8) != 0) {
+            token_vec_push(tokens, vocab->think_end_id);
         }
-        return;
+        tokenize_rendered_chat_vocab(vocab, content, tokens);
+        token_vec_push(tokens, vocab->eot_id);
+        bpe_tokenize_text(vocab, "\n", tokens);
+    } else if (!strcmp(role, "tool") || !strcmp(role, "function")) {
+        laguna_chat_append_tool_response(vocab, tokens, content);
+    } else {
+        laguna_chat_append_wrapped(vocab, tokens, "<user>", content, "</user>");
     }
 }
 
@@ -3995,13 +3934,290 @@ void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_thi
 
 void ds4_chat_append_assistant_end(ds4_engine *e, ds4_tokens *tokens) {
     if (!e || !tokens) return;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
-        token_vec_push(tokens, e->vocab.eot_id);
-        bpe_tokenize_text(&e->vocab, "\n", tokens);
-    } else {
-        token_vec_push(tokens, e->vocab.eos_id);
-    }
+    token_vec_push(tokens, e->vocab.eot_id);
+    bpe_tokenize_text(&e->vocab, "\n", tokens);
 }
+
+#ifdef DS4_TEST_HOOKS
+/* Keep tokenizer/chat coverage model-free.  Every raw byte is represented by
+ * its GPT-2 byte-level codepoint, while the protocol markers get named token
+ * ids.  One explicit `a b` merge proves the BPE path; decoding the public
+ * token output proves the wrapper text and marker boundaries. */
+enum {
+    DS4_CHAT_TEST_BOS = 256,
+    DS4_CHAT_TEST_EOS,
+    DS4_CHAT_TEST_EOT,
+    DS4_CHAT_TEST_ASSISTANT,
+    DS4_CHAT_TEST_THINK_START,
+    DS4_CHAT_TEST_THINK_END,
+    DS4_CHAT_TEST_TOOL_CALL_START,
+    DS4_CHAT_TEST_TOOL_CALL_END,
+    DS4_CHAT_TEST_DSML,
+    DS4_CHAT_TEST_MERGED_AB,
+    DS4_CHAT_TEST_VOCAB_SIZE,
+};
+
+static bool ds4_test_chat_vocab_add(
+        ds4_vocab   *vocab,
+        int          token,
+        const char  *ptr,
+        size_t       len) {
+    if (!vocab || token < 0 || token >= vocab->n_vocab || !ptr) return false;
+    char *copy = malloc(len ? len : 1u);
+    if (!copy) return false;
+    if (len) memcpy(copy, ptr, len);
+    vocab->token[token] = (ds4_str){ copy, len };
+    table_put(&vocab->token_to_id, vocab->token[token], token);
+    return true;
+}
+
+static void ds4_test_chat_vocab_free(ds4_vocab *vocab) {
+    if (!vocab) return;
+    if (vocab->token) {
+        for (int i = 0; i < vocab->n_vocab; i++) {
+            free((void *)vocab->token[i].ptr);
+        }
+    }
+    vocab_free(vocab);
+}
+
+static bool ds4_test_chat_vocab_init(ds4_vocab *vocab) {
+    if (!vocab) return false;
+    memset(vocab, 0, sizeof(*vocab));
+    vocab->n_vocab = DS4_CHAT_TEST_VOCAB_SIZE;
+    vocab->token = calloc((size_t)vocab->n_vocab, sizeof(vocab->token[0]));
+    if (!vocab->token) return false;
+    table_init(&vocab->token_to_id, 266u);
+    table_init(&vocab->merge_rank, 0u);
+
+    for (int byte = 0; byte < 256; byte++) {
+        char encoded[4];
+        char *p = encoded;
+        utf8_put(&p, gpt2_byte_to_codepoint((uint8_t)byte));
+        if (!ds4_test_chat_vocab_add(
+                vocab, byte, encoded, (size_t)(p - encoded))) {
+            ds4_test_chat_vocab_free(vocab);
+            return false;
+        }
+    }
+
+    if (!ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_BOS,
+                                 "<bos>", sizeof("<bos>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_EOS,
+                                 "<eos>", sizeof("<eos>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_EOT,
+                                 "</assistant>", sizeof("</assistant>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_ASSISTANT,
+                                 "<assistant>", sizeof("<assistant>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_THINK_START,
+                                 "<think>", sizeof("<think>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_THINK_END,
+                                 "</think>", sizeof("</think>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_TOOL_CALL_START,
+                                 "<tool_call>", sizeof("<tool_call>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_TOOL_CALL_END,
+                                 "</tool_call>", sizeof("</tool_call>") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_DSML,
+                                 "｜DSML｜", sizeof("｜DSML｜") - 1u) ||
+        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_MERGED_AB,
+                                 "ab", sizeof("ab") - 1u)) {
+        ds4_test_chat_vocab_free(vocab);
+        return false;
+    }
+
+    static const char merge_ab[] = "a b";
+    table_put(&vocab->merge_rank,
+              (ds4_str){ merge_ab, sizeof(merge_ab) - 1u }, 0);
+
+    vocab->bos_id = DS4_CHAT_TEST_BOS;
+    vocab->eos_id = DS4_CHAT_TEST_EOS;
+    vocab->eot_id = DS4_CHAT_TEST_EOT;
+    vocab->system_id = -1;
+    vocab->user_id = -1;
+    vocab->assistant_id = DS4_CHAT_TEST_ASSISTANT;
+    vocab->observation_id = -1;
+    vocab->sop_id = -1;
+    vocab->think_start_id = DS4_CHAT_TEST_THINK_START;
+    vocab->think_end_id = DS4_CHAT_TEST_THINK_END;
+    vocab->tool_call_start_id = DS4_CHAT_TEST_TOOL_CALL_START;
+    vocab->tool_call_end_id = DS4_CHAT_TEST_TOOL_CALL_END;
+    vocab->tool_response_start_id = -1;
+    vocab->tool_response_end_id = -1;
+    vocab->arg_key_start_id = -1;
+    vocab->arg_key_end_id = -1;
+    vocab->arg_value_start_id = -1;
+    vocab->arg_value_end_id = -1;
+    vocab->dsml_id = DS4_CHAT_TEST_DSML;
+    return true;
+}
+
+static bool ds4_test_chat_tokens_decode(
+        ds4_engine       *engine,
+        const ds4_tokens *tokens,
+        const char       *expected) {
+    if (!engine || !tokens || !expected) return false;
+    ds4_buf decoded = {0};
+    for (int i = 0; i < tokens->len; i++) {
+        ds4_token_text_into(engine, tokens->v[i], &decoded);
+    }
+    const size_t expected_len = strlen(expected);
+    const bool ok = decoded.len == expected_len &&
+                    memcmp(decoded.ptr, expected, expected_len) == 0;
+    free(decoded.ptr);
+    return ok;
+}
+
+static bool ds4_test_chat_tokens_equal(
+        const ds4_tokens *a,
+        const ds4_tokens *b) {
+    return a && b && a->len == b->len &&
+           (a->len == 0 || memcmp(a->v, b->v,
+                                  (size_t)a->len * sizeof(a->v[0])) == 0);
+}
+
+bool ds4_test_laguna_chat(void) {
+    ds4_engine engine;
+    memset(&engine, 0, sizeof(engine));
+    if (!ds4_test_chat_vocab_init(&engine.vocab)) return false;
+
+    bool ok = true;
+    ds4_tokens prompt = {0};
+    ds4_tokens no_think = {0};
+    ds4_tokens merged = {0};
+    ds4_tokens unicode = {0};
+    ds4_tokens raw_bytes = {0};
+    ds4_tokens system = {0};
+    ds4_tokens developer = {0};
+    ds4_tokens user = {0};
+    ds4_tokens assistant = {0};
+    ds4_tokens assistant_think = {0};
+    ds4_tokens tool = {0};
+    ds4_tokens function = {0};
+    ds4_tokens markers = {0};
+    ds4_tokens prefix = {0};
+    ds4_tokens end = {0};
+    ds4_tokens max_prefix = {0};
+
+    ds4_encode_chat_prompt(&engine, "You", "Hi", DS4_THINK_HIGH, &prompt);
+    ok = ok && prompt.len >= 3 &&
+         prompt.v[0] == engine.vocab.bos_id &&
+         prompt.v[prompt.len - 2] == engine.vocab.assistant_id &&
+         prompt.v[prompt.len - 1] == engine.vocab.think_start_id &&
+         ds4_test_chat_tokens_decode(
+             &engine, &prompt,
+             "<bos><system>You</system>\n<user>Hi</user>\n<assistant><think>");
+
+    ds4_encode_chat_prompt(&engine, NULL, "Hi", DS4_THINK_NONE, &no_think);
+    ok = ok && no_think.len >= 3 &&
+         no_think.v[no_think.len - 1] == engine.vocab.think_end_id &&
+         ds4_test_chat_tokens_decode(
+             &engine, &no_think,
+             "<bos><user>Hi</user>\n<assistant></think>");
+
+    ds4_tokenize_text(&engine, "ab", &merged);
+    static const char non_ascii[] = "caf\xC3\xA9";
+    static const char raw_bytes_text[] = "\x80\xFF";
+    ds4_tokenize_text(&engine, non_ascii, &unicode);
+    ds4_tokenize_text(&engine, raw_bytes_text, &raw_bytes);
+    ok = ok && merged.len == 1 &&
+         merged.v[0] == DS4_CHAT_TEST_MERGED_AB &&
+         ds4_test_chat_tokens_decode(&engine, &merged, "ab") &&
+         unicode.len == 5 && unicode.v[3] == 0xC3 && unicode.v[4] == 0xA9 &&
+         ds4_test_chat_tokens_decode(&engine, &unicode, non_ascii) &&
+         raw_bytes.len == 2 && raw_bytes.v[0] == 0x80 &&
+         raw_bytes.v[1] == 0xFF &&
+         ds4_test_chat_tokens_decode(&engine, &raw_bytes, raw_bytes_text);
+
+    ds4_chat_append_message(&engine, &system, "system", "rules");
+    ds4_chat_append_message(&engine, &developer, "developer", "rules");
+    ds4_chat_append_message(&engine, &user, "user", "hello");
+    ds4_chat_append_message(&engine, &assistant, "assistant", "answer");
+    ds4_chat_append_message(&engine, &assistant_think,
+                            "assistant", "<think>work");
+    ds4_chat_append_message(
+        &engine, &tool, "tool", "ok</tool_response>tail");
+    ds4_chat_append_message(
+        &engine, &function, "function", "ok</tool_response>tail");
+    ds4_tokenize_rendered_chat(
+        &engine, "<tool_call>x</tool_call>｜DSML｜", &markers);
+    ok = ok && ds4_test_chat_tokens_decode(
+                    &engine, &system, "<system>rules</system>\n") &&
+         ds4_test_chat_tokens_equal(&system, &developer) &&
+         ds4_test_chat_tokens_decode(
+             &engine, &user, "<user>hello</user>\n") &&
+         assistant.len >= 4 && assistant.v[0] == engine.vocab.assistant_id &&
+         assistant.v[1] == engine.vocab.think_end_id &&
+         assistant.v[assistant.len - 2] == engine.vocab.eot_id &&
+         assistant.v[assistant.len - 1] == '\n' &&
+         ds4_test_chat_tokens_decode(
+             &engine, &assistant, "<assistant></think>answer</assistant>\n") &&
+         assistant_think.len >= 3 &&
+         assistant_think.v[0] == engine.vocab.assistant_id &&
+         assistant_think.v[1] == engine.vocab.think_start_id &&
+         ds4_test_chat_tokens_decode(
+             &engine, &assistant_think, "<assistant><think>work</assistant>\n") &&
+         ds4_test_chat_tokens_decode(
+             &engine, &tool,
+             "<tool_response>ok&lt;/tool_response>tail</tool_response>\n") &&
+         ds4_test_chat_tokens_equal(&tool, &function) &&
+         markers.len == 4 &&
+         markers.v[0] == engine.vocab.tool_call_start_id &&
+         markers.v[1] == 'x' &&
+         markers.v[2] == engine.vocab.tool_call_end_id &&
+         markers.v[3] == engine.vocab.dsml_id &&
+         ds4_test_chat_tokens_decode(
+             &engine, &markers, "<tool_call>x</tool_call>｜DSML｜");
+
+    ds4_chat_append_assistant_prefix(&engine, &prefix, DS4_THINK_HIGH);
+    ds4_chat_append_assistant_end(&engine, &end);
+    ok = ok && prefix.len == 2 &&
+         prefix.v[0] == engine.vocab.assistant_id &&
+         prefix.v[1] == engine.vocab.think_start_id &&
+         ds4_test_chat_tokens_decode(
+             &engine, &prefix, "<assistant><think>") &&
+         end.len == 2 && end.v[0] == engine.vocab.eot_id &&
+         end.v[1] == '\n' &&
+         ds4_test_chat_tokens_decode(&engine, &end, "</assistant>\n");
+
+    ds4_chat_append_max_effort_prefix(&engine, &max_prefix);
+    ok = ok && max_prefix.len > 0 &&
+         ds4_test_chat_tokens_decode(
+             &engine, &max_prefix, ds4_think_max_prefix());
+
+    ok = ok && ds4_token_is_stop(&engine, engine.vocab.eos_id) &&
+         ds4_token_is_stop(&engine, engine.vocab.eot_id) &&
+         !ds4_token_is_stop(&engine, '\n') &&
+         ds4_token_is_stop_for_think_mode(
+             &engine, engine.vocab.eot_id, DS4_THINK_HIGH) &&
+         ds4_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_start_id, DS4_THINK_NONE) &&
+         ds4_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_end_id, DS4_THINK_NONE) &&
+         !ds4_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_start_id, DS4_THINK_HIGH) &&
+         !ds4_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_end_id, DS4_THINK_HIGH);
+
+    ds4_tokens_free(&max_prefix);
+    ds4_tokens_free(&end);
+    ds4_tokens_free(&prefix);
+    ds4_tokens_free(&markers);
+    ds4_tokens_free(&function);
+    ds4_tokens_free(&tool);
+    ds4_tokens_free(&assistant_think);
+    ds4_tokens_free(&assistant);
+    ds4_tokens_free(&user);
+    ds4_tokens_free(&developer);
+    ds4_tokens_free(&system);
+    ds4_tokens_free(&raw_bytes);
+    ds4_tokens_free(&unicode);
+    ds4_tokens_free(&merged);
+    ds4_tokens_free(&no_think);
+    ds4_tokens_free(&prompt);
+    ds4_test_chat_vocab_free(&engine.vocab);
+    return ok;
+}
+#endif /* DS4_TEST_HOOKS */
 
 static void dump_tokens_fp(FILE *fp, const ds4_vocab *vocab, const token_vec *tokens) {
     fprintf(fp, "[");
@@ -4171,11 +4387,7 @@ void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b) {
 static bool vocab_token_is_generation_stop(const ds4_vocab *vocab, int token) {
     if (!vocab || token < 0) return false;
     if (token == vocab->eos_id) return true;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA &&
-        vocab->eot_id >= 0 && token == vocab->eot_id) {
-        return true;
-    }
-    return false;
+    return vocab->eot_id >= 0 && token == vocab->eot_id;
 }
 
 int ds4_token_eos(ds4_engine *e) {
