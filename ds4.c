@@ -43,6 +43,7 @@
 #include "ds4.h"
 #include "lgn.h"
 #include "lgn_dflash.h"
+#include "lgn_graph.h"
 #include "lgn_model.h"
 
 /* GPU gate constants used by the retained internal Metal helper paths.  The
@@ -659,11 +660,6 @@ DS4_STATIC_ASSERT(ds4_block_q6_k_size, sizeof(block_q6_K) == 210);
 DS4_STATIC_ASSERT(ds4_block_q8_k_size, sizeof(block_q8_K) == 292);
 DS4_STATIC_ASSERT(ds4_block_iq2_xxs_size, sizeof(block_iq2_xxs) == 66);
 DS4_STATIC_ASSERT(ds4_block_mxfp4_size, sizeof(block_mxfp4) == 17);
-
-typedef struct {
-    uint64_t decode_mid_fused;
-    uint64_t ordinary_prefill_stock;
-} laguna_dense_q8_gate_up_swiglu_counters;
 
 typedef struct {
     uint32_t ctx_size;
@@ -46828,126 +46824,21 @@ typedef struct {
     ds4_gpu_tensor *value_cache[DS4_DFLASH_N_LAYER];
 } ds4_dflash_gpu_graph;
 
-typedef struct {
-    uint32_t ctx_size;
-    uint32_t prefill_cap;
-    uint64_t scratch_bytes;
-    uint64_t kv_bytes;
-
-    ds4_gpu_tensor *tokens;
-    ds4_gpu_tensor *cur;
-    ds4_gpu_tensor *next;
-    ds4_gpu_tensor *attn_norm;
-    ds4_gpu_tensor *q;
-    ds4_gpu_tensor *k;
-    ds4_gpu_tensor *v;
-    ds4_gpu_tensor *gate;
-    ds4_gpu_tensor *heads;
-    ds4_gpu_tensor *attn_out;
-    ds4_gpu_tensor *after_attn;
-    ds4_gpu_tensor *ffn_norm;
-    ds4_gpu_tensor *ffn_gate;
-    ds4_gpu_tensor *ffn_up;
-    ds4_gpu_tensor *ffn_mid;
-    ds4_gpu_tensor *ffn_out;
-    ds4_gpu_tensor *shared_out;
-    ds4_gpu_tensor *routed_mid;
-    ds4_gpu_tensor *router_logits;
-    ds4_gpu_tensor *router_probs;
-    ds4_gpu_tensor *router_selected;
-    ds4_gpu_tensor *router_weights;
-    ds4_gpu_tensor *shared_selected;
-    ds4_gpu_tensor *shared_weight;
-    ds4_gpu_tensor *staged_key;
-    ds4_gpu_tensor *staged_value;
-    ds4_gpu_tensor *output_norm;
-    ds4_gpu_tensor *logits;
-    ds4_gpu_tensor *argmax;
-    bool gpu_argmax_enabled;
-    int32_t gpu_argmax_result;
-    bool dense_q8_fusion_decision_valid;
-    bool dense_q8_fusion_enabled;
-#ifdef __APPLE__
-    /* Ordinary-prefill batch selector is frozen on the first graph forward;
-     * later env changes cannot switch arithmetic halfway through a graph. */
-    bool dense_q8_batch_decision_valid;
-    bool dense_q8_batch_enabled;
-    ds4_gpu_laguna_q8_lmhead_screen *lmhead_screen;
-    bool q8_lmhead_screen_dispatched;
-#endif
-    ds4_gpu_tensor *spec_output_norm;
-    ds4_gpu_tensor *spec_logits;
-    ds4_gpu_tensor *spec_argmax;
-    ds4_gpu_tensor *spec_key_backup[DS4_MAX_LAYER];
-    ds4_gpu_tensor *spec_value_backup[DS4_MAX_LAYER];
-    ds4_gpu_tensor *key_cache[DS4_MAX_LAYER];
-    ds4_gpu_tensor *value_cache[DS4_MAX_LAYER];
-    uint32_t cache_cap[DS4_MAX_LAYER];
-    /* Evidence is attached to this graph/command-buffer owner.  It is
-     * promoted to the process report only after the owning work is waited. */
-    laguna_dense_q8_gate_up_swiglu_counters dense_q8_pending;
-#ifdef __APPLE__
-    /* A deferred DFlash verifier keeps the target command buffer open while
-     * support features are appended.  Retain encoded and completion-counter
-     * snapshots until that command is actually completed for diagnostics. */
-    uint64_t qk_simd32_target_encoded_before;
-    uint64_t qk_simd32_target_completed_before;
-    uint32_t qk_simd32_target_n_tokens;
-    bool qk_simd32_target_capture;
-    bool qk_simd32_target_verifier;
-    bool qk_simd32_target_evidence_pending;
-    uint64_t rope_atlas_target_generated_before;
-    uint64_t rope_atlas_target_consumed_before;
-    uint64_t rope_atlas_target_family0_before;
-    uint64_t rope_atlas_target_family1_before;
-    uint64_t rope_atlas_target_generation_expected;
-    uint32_t rope_atlas_target_n_tokens;
-    bool rope_atlas_target_capture;
-    bool rope_atlas_target_verifier;
-    bool rope_atlas_target_evidence_pending;
-#endif
-} ds4_laguna_gpu_graph;
-
 #ifdef __APPLE__
 static void laguna_graph_report_q8_lmhead_screen(
         const ds4_laguna_gpu_graph *g);
 #endif
 
+/* The lgn_graph module owns only the base target storage.  Keep extension
+ * teardown here: speculative verifier scratch, the optional Metal lm-head
+ * screen, and diagnostic/selector state all have command/lifetime semantics
+ * that must remain coupled to the session scheduler. */
 static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     if (!g) return;
 #define DS4_LAGUNA_FREE(name) do { \
         ds4_gpu_tensor_free(g->name); \
         g->name = NULL; \
     } while (0)
-    DS4_LAGUNA_FREE(tokens);
-    DS4_LAGUNA_FREE(cur);
-    DS4_LAGUNA_FREE(next);
-    DS4_LAGUNA_FREE(attn_norm);
-    DS4_LAGUNA_FREE(q);
-    DS4_LAGUNA_FREE(k);
-    DS4_LAGUNA_FREE(v);
-    DS4_LAGUNA_FREE(gate);
-    DS4_LAGUNA_FREE(heads);
-    DS4_LAGUNA_FREE(attn_out);
-    DS4_LAGUNA_FREE(after_attn);
-    DS4_LAGUNA_FREE(ffn_norm);
-    DS4_LAGUNA_FREE(ffn_gate);
-    DS4_LAGUNA_FREE(ffn_up);
-    DS4_LAGUNA_FREE(ffn_mid);
-    DS4_LAGUNA_FREE(ffn_out);
-    DS4_LAGUNA_FREE(shared_out);
-    DS4_LAGUNA_FREE(routed_mid);
-    DS4_LAGUNA_FREE(router_logits);
-    DS4_LAGUNA_FREE(router_probs);
-    DS4_LAGUNA_FREE(router_selected);
-    DS4_LAGUNA_FREE(router_weights);
-    DS4_LAGUNA_FREE(shared_selected);
-    DS4_LAGUNA_FREE(shared_weight);
-    DS4_LAGUNA_FREE(staged_key);
-    DS4_LAGUNA_FREE(staged_value);
-    DS4_LAGUNA_FREE(output_norm);
-    DS4_LAGUNA_FREE(logits);
-    DS4_LAGUNA_FREE(argmax);
 #ifdef __APPLE__
     ds4_gpu_laguna_q8_lmhead_screen_destroy(g->lmhead_screen);
     g->lmhead_screen = NULL;
@@ -46959,14 +46850,10 @@ static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) {
         ds4_gpu_tensor_free(g->spec_key_backup[il]);
         ds4_gpu_tensor_free(g->spec_value_backup[il]);
-        ds4_gpu_tensor_free(g->key_cache[il]);
-        ds4_gpu_tensor_free(g->value_cache[il]);
         g->spec_key_backup[il] = NULL;
         g->spec_value_backup[il] = NULL;
-        g->key_cache[il] = NULL;
-        g->value_cache[il] = NULL;
-        g->cache_cap[il] = 0;
     }
+    lgn_graph_free(g);
     memset(g, 0, sizeof(*g));
 }
 
@@ -46981,91 +46868,8 @@ static bool laguna_graph_alloc(ds4_laguna_gpu_graph *g, uint32_t ctx_size) {
                                          NULL, 0)) return false;
 #endif
     memset(g, 0, sizeof(*g));
-    g->ctx_size = ctx_size;
-    g->prefill_cap = ctx_size < 16384u ? ctx_size : 16384u;
+    if (lgn_graph_alloc(g, ctx_size, &g_ds4_shape)) return true;
 
-    const uint64_t f32 = sizeof(float);
-    const uint64_t rows = g->prefill_cap;
-    const uint64_t embd = DS4_N_EMBD;
-    const uint64_t q_dim = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM;
-    const uint64_t kv_dim = (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM;
-    const uint64_t ffn_max = DS4_N_FF_DENSE >
-        (uint64_t)DS4_N_EXPERT_USED * DS4_N_FF_EXP ?
-        DS4_N_FF_DENSE : (uint64_t)DS4_N_EXPERT_USED * DS4_N_FF_EXP;
-
-#define DS4_LAGUNA_ALLOC(name, bytes) do { \
-        const uint64_t ds4_laguna_bytes_ = (uint64_t)(bytes); \
-        g->name = ds4_gpu_tensor_alloc(ds4_laguna_bytes_); \
-        if (!g->name) goto fail; \
-        g->scratch_bytes += ds4_laguna_bytes_; \
-    } while (0)
-    DS4_LAGUNA_ALLOC(tokens, rows * sizeof(uint32_t));
-    DS4_LAGUNA_ALLOC(cur, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(next, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(attn_norm, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(q, rows * q_dim * f32);
-    DS4_LAGUNA_ALLOC(k, rows * kv_dim * f32);
-    DS4_LAGUNA_ALLOC(v, rows * kv_dim * f32);
-    DS4_LAGUNA_ALLOC(gate, rows * DS4_N_HEAD * f32);
-    DS4_LAGUNA_ALLOC(heads, rows * q_dim * f32);
-    DS4_LAGUNA_ALLOC(attn_out, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(after_attn, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(ffn_norm, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(ffn_gate, rows * ffn_max * f32);
-    DS4_LAGUNA_ALLOC(ffn_up, rows * ffn_max * f32);
-    DS4_LAGUNA_ALLOC(ffn_mid, rows * ffn_max * f32);
-    DS4_LAGUNA_ALLOC(ffn_out, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(shared_out, rows * embd * f32);
-    DS4_LAGUNA_ALLOC(routed_mid,
-                     rows * DS4_N_EXPERT_USED * DS4_N_FF_EXP * f32);
-    DS4_LAGUNA_ALLOC(router_logits, rows * DS4_N_EXPERT * f32);
-    DS4_LAGUNA_ALLOC(router_probs, rows * DS4_N_EXPERT * f32);
-    DS4_LAGUNA_ALLOC(router_selected,
-                     rows * DS4_N_EXPERT_USED * sizeof(int32_t));
-    DS4_LAGUNA_ALLOC(router_weights, rows * DS4_N_EXPERT_USED * f32);
-    DS4_LAGUNA_ALLOC(shared_selected, sizeof(int32_t));
-    DS4_LAGUNA_ALLOC(shared_weight, sizeof(float));
-    DS4_LAGUNA_ALLOC(staged_key, rows * kv_dim * sizeof(uint16_t));
-    DS4_LAGUNA_ALLOC(staged_value, rows * kv_dim * sizeof(uint16_t));
-    DS4_LAGUNA_ALLOC(output_norm, embd * f32);
-    DS4_LAGUNA_ALLOC(logits, DS4_N_VOCAB * f32);
-#undef DS4_LAGUNA_ALLOC
-
-    const int32_t shared_id = 0;
-    const float shared_weight = 1.0f;
-    if (!ds4_gpu_tensor_write(g->shared_selected,
-                              0,
-                              &shared_id,
-                              sizeof(shared_id)) ||
-        !ds4_gpu_tensor_write(g->shared_weight,
-                              0,
-                              &shared_weight,
-                              sizeof(shared_weight))) {
-        goto fail;
-    }
-
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        uint32_t cap = ds4_laguna_layer_is_swa(il) ? DS4_N_SWA : ctx_size;
-        if (cap > ctx_size) cap = ctx_size;
-        if (cap == 0) cap = 1;
-        const uint64_t bytes =
-            (uint64_t)cap * DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
-        g->key_cache[il] = ds4_gpu_tensor_alloc(bytes);
-        g->value_cache[il] = ds4_gpu_tensor_alloc(bytes);
-        if (!g->key_cache[il] || !g->value_cache[il]) goto fail;
-        g->cache_cap[il] = cap;
-        g->kv_bytes += 2u * bytes;
-    }
-
-    fprintf(stderr,
-            "ds4: Laguna GPU graph: ctx=%u, prefill=%u, KV %.2f GiB, scratch %.2f MiB\n",
-            ctx_size,
-            g->prefill_cap,
-            (double)g->kv_bytes / 1073741824.0,
-            (double)g->scratch_bytes / 1048576.0);
-    return true;
-
-fail:
     fprintf(stderr, "ds4: failed to allocate Laguna GPU graph\n");
     laguna_graph_free(g);
     return false;
@@ -68410,6 +68214,74 @@ bool ds4_test_laguna_graph_guard_routes(void) {
 
     ds4_test_laguna_shape_scope_end(&shape_scope);
     return sync_safe && argmax_safe && mixed_rejected;
+}
+
+/* Exercise both sides of the storage boundary.  The direct lgn_* leg proves
+ * that base storage teardown leaves extension/diagnostic state alone; the
+ * wrapper leg proves the complete owner still gets an idempotent full free. */
+bool ds4_test_laguna_graph_lifecycle(void) {
+    _Static_assert(sizeof(lgn_gpu_graph) == 3248u,
+                   "Laguna graph layout changed on Apple");
+    const ds4_shape saved_shape = g_ds4_shape;
+    g_ds4_shape = *lgn_model_shape();
+
+    uint64_t handles_before = 0;
+    uint64_t bytes_before = 0;
+    if (!ds4_gpu_test_tensor_tracking_state(&handles_before,
+                                            &bytes_before)) {
+        g_ds4_shape = saved_shape;
+        return false;
+    }
+
+    bool ok = true;
+    lgn_gpu_graph direct = {0};
+    ds4_shape wrong_family = g_ds4_shape;
+    wrong_family.family = DS4_MODEL_FAMILY_DEEPSEEK4;
+    direct.dense_q8_fusion_enabled = true;
+    direct.dense_q8_pending.decode_mid_fused = 77u;
+    int32_t shared_id = -1;
+    float shared_weight = 0.0f;
+    if (lgn_graph_alloc(&direct, 0u, &g_ds4_shape) ||
+        lgn_graph_alloc(&direct, 1u, &wrong_family) ||
+        !lgn_graph_alloc(&direct, 1u, &g_ds4_shape) ||
+        !direct.tokens || !direct.cur || !direct.logits ||
+        direct.cache_cap[0] != 1u || direct.cache_cap[1] != 1u ||
+        direct.cache_cap[47] != 1u || !direct.dense_q8_fusion_enabled ||
+        direct.dense_q8_pending.decode_mid_fused != 77u ||
+        !ds4_gpu_tensor_read(direct.shared_selected, 0, &shared_id,
+                             sizeof(shared_id)) ||
+        !ds4_gpu_tensor_read(direct.shared_weight, 0, &shared_weight,
+                             sizeof(shared_weight)) ||
+        shared_id != 0 || shared_weight != 1.0f) {
+        ok = false;
+    }
+    lgn_graph_free(&direct);
+    ok = ok && direct.dense_q8_fusion_enabled &&
+         direct.dense_q8_pending.decode_mid_fused == 77u;
+    memset(&direct, 0, sizeof(direct));
+
+    ds4_laguna_gpu_graph wrapped = {0};
+    if (!laguna_graph_alloc(&wrapped, 1u) ||
+        !wrapped.tokens || !wrapped.cur || !wrapped.logits ||
+        wrapped.cache_cap[0] != 1u || wrapped.cache_cap[1] != 1u ||
+        wrapped.cache_cap[47] != 1u ||
+        !laguna_graph_enable_gpu_argmax(&wrapped) || !wrapped.argmax ||
+        !wrapped.gpu_argmax_enabled) {
+        ok = false;
+    }
+    laguna_graph_free(&wrapped);
+    laguna_graph_free(&wrapped);
+    for (size_t i = 0; i < sizeof(wrapped); i++) {
+        if (((const unsigned char *)&wrapped)[i] != 0u) ok = false;
+    }
+
+    uint64_t handles_after = 0;
+    uint64_t bytes_after = 0;
+    ok = ok && ds4_gpu_test_tensor_tracking_state(&handles_after,
+                                                    &bytes_after) &&
+         handles_after == handles_before && bytes_after == bytes_before;
+    g_ds4_shape = saved_shape;
+    return ok;
 }
 #endif
 #endif

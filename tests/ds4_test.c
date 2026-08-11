@@ -3,6 +3,7 @@
 #include "../ds4_server.c"
 #include "../lgn.h"
 #include "../ds4_gpu.h"
+#include "../lgn_graph.h"
 
 static void test_laguna_architecture_gate(void) {
     static const struct {
@@ -89,8 +90,19 @@ static void test_laguna_selector_parser(void) {
 }
 
 #ifndef DS4_NO_GPU
+bool ds4_test_laguna_graph_lifecycle(void);
+
 static void test_laguna_graph_guard_routes(void) {
     TEST_ASSERT(ds4_test_laguna_graph_guard_routes());
+}
+
+static void test_laguna_graph_lifecycle(void) {
+    if (!ds4_gpu_init()) {
+        TEST_ASSERT(false);
+        return;
+    }
+    TEST_ASSERT(ds4_test_laguna_graph_lifecycle());
+    ds4_gpu_cleanup();
 }
 #endif
 
@@ -14594,6 +14606,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-graph-guards", "laguna-graph-guards",
      "Laguna session paths reject generic GLM/raw graph access",
      test_laguna_graph_guard_routes, false},
+    {"--laguna-graph-lifecycle", "laguna-graph-lifecycle",
+     "Laguna target graph allocation, layout, reset, and failure unwind",
+     test_laguna_graph_lifecycle, false},
 #if defined(__APPLE__)
     {"--dflash-payload-lifecycle", "dflash-payload-lifecycle",
      "payload and snapshot restore invalidate Laguna DFlash support state",
