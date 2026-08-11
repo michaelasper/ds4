@@ -1,5 +1,4 @@
 #define FC_FLASH_ATTN_EXT_PAD 100
-#define FC_FLASH_ATTN_EXT_BLK 200
 #define FC_FLASH_ATTN_EXT 300
 #define FC_FLASH_ATTN_EXT_VEC 400
 #define FC_FLASH_ATTN_EXT_VEC_REDUCE 500
@@ -38,17 +37,6 @@ struct ds4_metal_args_flash_attn_ext_pad {
     uint64_t nb21;
     uint64_t nb22;
     uint64_t nb23;
-    int32_t  ne31;
-    int32_t  ne32;
-    int32_t  ne33;
-    uint64_t nb31;
-    uint64_t nb32;
-    uint64_t nb33;
-};
-
-struct ds4_metal_args_flash_attn_ext_blk {
-    int32_t  ne01;
-    int32_t  ne30;
     int32_t  ne31;
     int32_t  ne32;
     int32_t  ne33;
@@ -180,6 +168,10 @@ struct ds4_metal_args_flash_attn_ext_vec_virtual {
     uint64_t laguna_stage_nb12;
 };
 
+struct ds4_metal_args_flash_attn_ext_vec_reduce {
+    int32_t nrows;
+};
+
 /* Keep stage metadata out of the ordinary vector arithmetic.  The ordinary
  * struct retains the trailing fields for ABI compatibility, but its accessor
  * overloads never read them; only the virtual specialization consumes them. */
@@ -232,10 +224,6 @@ inline uint64_t ds4_flash_attn_stage_nb12(
         constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
     return args.laguna_stage_nb12;
 }
-
-struct ds4_metal_args_flash_attn_ext_vec_reduce {
-    int32_t nrows;
-};
 
 constant bool FC_flash_attn_ext_pad_has_mask [[function_constant(FC_FLASH_ATTN_EXT_PAD + 0)]];
 constant int32_t FC_flash_attn_ext_pad_ncpsg [[function_constant(FC_FLASH_ATTN_EXT_PAD + 25)]];
@@ -303,67 +291,6 @@ kernel void kernel_flash_attn_ext_pad(
                 }
             }
         }
-    }
-}
-
-constant int32_t FC_flash_attn_ext_blk_nqptg [[function_constant(FC_FLASH_ATTN_EXT_BLK + 24)]];
-constant int32_t FC_flash_attn_ext_blk_ncpsg [[function_constant(FC_FLASH_ATTN_EXT_BLK + 25)]];
-
-// DS4 FlashAttention mask scan: marks blocks so the non-vector kernel can skip
-// blocks that are entirely masked or entirely zero.
-kernel void kernel_flash_attn_ext_blk(
-        constant ds4_metal_args_flash_attn_ext_blk & args,
-        device const char * mask,
-        device       char * dst,
-        uint3  tgpig[[threadgroup_position_in_grid]],
-        ushort tiisg[[thread_index_in_simdgroup]]) {
-    const int32_t Q = FC_flash_attn_ext_blk_nqptg;
-    const int32_t C = FC_flash_attn_ext_blk_ncpsg;
-
-    constexpr short NW  = N_SIMDWIDTH;
-
-    const int32_t i3 = tgpig[2]/args.ne32;
-    const int32_t i2 = tgpig[2]%args.ne32;
-    const int32_t i1 = tgpig[1];
-    const int32_t i0 = tgpig[0];
-
-    char res = i0*C + C > args.ne30 ? 1 : 0;
-
-    if ((C > NW || Q > 1) && res == 0) {
-        half mmin =  MAXHALF;
-        half mmax = -MAXHALF;
-        const int32_t q0 = i1*Q;
-
-        FOR_UNROLL (short j = 0; j < Q; ++j) {
-            if (q0 + j < args.ne31) {
-                device const half * mask_src =
-                    (device const half *) (mask + (q0 + j)*args.nb31 + i2*args.nb32 + i3*args.nb33) +
-                    i0*C + tiisg;
-
-                FOR_UNROLL (short ii = 0; ii < C/NW; ++ii) {
-                    mmin = min(mmin, mask_src[ii*NW]);
-                    mmax = max(mmax, mask_src[ii*NW]);
-                }
-            }
-        }
-
-        mmin = simd_min(mmin);
-        mmax = simd_max(mmax);
-
-        if (mmax > -MAXHALF) {
-            if (mmin == 0.0 && mmax == 0.0) {
-                res = 2;
-            } else {
-                res = 1;
-            }
-        }
-    }
-
-    const int32_t nblk1 = ((args.ne01 + Q - 1)/Q);
-    const int32_t nblk0 = ((args.ne30 + C - 1)/C);
-
-    if (tiisg == 0) {
-        dst[((i3*args.ne32 + i2)*nblk1 + i1)*nblk0 + i0] = res;
     }
 }
 
@@ -1620,63 +1547,11 @@ template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128_virtual")]]
 #undef FA_TYPES_F32
 #undef FA_TYPES_QF32
 
+/* Laguna's retained reduce-gate kernel shares the ordinary split-K argument
+ * layout and function-constant slots, even though the legacy standalone
+ * reduce kernel is no longer emitted here. */
 constant int32_t FC_flash_attn_ext_vec_reduce_DV  [[function_constant(FC_FLASH_ATTN_EXT_VEC_REDUCE + 0)]];
 constant int32_t FC_flash_attn_ext_vec_reduce_NWG [[function_constant(FC_FLASH_ATTN_EXT_VEC_REDUCE + 1)]];
-
-// Reduces split-K decode FlashAttention partials. It combines each workgroup's
-// output vector and softmax (sum,max) pair into the final attention result.
-/* Shared and deliberately noinline so the split-K reduction is compiled once and
- * every caller gets identical codegen. The RoPE-fused sibling in dsv4_rope.metal
- * calls this same body, which is what keeps the fusion bit-exact. */
-static __attribute__((noinline)) void ds4_flash_attn_vec_reduce_row(
-        constant ds4_metal_args_flash_attn_ext_vec_reduce & args,
-        device  const char * htmp,
-        device        char * dst,
-        uint   tgpig,
-        ushort tiisg,
-        ushort sgitg,
-        short  NWG_,
-        short  DV_) {
-    const uint64_t rid = tgpig;
-
-    const short iwg = tiisg;
-
-    device const float  * ss    = (device const float  *) htmp + (uint64_t)args.nrows*DV_*NWG_;
-
-    float S = ss[rid*(2*NWG_) + 2*iwg + 0];
-    float M = ss[rid*(2*NWG_) + 2*iwg + 1];
-
-    const float m  = simd_max(M);
-    const float ms = exp(M - m);
-
-    S = simd_sum(S*ms);
-    S = S == 0.0f ? 0.0f : 1.0f/S;
-
-    const short DV4 = DV_/4;
-
-    device const float4 * htmp4 = (device const float4 *) htmp + rid*DV4*NWG_;
-    device       float4 * dst4  = (device       float4 *) dst  + rid*DV4;
-
-    for (short i = sgitg; i < DV4; i += NWG_) {
-        const float4 v = simd_sum(htmp4[i*NWG_ + iwg]*ms);
-
-        if (iwg == 0) {
-            dst4[i] = v*S;
-        }
-    }
-}
-
-kernel void kernel_flash_attn_ext_vec_reduce(
-        constant ds4_metal_args_flash_attn_ext_vec_reduce & args,
-        device  const char * htmp,
-        device        char * dst,
-        uint   tgpig[[threadgroup_position_in_grid]],
-        ushort tiisg[[thread_index_in_simdgroup]],
-        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    ds4_flash_attn_vec_reduce_row(args, htmp, dst, tgpig, tiisg, sgitg,
-                                  (short)FC_flash_attn_ext_vec_reduce_NWG,
-                                  (short)FC_flash_attn_ext_vec_reduce_DV);
-}
 
 // M5 decode specialization: time-slice all 32 split-K workgroups through eight
 // physical simdgroups, then reduce through the same 32-lane topology without a

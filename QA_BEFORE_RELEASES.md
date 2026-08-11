@@ -72,7 +72,6 @@ focused targets that cover the changed code. At minimum:
 
 ```zsh
 make test-metal-laguna
-make test-mxfp4-metal
 ```
 
 Do not substitute `test-legacy` for the default Laguna suite. It is a temporary

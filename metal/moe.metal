@@ -2578,13 +2578,6 @@ static __attribute__((noinline)) half ds4_metal_mxfp4_half_fallback_value(
     return result;
 }
 
-static inline half ds4_metal_mxfp4_half_lut_value(uchar e, uint q) {
-    if (e == 0xffu) {
-        return ds4_metal_mxfp4_half_fallback_value(e, q);
-    }
-    return as_type<half>(ds4_metal_mxfp4_half_lut[(uint)e][q]);
-}
-
 void dequantize_mxfp4_half_lut(
         device const block_mxfp4 *xb,
         short il,
@@ -2637,27 +2630,6 @@ void dequantize_mxfp4_half_scale(
         const uint q = ((uint)xb->qs[i] >> shift) & 0x0fu;
         reg[i/4][i%4] = dh * ds4_metal_mxfp4_half_values[q];
     }
-}
-
-// Test-only raw-bit oracle for the half-scale path: covers all 4096
-// exponent/code pairs including both sides of the band boundary.
-// Test-only raw-bit oracle. Keeping both conversions in one GPU invocation
-// covers all 4096 exponent/code pairs, including the 0xff fallback row,
-// without depending on host floating-point conversion behavior.
-kernel void kernel_test_mxfp4_down_half_lut(
-        device ushort *legacy [[buffer(0)]],
-        device ushort *lut [[buffer(1)]],
-        uint tid [[thread_position_in_grid]]) {
-    if (tid >= 4096u) {
-        return;
-    }
-    const uchar e = (uchar)(tid >> 4u);
-    const uint q = tid & 0x0fu;
-    half legacy_value;
-    legacy_value = ds4_metal_e8m0_to_f32(e) *
-                   ds4_metal_mxfp4_values[q];
-    legacy[tid] = as_type<ushort>(legacy_value);
-    lut[tid] = as_type<ushort>(ds4_metal_mxfp4_half_lut_value(e, q));
 }
 
 template <typename type4x4>
@@ -3500,126 +3472,6 @@ kernel void kernel_mul_mv_q4_K_dense_f32(
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
     kernel_mul_mv_q4_K_f32_impl<N_R0_Q4_K>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-}
-
-// DS4 attention output low projection, specialized for the fixed block
-// diagonal mapping used by the model:
-//
-//     low[token, group, rank] = heads[token, group, :] * Woa[group, rank, :]
-//
-// The generic GGML-style id matvec supports arbitrary routed expert ids.  Here
-// the id is always equal to the group number, so this wrapper keeps the exact
-// Q8_0 dot kernel but removes the id-buffer load and the CPU-side id table.
-kernel void kernel_dsv4_attn_out_low_q8_0_f32(
-        constant ds4_metal_args_mul_mv_id & args,
-        device const char * src0s,
-        device const char * src1,
-        device       char * dst,
-        threadgroup  char * shmem [[threadgroup(0)]],
-        uint3  tgpig[[threadgroup_position_in_grid]],
-        ushort tiitg[[thread_index_in_threadgroup]],
-        ushort tiisg[[thread_index_in_simdgroup]],
-        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    const int iid1 = tgpig.z/args.nei0;
-    const int idx  = tgpig.z%args.nei0;
-
-    tgpig.z = 0;
-
-    const int64_t i11 = idx % args.ne11;
-    const int64_t i12 = iid1;
-
-    device const char * src0_cur = src0s + idx*args.nb02;
-    device const char * src1_cur = src1  + i11*args.nb11 + i12*args.nb12;
-    device       char * dst_cur  = dst   + (idx*args.ne0 + i12*args.ne1*args.ne0)*sizeof(float);
-
-    ds4_metal_args_mul_mv args0 = {
-        /*.ne00 =*/ args.ne00,
-        /*.ne01 =*/ args.ne01,
-        /*.ne02 =*/ 1,
-        /*.nb00 =*/ args.nb00,
-        /*.nb01 =*/ args.nb01,
-        /*.nb02 =*/ args.nb02,
-        /*.nb03 =*/ args.nb02,
-        /*.ne10 =*/ args.ne10,
-        /*.ne11 =*/ 1,
-        /*.ne12 =*/ 1,
-        /*.nb10 =*/ args.nb10,
-        /*.nb11 =*/ args.nb11,
-        /*.nb12 =*/ args.nb12,
-        /*.nb13 =*/ args.nb12,
-        /*.ne0  =*/ args.ne0,
-        /*.ne1  =*/ 1,
-        /*.nr0  =*/ args.nr0,
-        /*.r2   =*/ 1,
-        /*.r3   =*/ 1,
-    };
-
-    kernel_mul_mv_q8_0_f32_impl<N_R0_Q8_0, thread ds4_metal_args_mul_mv &>(
-        args0,
-        src0_cur,
-        src1_cur,
-        dst_cur,
-        shmem,
-        tgpig,
-        tiisg,
-        sgitg);
-}
-
-kernel void kernel_dsv4_attn_out_low_q4_K_f32(
-        constant ds4_metal_args_mul_mv_id & args,
-        device const char * src0s,
-        device const char * src1,
-        device       char * dst,
-        threadgroup  char * shmem [[threadgroup(0)]],
-        uint3  tgpig[[threadgroup_position_in_grid]],
-        ushort tiitg[[thread_index_in_threadgroup]],
-        ushort tiisg[[thread_index_in_simdgroup]],
-        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-    (void)tiitg;
-
-    const int iid1 = tgpig.z / args.nei0;
-    const int idx  = tgpig.z % args.nei0;
-
-    tgpig.z = 0;
-
-    const int64_t i11 = idx % args.ne11;
-    const int64_t i12 = iid1;
-
-    device const char * src0_cur = src0s + idx * args.nb02;
-    device const char * src1_cur = src1  + i11 * args.nb11 + i12 * args.nb12;
-    device       char * dst_cur  = dst   + (idx * args.ne0 + i12 * args.ne1 * args.ne0) * sizeof(float);
-
-    ds4_metal_args_mul_mv args0 = {
-        /*.ne00 =*/ args.ne00,
-        /*.ne01 =*/ args.ne01,
-        /*.ne02 =*/ 1,
-        /*.nb00 =*/ args.nb00,
-        /*.nb01 =*/ args.nb01,
-        /*.nb02 =*/ args.nb02,
-        /*.nb03 =*/ args.nb02,
-        /*.ne10 =*/ args.ne10,
-        /*.ne11 =*/ 1,
-        /*.ne12 =*/ 1,
-        /*.nb10 =*/ args.nb10,
-        /*.nb11 =*/ args.nb11,
-        /*.nb12 =*/ args.nb12,
-        /*.nb13 =*/ args.nb12,
-        /*.ne0  =*/ args.ne0,
-        /*.ne1  =*/ 1,
-        /*.nr0  =*/ args.nr0,
-        /*.r2   =*/ 1,
-        /*.r3   =*/ 1,
-    };
-
-    kernel_mul_mv_q4_K_f32_impl<N_R0_Q4_K>(
-        args0,
-        src0_cur,
-        src1_cur,
-        dst_cur,
-        shmem,
-        tgpig,
-        tiisg,
-        sgitg);
 }
 
 kernel void kernel_mul_mv_id_iq2_xxs_pair_f32(

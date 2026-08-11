@@ -75,9 +75,8 @@ kernel void kernel_get_rows_f(
 
 typedef decltype(kernel_get_rows_f<float, float>) get_rows_f_t;
 
-// Host-visible gather variants for F32, F16, and I32 tables.
+// Host-visible gather variants for F32 and I32 tables.
 template [[host_name("kernel_get_rows_f32")]] kernel get_rows_f_t kernel_get_rows_f<float, float>;
-template [[host_name("kernel_get_rows_f16")]] kernel get_rows_f_t kernel_get_rows_f<half, float>;
 template [[host_name("kernel_get_rows_i32")]] kernel get_rows_f_t kernel_get_rows_f<int32_t, int32_t>;
 
 kernel void kernel_get_rows_q8_0_f32(

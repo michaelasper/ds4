@@ -24,24 +24,16 @@ METAL_SOURCE_SPECS := \
 	DS4_METAL_FLASH_ATTN_SOURCE=metal/flash_attn.metal \
 	DS4_METAL_DENSE_SOURCE=metal/dense.metal \
 	DS4_METAL_MOE_SOURCE=metal/moe.metal \
-	DS4_METAL_DSV4_HC_SOURCE=metal/dsv4_hc.metal \
 	DS4_METAL_UNARY_SOURCE=metal/unary.metal \
-	DS4_METAL_DSV4_KV_SOURCE=metal/dsv4_kv.metal \
-	DS4_METAL_DSV4_ROPE_SOURCE=metal/dsv4_rope.metal \
 	DS4_METAL_DSV4_MISC_SOURCE=metal/dsv4_misc.metal \
 	DS4_METAL_LAGUNA_SOURCE=metal/laguna.metal \
 	DS4_METAL_DFLASH_SOURCE=metal/dflash.metal \
 	DS4_METAL_ARGSORT_SOURCE=metal/argsort.metal \
 	DS4_METAL_CPY_SOURCE=metal/cpy.metal \
-	DS4_METAL_CONCAT_SOURCE=metal/concat.metal \
 	DS4_METAL_GET_ROWS_SOURCE=metal/get_rows.metal \
-	DS4_METAL_SUM_ROWS_SOURCE=metal/sum_rows.metal \
-	DS4_METAL_SOFTMAX_SOURCE=metal/softmax.metal \
-	DS4_METAL_REPEAT_SOURCE=metal/repeat.metal \
 	DS4_METAL_GLU_SOURCE=metal/glu.metal \
 	DS4_METAL_NORM_SOURCE=metal/norm.metal \
-	DS4_METAL_BIN_SOURCE=metal/bin.metal \
-	DS4_METAL_SET_ROWS_SOURCE=metal/set_rows.metal
+	DS4_METAL_BIN_SOURCE=metal/bin.metal
 DS4_TEST_MODEL ?= ds4flash.gguf
 DS4_TEST_DFLASH ?=
 # Deliberately empty: the model-backed Laguna integration gate must never
@@ -57,7 +49,7 @@ TEST_CORE_OBJS := $(filter-out ds4.o ds4_metal.o,$(CORE_OBJS)) $(DS4_TEST_DS4_OB
 
 METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 
-.PHONY: all help clean test test-legacy test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-mxfp4-metal test-glm-q23-metal dflash-verify-depth
+.PHONY: all help clean test test-legacy test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-glm-q23-metal dflash-verify-depth
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -76,7 +68,7 @@ check-metal-sources:
 		fi; \
 	done
 
-.PHONY: metal-decode-schedule-bench metal-prefill-variant-bench check-mxfp4-half-lut
+.PHONY: metal-decode-schedule-bench metal-prefill-variant-bench
 
 all: check-metal-sources ds4 ds4-server ds4-bench ds4-eval
 
@@ -89,8 +81,6 @@ help:
 	@echo "  make test-metal-laguna-integration LAGUNA_TEST_MODEL=FILE  Run model-backed Laguna smoke"
 	@echo "  make metal-decode-schedule-bench  Build the balanced Metal decode schedule benchmark"
 	@echo "  make metal-prefill-variant-bench  Build the balanced Metal prefill variant benchmark"
-	@echo "  make check-mxfp4-half-lut  Verify the checked-in MXFP4 half LUT matches the generator"
-	@echo "  make test-mxfp4-metal  Check the MXFP4 half LUT, then run Metal MXFP4 exactness tests"
 	@echo "  make dflash-verify-depth  Run DFlash speculative verification smoke if support GGUF is present"
 	@echo "  make clean        Remove build outputs"
 
@@ -133,18 +123,6 @@ speed-bench/metal_prefill_variant_bench: speed-bench/metal_prefill_variant_bench
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 metal-prefill-variant-bench: speed-bench/metal_prefill_variant_bench
-
-tests/test_mxfp4_metal.o: tests/test_mxfp4_metal.c ds4_gpu.h
-	$(CC) $(CFLAGS) -I. -c -o $@ $<
-
-tests/test_mxfp4_metal: tests/test_mxfp4_metal.o ds4_metal.o | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
-
-check-mxfp4-half-lut:
-	python3 metal/generate_mxfp4_half_lut.py --check
-
-test-mxfp4-metal: check-mxfp4-half-lut tests/test_mxfp4_metal
-	./tests/test_mxfp4_metal
 
 tests/test_glm_q23_metal.o: tests/test_glm_q23_metal.c ds4_gpu.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
@@ -287,4 +265,4 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 	./tests/test_mxfp4_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o quality/score_official quality/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_metal_session_batch tests/test_sampling tests/*.o *.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o quality/score_official quality/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_metal_session_batch tests/test_sampling tests/*.o *.o

@@ -2,6 +2,51 @@
 // these kernels only cover operations that are not represented by the shared
 // DeepSeek/GLM Metal API.
 
+static float rope_yarn_ramp(const float low, const float high, const int i0) {
+    const float y = (i0 / 2 - low) / max(0.001f, high - low);
+    return 1.0f - min(1.0f, max(0.0f, y));
+}
+
+static void rope_yarn(
+        float theta_extrap,
+        float freq_scale,
+        float corr_dims[2],
+        int   i0,
+        float ext_factor,
+        float mscale,
+        thread float *cos_theta,
+        thread float *sin_theta) {
+    float theta_interp = freq_scale * theta_extrap;
+    float theta = theta_interp;
+    if (ext_factor != 0.0f) {
+        const float ramp_mix =
+            rope_yarn_ramp(corr_dims[0], corr_dims[1], i0) * ext_factor;
+        theta = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+        mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
+    }
+    *cos_theta = cos(theta) * mscale;
+    *sin_theta = sin(theta) * mscale;
+}
+
+static float rope_yarn_corr_factor(
+        int n_dims, int n_ctx_orig, float n_rot, float base) {
+    return n_dims * log(n_ctx_orig / (n_rot * 2.0f * M_PI_F)) /
+           (2.0f * log(base));
+}
+
+static void rope_yarn_corr_dims(
+        int n_dims,
+        int n_ctx_orig,
+        float freq_base,
+        float beta_fast,
+        float beta_slow,
+        float dims[2]) {
+    dims[0] = max(0.0f, floor(rope_yarn_corr_factor(
+        n_dims, n_ctx_orig, beta_fast, freq_base)));
+    dims[1] = min(n_dims - 1.0f, ceil(rope_yarn_corr_factor(
+        n_dims, n_ctx_orig, beta_slow, freq_base)));
+}
+
 /* A single fixed-size reduction is enough for Laguna's one-row greedy decode.
  * Each lane scans a strided portion of the row, then the threadgroup reduces
  * the lane winners. The sentinel and strict comparison intentionally mirror
