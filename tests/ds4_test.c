@@ -9880,15 +9880,23 @@ static void test_laguna_moe_abi_override_matrix(const char *shader) {
  * source-level contract test next to the numeric suites so a future field or
  * range helper cannot silently put the two sides out of sync again. */
 static void test_laguna_moe_abi_contract(void) {
+    char *engine = test_read_file("ds4.c");
     char *host = test_read_file("ds4_metal.m");
     char *shader = test_read_file("metal/moe.metal");
+    char *header = test_read_file("ds4_gpu.h");
+    if (!engine) engine = test_read_file("../ds4.c");
     if (!host) host = test_read_file("../ds4_metal.m");
     if (!shader) shader = test_read_file("../metal/moe.metal");
+    if (!header) header = test_read_file("../ds4_gpu.h");
+    TEST_ASSERT(engine != NULL);
     TEST_ASSERT(host != NULL);
     TEST_ASSERT(shader != NULL);
-    if (!host || !shader) {
+    TEST_ASSERT(header != NULL);
+    if (!engine || !host || !shader || !header) {
+        free(engine);
         free(host);
         free(shader);
+        free(header);
         return;
     }
 
@@ -9896,10 +9904,89 @@ static void test_laguna_moe_abi_contract(void) {
         "g_tp_split_rank",
         "g_tp_split_world",
         "ds4_gpu_tp_expert_range",
+        "ds4_gpu_set_glm_model",
+        "g_moe_sum6_pipeline",
+        "g_moe_mul_mv_id_",
+        "g_moe_mul_mv_table_q4_",
+        "g_moe_mul_mv_addr_q4_",
+        "g_moe_q4_gather_slots6_pipeline",
+        "g_moe_q4_gate_slots_buffer",
+        "g_moe_q4_up_slots_buffer",
+        "g_moe_q4_down_slots_buffer",
+        "g_q4_expert_table_cache",
+        "g_q4_expert_layer_residency_cache",
+        "DS4MetalQ4ExpertTable",
+        "DS4MetalQ4LayerResidency",
+        "ds4_gpu_new_mul_mv_tg_multiple_pipeline",
+        "DS4_METAL_Q4_EXPERT_TABLE_GROUP_SIZE",
+        "DS4_METAL_Q4_TABLE_QUEUE_RESIDENCY_SET",
+        "DS4_METAL_Q4_TABLE_RESIDENCY_SET",
+        "DS4_METAL_Q4_TABLE_PER_TENSOR_RESIDENCY_SET",
+        "DS4_METAL_ENABLE_Q4_SELECTED_EXPERT_VIEWS",
+        "DS4_METAL_ENABLE_PRO_Q4_SELECTED_EXPERT_VIEWS",
+        "DS4_METAL_Q4_EXPERT_TABLE",
+        "DS4_METAL_ENABLE_Q4_EXPERT_TABLE",
+        "DS4_METAL_ENABLE_Q4_EXPERT_ADDRESS_TABLE",
+        "DS4_METAL_DISABLE_Q4_EXPERT_TABLE",
+        "DS4_METAL_DISABLE_Q4_EXPERT_ADDRESS_TABLE",
+        "DS4_METAL_ENABLE_PRO_Q4_EXPERT_TABLE_AUTO",
+        "DS4_METAL_DISABLE_PRO_Q4_EXPERT_TABLE_AUTO",
+        "DS4_METAL_ENABLE_PRO_Q4_EXPERT_ADDRESS_AUTO",
+        "DS4_METAL_DISABLE_PRO_Q4_EXPERT_ADDRESS_AUTO",
+        "DS4_METAL_Q4_EXPERT_TABLE_PROFILE",
     };
     for (size_t i = 0;
          i < sizeof(removed_host) / sizeof(removed_host[0]); i++) {
         TEST_ASSERT(strstr(host, removed_host[i]) == NULL);
+    }
+
+    static const char *const removed_engine[] = {
+        "ds4_engine_preload_pro_q4_expert_tables",
+        "ds4_gpu_preload_q4_expert_tables",
+        "ds4_gpu_pro_q4_expert_table_auto_available",
+        "DS4_METAL_DISABLE_PRO_Q4_EXPERT_TABLE_PRELOAD",
+        "DS4_METAL_ENABLE_PRO_Q4_EXPERT_TABLE_AUTO",
+        "DS4_METAL_ENABLE_PRO_Q4_EXPERT_ADDRESS_AUTO",
+        "DS4_METAL_ENABLE_Q4_EXPERT_TABLE",
+        "DS4_METAL_ENABLE_Q4_EXPERT_ADDRESS_TABLE",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_engine) / sizeof(removed_engine[0]); i++) {
+        TEST_ASSERT(strstr(engine, removed_engine[i]) == NULL);
+    }
+
+    static const char *const removed_shader[] = {
+        "ds4_metal_args_mul_mv_id",
+        "ds4_metal_q4_expert_table",
+        "ds4_tp_owns_expert",
+        "kernel_mul_mv_id",
+        "kernel_mul_mv_table_q4_K",
+        "kernel_mul_mv_addr_q4_K",
+        "kernel_mul_mv_group",
+        "kernel_mul_mv_slots6",
+        "kernel_mul_mv_table",
+        "kernel_mul_mv_addr",
+        "kernel_q4_gather_slots6",
+        "kernel_dsv4_moe_sum6_f32",
+        "ds4_metal_moe_expert_group_args",
+        "ds4_metal_q4_gather_slots6_args",
+        "sum6",
+        "tp_rank",
+        "tp_world",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_shader) / sizeof(removed_shader[0]); i++) {
+        TEST_ASSERT(strstr(shader, removed_shader[i]) == NULL);
+    }
+
+    static const char *const removed_public[] = {
+        "ds4_gpu_pro_q4_expert_table_auto_available",
+        "ds4_gpu_preload_q4_expert_tables",
+        "ds4_gpu_set_glm_model",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_public) / sizeof(removed_public[0]); i++) {
+        TEST_ASSERT(strstr(header, removed_public[i]) == NULL);
     }
 
     TEST_ASSERT(strstr(host,
@@ -9927,18 +10014,25 @@ static void test_laguna_moe_abi_contract(void) {
                        "struct ds4_metal_args_mul_mm_id") != NULL);
     TEST_ASSERT(strstr(shader,
                        "(uint64_t)im*args.nb02") != NULL);
+    TEST_ASSERT(strstr(shader, "kernel_mul_mm_id_map0_ne20_10") != NULL);
+    TEST_ASSERT(strstr(shader, "kernel_mul_mm_id_q4_K_f32") != NULL);
+    TEST_ASSERT(strstr(shader, "kernel_mul_mv_q4_K_dense_f32") != NULL);
     TEST_ASSERT(strstr(
         shader,
         "kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48") != NULL);
     TEST_ASSERT(strstr(host,
                        "kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48 "
                        "missing; ") != NULL);
+    TEST_ASSERT(strstr(engine,
+                       "ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor") != NULL);
 
 #if defined(__APPLE__)
     test_laguna_moe_abi_override_matrix(shader);
 #endif
+    free(engine);
     free(host);
     free(shader);
+    free(header);
 }
 
 typedef struct {

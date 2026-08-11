@@ -307,14 +307,8 @@ int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size);
 int ds4_gpu_set_model_fd_for_map(int fd, const void *model_map);
 int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size, uint64_t max_tensor_bytes);
 
-int ds4_gpu_pro_q4_expert_table_auto_available(void);
-int ds4_gpu_preload_q4_expert_tables(const void *model_map, uint64_t model_size,
-                                     uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset,
-                                     uint64_t gate_expert_bytes, uint64_t down_expert_bytes,
-                                     uint32_t n_total_expert);
 void ds4_gpu_set_quality(bool quality);
 void ds4_gpu_set_tensor_matmul_suppressed(bool suppressed);
-void ds4_gpu_set_glm_model(bool enabled);
 #ifdef __APPLE__
 int ds4_gpu_device_is_pre_m5_apple_silicon(void);
 int ds4_gpu_device_is_m5_apple_silicon(void);

@@ -46,8 +46,6 @@ enum {
     DS4_METAL_TENSOR_MXFP4   = 39,
 };
 
-@class DS4MetalQ4ExpertTable;
-
 static id<MTLDevice> g_device;
 static id<MTLCommandQueue> g_queue;
 static id<MTLLibrary> g_library;
@@ -100,7 +98,6 @@ static id<MTLComputePipelineState> g_swiglu_flat_pipeline;
 static id<MTLComputePipelineState> g_add_pipeline;
 static id<MTLComputePipelineState> g_add2_pipeline;
 static id<MTLComputePipelineState> g_add3_pipeline;
-static id<MTLComputePipelineState> g_moe_sum6_pipeline;
 static id<MTLComputePipelineState> g_moe_sum8_pipeline;
 static id<MTLComputePipelineState> g_moe_sum10_pipeline;
 static id<MTLComputePipelineState> g_mul_pipeline;
@@ -125,51 +122,6 @@ static id<MTLComputePipelineState> g_unary_fill_pipeline;
 static id<MTLComputePipelineState> g_unary_fill_f16_pipeline;
 static id<MTLComputePipelineState> g_bin_mul_scalar_pipeline;
 static id<MTLComputePipelineState> g_bin_div_row_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_iq2_xxs_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_iq2_xxs_pair_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pack2_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_q2_k_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_q2_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_iq2_xxs_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_q4_k_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_q4_k_pair_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_q4_k_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_q4_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group_q4_k_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group_q4_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group6_q4_k_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group6_q4_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group8_q4_k_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group8_q4_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group24_q4_k_id_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_group24_q4_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_slots6_iq2_xxs_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_slots6_q2_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_slots6_q4_k_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_slots6_q4_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1_tg_multiple;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1_tg_multiple;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_pipeline_nsg1;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_sum6_fixed_route_pipeline_nsg1;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_pipeline_nsg1;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_static_pipeline_nsg1;
-static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_static_pipeline_nsg1;
-static id<MTLComputePipelineState> g_moe_mul_mv_slots6_mxfp4_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_slots6_mxfp4_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_q4_gather_slots6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_table_q4_k_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_table_q4_k_sum6_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_addr_q4_k_pair_swiglu_pipeline;
-static id<MTLComputePipelineState> g_moe_mul_mv_addr_q4_k_sum6_pipeline;
-static id<MTLArgumentEncoder> g_moe_table_q4_pair_gate_encoder;
-static id<MTLArgumentEncoder> g_moe_table_q4_pair_up_encoder;
-static id<MTLArgumentEncoder> g_moe_table_q4_sum_down_encoder;
 static id<MTLComputePipelineState> g_argsort_f32_i32_desc_pipeline;
 static id<MTLComputePipelineState> g_argsort_merge_f32_i32_desc_pipeline;
 static id<MTLComputePipelineState> g_sum_rows_f32_f32_pipeline;
@@ -273,9 +225,6 @@ static id<MTLComputePipelineState> g_laguna_argmax_f32_pipeline;
 static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *g_pipeline_cache;
 
 static NSMutableDictionary<NSString *, id<MTLBuffer>> *g_model_buffer_cache;
-static NSMutableDictionary<NSString *, DS4MetalQ4ExpertTable *> *g_q4_expert_table_cache;
-static NSMutableDictionary<NSString *, id> *g_q4_expert_layer_residency_cache;
-static NSMutableArray<id<MTLBuffer>> *g_transient_buffers;
 static id g_model_residency_set;
 
 static id<MTLBuffer> g_flash_attn_zero_mask_buffer;
@@ -292,9 +241,6 @@ static id<MTLBuffer> g_indexer_topk_buffer;
 static id<MTLBuffer> g_moe_gate_scratch_buffer;
 static id<MTLBuffer> g_moe_down_scratch_buffer;
 static id<MTLBuffer> g_moe_id_map_buffer;
-static id<MTLBuffer> g_moe_q4_gate_slots_buffer;
-static id<MTLBuffer> g_moe_q4_up_slots_buffer;
-static id<MTLBuffer> g_moe_q4_down_slots_buffer;
 static const void *g_model_map_ptr;
 static uint64_t g_model_map_size;
 static uint64_t g_model_mapped_offset;
@@ -315,7 +261,6 @@ static uint64_t g_model_buffer_cache_evictions;
 static int g_model_buffer_cache_over_limit;
 static uint64_t g_model_residency_count;
 static int g_model_residency_added_to_queue;
-static int g_glm_model_mode;
 static int g_metal4_runtime_available;
 static int g_metal4_family_supported;
 static int g_metal4_queue_supported;
@@ -334,9 +279,6 @@ static NSUInteger g_indexer_topk_bytes;
 static NSUInteger g_moe_gate_scratch_bytes;
 static NSUInteger g_moe_down_scratch_bytes;
 static NSUInteger g_moe_id_map_bytes;
-static NSUInteger g_moe_q4_gate_slots_bytes;
-static NSUInteger g_moe_q4_up_slots_bytes;
-static NSUInteger g_moe_q4_down_slots_bytes;
 static int g_initialized;
 #ifdef DS4_TEST_HOOKS
 /* -1 means no library has been checked in this lifecycle, 0 means the
@@ -438,6 +380,10 @@ static uint64_t g_test_glm_grouped_moe_encoded_dispatches;
 static uint64_t g_test_glm_grouped_moe_batch_dispatches;
 static uint64_t g_test_glm_grouped_moe_owned_dispatches;
 static uint64_t g_test_glm_grouped_moe_completed_dispatches;
+/* Completion-scoped evidence for the exact-Q4 verifier route.  This route
+ * deliberately bypasses grouped dispatch, so it has its own counters. */
+static uint64_t g_test_glm_exact_q4_encoded_dispatches;
+static uint64_t g_test_glm_exact_q4_completed_dispatches;
 #endif
 static double ds4_gpu_gib(uint64_t bytes);
 
@@ -484,55 +430,6 @@ static uint32_t g_model_view_count;
 @end
 
 @implementation DS4MetalTensor
-@end
-
-@interface DS4MetalQ4ExpertTable : NSObject
-@property(nonatomic, strong) id<MTLBuffer> argumentBuffer;
-@property(nonatomic, strong) id<MTLBuffer> addressBuffer;
-@property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *expertBuffers;
-@property(nonatomic, strong) id residencySet;
-@property(nonatomic, assign) BOOL residencySetAddedToQueue;
-@property(nonatomic, assign) uint32_t nExpert;
-@property(nonatomic, assign) uint64_t expertBytes;
-@end
-
-@implementation DS4MetalQ4ExpertTable
-- (void)dealloc {
-#if TARGET_OS_OSX
-    if (@available(macOS 15.0, *)) {
-        if (_residencySet) {
-            if (_residencySetAddedToQueue &&
-                g_queue &&
-                [g_queue respondsToSelector:@selector(removeResidencySet:)]) {
-                [g_queue removeResidencySet:_residencySet];
-            }
-            [_residencySet endResidency];
-        }
-    }
-#endif
-}
-@end
-
-@interface DS4MetalQ4LayerResidency : NSObject
-@property(nonatomic, strong) id residencySet;
-@property(nonatomic, assign) BOOL addedToQueue;
-@end
-
-@implementation DS4MetalQ4LayerResidency
-- (void)dealloc {
-#if TARGET_OS_OSX
-    if (@available(macOS 15.0, *)) {
-        if (_residencySet) {
-            if (_addedToQueue &&
-                g_queue &&
-                [g_queue respondsToSelector:@selector(removeResidencySet:)]) {
-                [g_queue removeResidencySet:_residencySet];
-            }
-            [_residencySet endResidency];
-        }
-    }
-#endif
-}
 @end
 
 static DS4MetalTensor *ds4_gpu_tensor_obj(ds4_gpu_tensor *tensor) {
@@ -1013,7 +910,6 @@ static int ds4_gpu_finish_command_buffer(id<MTLCommandBuffer> cb, int owned, con
         ds4_gpu_laguna_atlas_publish(&g_owned_laguna_atlas_evidence);
         ds4_gpu_laguna_atlas_evidence_zero(&g_owned_laguna_atlas_evidence);
     }
-    [g_transient_buffers removeAllObjects];
     ds4_gpu_model_buffer_cache_maybe_evict(label);
 #ifdef DS4_TEST_HOOKS
     /* A dispatch is evidence only after its owning command buffer has
@@ -2555,6 +2451,23 @@ int ds4_gpu_test_glm_grouped_moe_counters(
     return 1;
 }
 
+void ds4_gpu_test_glm_exact_q4_counters_reset(void) {
+    g_test_glm_exact_q4_encoded_dispatches = 0;
+    g_test_glm_exact_q4_completed_dispatches = 0;
+}
+
+int ds4_gpu_test_glm_exact_q4_counters(
+        uint64_t *encoded_dispatches,
+        uint64_t *completed_dispatches) {
+    if (encoded_dispatches) {
+        *encoded_dispatches = g_test_glm_exact_q4_encoded_dispatches;
+    }
+    if (completed_dispatches) {
+        *completed_dispatches = g_test_glm_exact_q4_completed_dispatches;
+    }
+    return 1;
+}
+
 void ds4_gpu_test_laguna_set_direct_kv_mode(int mode) {
     g_direct_kv_prefill_mode = mode;
 }
@@ -2914,46 +2827,6 @@ static id<MTLComputePipelineState> ds4_gpu_get_mul_mv_pipeline(
     return pipeline;
 }
 
-/* The ordinary mul-mv cache key covers function name and nsg only. Keep the
- * descriptor-hinted PSO separate so a cache hit cannot erase this compiler
- * contract or substitute it for the fallback pipeline. */
-static id<MTLComputePipelineState> ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-        const char *function_name,
-        int16_t     nsg) {
-    MTLFunctionConstantValues *constants = [[MTLFunctionConstantValues alloc] init];
-    [constants setConstantValue:&nsg type:MTLDataTypeShort atIndex:600];
-
-    NSError *error = nil;
-    NSString *name = [NSString stringWithUTF8String:function_name];
-    id<MTLFunction> fn = [g_library newFunctionWithName:name
-                                         constantValues:constants
-                                                  error:&error];
-    if (!fn) {
-        fprintf(stderr, "ds4: Metal %s tg-multiple function not found: %s\n",
-                function_name, [[error localizedDescription] UTF8String]);
-        return nil;
-    }
-
-    MTLComputePipelineDescriptor *descriptor = [[MTLComputePipelineDescriptor alloc] init];
-    descriptor.label = name;
-    descriptor.computeFunction = fn;
-    descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = YES;
-
-    error = nil;
-    id<MTLComputePipelineState> pipeline =
-        [g_device newComputePipelineStateWithDescriptor:descriptor
-                                                options:MTLPipelineOptionNone
-                                             reflection:nil
-                                                  error:&error];
-    if (!pipeline) {
-        fprintf(stderr, "ds4: Metal %s tg-multiple pipeline failed: %s\n",
-                function_name, [[error localizedDescription] UTF8String]);
-        return nil;
-    }
-    return pipeline;
-}
-
-
 static id<MTLComputePipelineState> ds4_gpu_get_mul_mv_ext_pipeline(
         const char *function_name,
         int16_t     nsg,
@@ -3303,9 +3176,6 @@ void ds4_gpu_print_memory_report(const char *label) {
         (uint64_t)g_moe_gate_scratch_bytes +
         (uint64_t)g_moe_down_scratch_bytes +
         (uint64_t)g_moe_id_map_bytes +
-        (uint64_t)g_moe_q4_gate_slots_bytes +
-        (uint64_t)g_moe_q4_up_slots_bytes +
-        (uint64_t)g_moe_q4_down_slots_bytes +
         (uint64_t)g_laguna_rope_atlas_buffer_bytes +
         (uint64_t)g_laguna_rope_support_atlas_buffer_bytes;
 
@@ -3396,10 +3266,7 @@ void ds4_gpu_print_memory_report(const char *label) {
             ds4_gpu_mib((uint64_t)g_indexer_topk_bytes),
             ds4_gpu_mib((uint64_t)g_moe_gate_scratch_bytes +
                           (uint64_t)g_moe_down_scratch_bytes +
-                          (uint64_t)g_moe_id_map_bytes +
-                          (uint64_t)g_moe_q4_gate_slots_bytes +
-                          (uint64_t)g_moe_q4_up_slots_bytes +
-                          (uint64_t)g_moe_q4_down_slots_bytes),
+                          (uint64_t)g_moe_id_map_bytes),
             ds4_gpu_mib((uint64_t)g_laguna_rope_atlas_buffer_bytes),
             ds4_gpu_mib((uint64_t)g_laguna_rope_support_atlas_buffer_bytes));
     if (color) fputs(reset, stderr);
@@ -3411,10 +3278,6 @@ void ds4_gpu_set_quality(bool quality) {
 
 void ds4_gpu_set_tensor_matmul_suppressed(bool suppressed) {
     g_tensor_matmul_suppressed = suppressed ? 1 : 0;
-}
-
-void ds4_gpu_set_glm_model(bool enabled) {
-    g_glm_model_mode = enabled ? 1 : 0;
 }
 
 static int ds4_gpu_model_map_log_enabled(void) {
@@ -4486,24 +4349,11 @@ typedef struct {
 } ds4_gpu_dsv4_moe_swiglu_weight_args;
 
 typedef struct {
-    uint32_t expert_base;
-    uint32_t expert_count;
-    uint32_t accumulate;
-    uint32_t pad0;
-} ds4_gpu_moe_expert_group_args;
-
-typedef struct {
-    uint64_t expert_bytes;
-    uint32_t group_size;
-    uint32_t n_slots;
-} ds4_gpu_q4_gather_slots6_args;
-
-typedef struct {
     uint32_t width;
     uint32_t tokens;
     uint64_t src_token_stride;
     uint64_t dst_token_stride;
-} ds4_gpu_dsv4_moe_sum6_args;
+} ds4_gpu_dsv4_moe_sum_args;
 
 /* Compile the single in-repo Metal source and create the pipelines that every
  * session uses. Shape-dependent kernels with function constants are built
@@ -4555,6 +4405,8 @@ static int ds4_gpu_init_impl(void) {
         g_test_glm_grouped_moe_batch_dispatches = 0;
         g_test_glm_grouped_moe_owned_dispatches = 0;
         g_test_glm_grouped_moe_completed_dispatches = 0;
+        g_test_glm_exact_q4_encoded_dispatches = 0;
+        g_test_glm_exact_q4_completed_dispatches = 0;
 #endif
         g_device = MTLCreateSystemDefaultDevice();
         if (!g_device) {
@@ -4584,19 +4436,14 @@ static int ds4_gpu_init_impl(void) {
         g_model_buffer_cache_bytes = 0;
         g_model_buffer_cache_evictions = 0;
         g_model_buffer_cache_over_limit = 0;
-        g_q4_expert_table_cache = [NSMutableDictionary dictionary];
-        g_q4_expert_layer_residency_cache = [NSMutableDictionary dictionary];
         g_pipeline_cache = [NSMutableDictionary dictionary];
-        g_transient_buffers = [NSMutableArray array];
         g_pending_cbs = [NSMutableArray array];
         g_pending_laguna_atlas_evidence = [NSMutableArray array];
 #ifdef DS4_TEST_HOOKS
         g_pending_glm_grouped_moe_evidence = [NSMutableArray array];
 #endif
-        if (!g_model_buffer_cache || !g_q4_expert_table_cache ||
-            !g_q4_expert_layer_residency_cache ||
-            !g_pipeline_cache ||
-            !g_transient_buffers || !g_pending_cbs ||
+        if (!g_model_buffer_cache || !g_pipeline_cache ||
+            !g_pending_cbs ||
             !g_pending_laguna_atlas_evidence
 #ifdef DS4_TEST_HOOKS
             || !g_pending_glm_grouped_moe_evidence
@@ -4608,10 +4455,7 @@ static int ds4_gpu_init_impl(void) {
 #ifdef DS4_TEST_HOOKS
             g_pending_glm_grouped_moe_evidence = nil;
 #endif
-            g_transient_buffers = nil;
             g_pipeline_cache = nil;
-            g_q4_expert_layer_residency_cache = nil;
-            g_q4_expert_table_cache = nil;
             g_model_buffer_cache = nil;
             g_queue = nil;
             g_device = nil;
@@ -4885,23 +4729,6 @@ static int ds4_gpu_init_impl(void) {
             return 0;
         }
 
-        fn = [library newFunctionWithName:@"kernel_dsv4_moe_sum6_f32"];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_dsv4_moe_sum6_f32 function not found\n");
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        g_moe_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_dsv4_moe_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
         fn = [library newFunctionWithName:@"kernel_dsv4_moe_sum8_f32"];
         if (!fn) {
             fprintf(stderr, "ds4: Metal kernel_dsv4_moe_sum8_f32 function not found\n");
@@ -5126,634 +4953,6 @@ static int ds4_gpu_init_impl(void) {
             g_queue = nil;
             g_device = nil;
             return 0;
-        }
-
-        MTLFunctionConstantValues *moe_mv_id_constants = [[MTLFunctionConstantValues alloc] init];
-        int16_t moe_mv_id_nsg = 2;
-        [moe_mv_id_constants setConstantValue:&moe_mv_id_nsg type:MTLDataTypeShort atIndex:600];
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_iq2_xxs_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_iq2_xxs_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_iq2_xxs_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_iq2_xxs_pair_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_pair_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_iq2_xxs_pair_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_iq2_xxs_pair_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_pair_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_iq2_xxs_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_iq2_xxs_pair_swiglu_pack2_overlap_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (fn) {
-            g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pack2_pipeline =
-                [g_device newComputePipelineStateWithFunction:fn error:&error];
-        }
-        if (!g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pack2_pipeline) {
-            fprintf(stderr,
-                    "ds4: optional Metal IQ2 pair pack2 pipeline unavailable: %s\n",
-                    error ? [[error localizedDescription] UTF8String] :
-                            "function not found");
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_q2_K_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q2_K_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_q2_k_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_q2_k_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q2_K_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_q2_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q2_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_q2_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_q2_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q2_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_iq2_xxs_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_iq2_xxs_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_iq2_xxs_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_iq2_xxs_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_slots6_iq2_xxs_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_iq2_xxs_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_slots6_iq2_xxs_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_slots6_iq2_xxs_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_iq2_xxs_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_slots6_q2_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_q2_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_slots6_q2_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_slots6_q2_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_q2_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_q4_K_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_q4_k_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_q4_k_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_q4_K_pair_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_pair_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_q4_k_pair_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_q4_k_pair_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_pair_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_q4_K_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_q4_k_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_q4_k_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_id_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_id_q4_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_id_q4_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_id_q4_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group_q4_K_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group_q4_K_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group_q4_k_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group_q4_k_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group_q4_K_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group_q4_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group_q4_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group_q4_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group_q4_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group6_q4_K_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group6_q4_K_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group6_q4_k_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group6_q4_k_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group6_q4_K_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group6_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group6_q4_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group6_q4_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group6_q4_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group6_q4_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group8_q4_K_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group8_q4_K_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group8_q4_k_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group8_q4_k_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group8_q4_K_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group8_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group8_q4_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group8_q4_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group8_q4_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group8_q4_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group24_q4_K_id_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group24_q4_K_id_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group24_q4_k_id_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group24_q4_k_id_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group24_q4_K_id_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_group24_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group24_q4_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_group24_q4_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_group24_q4_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_group24_q4_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_slots6_q4_K_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_q4_K_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_slots6_q4_k_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_slots6_q4_k_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_q4_K_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_slots6_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_q4_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_slots6_q4_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_slots6_q4_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_slots6_q4_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        g_moe_mul_mv_id_mxfp4_pipeline =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_id_mxfp4_f32", 2);
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_id_mxfp4_pair_swiglu_f32", 2);
-        g_moe_mul_mv_id_mxfp4_sum6_pipeline =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_id_mxfp4_sum6_f32", 2);
-        /* Single-simdgroup variants of the MXFP4 decode MoE kernels.  The
-         * per-row per-lane arithmetic is identical; only the row-to-simdgroup
-         * mapping changes, so outputs remain bit-exact.  Smaller threadgroups
-         * measurably improve GPU scheduling granularity on these
-         * latency-bound small-grid matvecs.  Pipelines are built
-         * unconditionally; the dispatch-time selection gate reads the
-         * environment so A/B harnesses can toggle it after engine creation. */
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1 =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_id_mxfp4_pair_swiglu_f32", 1);
-        g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1 =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_id_mxfp4_sum6_f32", 1);
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1_tg_multiple =
-            ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-                "kernel_mul_mv_id_mxfp4_pair_swiglu_f32", 1);
-        g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1_tg_multiple =
-            ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-                "kernel_mul_mv_id_mxfp4_sum6_f32", 1);
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_pipeline_nsg1 =
-            ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-                "kernel_mul_mv_id_mxfp4_pair_swiglu_fixed_route_f32", 1);
-        g_moe_mul_mv_id_mxfp4_sum6_fixed_route_pipeline_nsg1 =
-            ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-                "kernel_mul_mv_id_mxfp4_sum6_fixed_route_f32", 1);
-        g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_pipeline_nsg1 =
-            ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-                "kernel_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_f32", 1);
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_static_pipeline_nsg1 =
-            ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-                "kernel_mul_mv_id_mxfp4_pair_swiglu_fixed_route_static_f32", 1);
-        g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_static_pipeline_nsg1 =
-            ds4_gpu_new_mul_mv_tg_multiple_pipeline(
-                "kernel_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_static_f32", 1);
-        if (!g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1 ||
-            !g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1 ||
-            !g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1_tg_multiple ||
-            !g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1_tg_multiple ||
-            !g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_pipeline_nsg1 ||
-            !g_moe_mul_mv_id_mxfp4_sum6_fixed_route_pipeline_nsg1 ||
-            !g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_pipeline_nsg1 ||
-            !g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_static_pipeline_nsg1 ||
-            !g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_static_pipeline_nsg1) {
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_slots6_mxfp4_pair_swiglu_pipeline =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_slots6_mxfp4_pair_swiglu_f32", 2);
-        g_moe_mul_mv_slots6_mxfp4_sum6_pipeline =
-            ds4_gpu_get_mul_mv_pipeline("kernel_mul_mv_slots6_mxfp4_sum6_f32", 2);
-        if (!g_moe_mul_mv_id_mxfp4_pipeline ||
-            !g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline ||
-            !g_moe_mul_mv_id_mxfp4_sum6_pipeline ||
-            !g_moe_mul_mv_slots6_mxfp4_pair_swiglu_pipeline ||
-            !g_moe_mul_mv_slots6_mxfp4_sum6_pipeline) {
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_q4_gather_slots6"];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_q4_gather_slots6 function not found\n");
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_q4_gather_slots6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_q4_gather_slots6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_q4_gather_slots6 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_table_q4_K_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_table_q4_K_pair_swiglu_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_table_q4_pair_gate_encoder = [fn newArgumentEncoderWithBufferIndex:2];
-        g_moe_table_q4_pair_up_encoder = [fn newArgumentEncoderWithBufferIndex:3];
-        if (!g_moe_table_q4_pair_gate_encoder || !g_moe_table_q4_pair_up_encoder) {
-            fprintf(stderr, "ds4: Metal Q4 expert-table pair argument encoder creation failed\n");
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_table_q4_k_pair_swiglu_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_table_q4_k_pair_swiglu_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_table_q4_K_pair_swiglu_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_table_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (!fn) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_table_q4_K_sum6_f32 function not found: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_table_q4_sum_down_encoder = [fn newArgumentEncoderWithBufferIndex:1];
-        if (!g_moe_table_q4_sum_down_encoder) {
-            fprintf(stderr, "ds4: Metal Q4 expert-table down argument encoder creation failed\n");
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-        g_moe_mul_mv_table_q4_k_sum6_pipeline = [g_device newComputePipelineStateWithFunction:fn error:&error];
-        if (!g_moe_mul_mv_table_q4_k_sum6_pipeline) {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_table_q4_K_sum6_f32 pipeline failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            g_queue = nil;
-            g_device = nil;
-            return 0;
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_addr_q4_K_pair_swiglu_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (fn) {
-            g_moe_mul_mv_addr_q4_k_pair_swiglu_pipeline =
-                [g_device newComputePipelineStateWithFunction:fn error:&error];
-            if (!g_moe_mul_mv_addr_q4_k_pair_swiglu_pipeline) {
-                fprintf(stderr, "ds4: Metal kernel_mul_mv_addr_q4_K_pair_swiglu_f32 pipeline unavailable: %s\n",
-                        [[error localizedDescription] UTF8String]);
-            }
-        } else {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_addr_q4_K_pair_swiglu_f32 function unavailable: %s\n",
-                    [[error localizedDescription] UTF8String]);
-        }
-
-        error = nil;
-        fn = [library newFunctionWithName:@"kernel_mul_mv_addr_q4_K_sum6_f32"
-                           constantValues:moe_mv_id_constants
-                                    error:&error];
-        if (fn) {
-            g_moe_mul_mv_addr_q4_k_sum6_pipeline =
-                [g_device newComputePipelineStateWithFunction:fn error:&error];
-            if (!g_moe_mul_mv_addr_q4_k_sum6_pipeline) {
-                fprintf(stderr, "ds4: Metal kernel_mul_mv_addr_q4_K_sum6_f32 pipeline unavailable: %s\n",
-                        [[error localizedDescription] UTF8String]);
-            }
-        } else {
-            fprintf(stderr, "ds4: Metal kernel_mul_mv_addr_q4_K_sum6_f32 function unavailable: %s\n",
-                    [[error localizedDescription] UTF8String]);
         }
 
         fn = [library newFunctionWithName:@"kernel_argsort_f32_i32_desc"];
@@ -6466,7 +5665,6 @@ int ds4_gpu_flush_commands(void) {
     ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
     if (!g_batch_cb) {
         (void)ds4_gpu_wait_pending_command_buffers("command batch");
-        [g_transient_buffers removeAllObjects];
         return 0;
     }
     return 1;
@@ -6857,7 +6055,6 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
         if (!signaled) {
             fprintf(stderr, "ds4: timeout waiting for Metal shared event in %s\n", what);
             (void)ds4_gpu_wait_pending_command_buffers(what);
-            [g_transient_buffers removeAllObjects];
             return 0;
         }
         if (cb.status == MTLCommandBufferStatusError) {
@@ -6865,7 +6062,6 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
                     what,
                     [[cb.error localizedDescription] UTF8String]);
             (void)ds4_gpu_wait_pending_command_buffers(what);
-            [g_transient_buffers removeAllObjects];
             return 0;
         }
 #ifdef DS4_TEST_HOOKS
@@ -6881,7 +6077,6 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
         ds4_gpu_laguna_atlas_evidence_zero(&g_batch_laguna_atlas_evidence);
         if (!g_batch_cb) {
             (void)ds4_gpu_wait_pending_command_buffers(what);
-            [g_transient_buffers removeAllObjects];
             return 0;
         }
         return 1;
@@ -6951,7 +6146,6 @@ int ds4_gpu_synchronize(void) {
     ds4_gpu_parallel_ffn_reset_state(YES);
     if ([g_pending_cbs count] != 0) {
         int ok = ds4_gpu_wait_pending_command_buffers("synchronize");
-        [g_transient_buffers removeAllObjects];
         ds4_gpu_model_buffer_cache_maybe_evict("synchronize");
 #ifdef DS4_TEST_HOOKS
         return ds4_gpu_test_synchronize_result(ok);
@@ -6998,7 +6192,6 @@ void ds4_gpu_cleanup(void) {
         (void)ds4_gpu_wait_pending_command_buffers("cleanup");
         g_selected_readback_event = nil;
         g_selected_readback_event_value = 0;
-        [g_transient_buffers removeAllObjects];
         g_get_rows_f32_pipeline = nil;
         g_get_rows_i32_pipeline = nil;
         g_get_rows_q8_0_pipeline = nil;
@@ -7012,7 +6205,6 @@ void ds4_gpu_cleanup(void) {
         g_add_pipeline = nil;
         g_add2_pipeline = nil;
         g_add3_pipeline = nil;
-        g_moe_sum6_pipeline = nil;
         g_moe_sum8_pipeline = nil;
         g_moe_sum10_pipeline = nil;
         g_mul_pipeline = nil;
@@ -7074,51 +6266,6 @@ void ds4_gpu_cleanup(void) {
         g_laguna_rope_support_atlas_completed_generated_count = 0;
         g_laguna_rope_support_atlas_completed_consumed_dispatch_count = 0;
         g_laguna_rope_atlas_plan_mode = -2;
-        g_moe_mul_mv_id_iq2_xxs_pipeline = nil;
-        g_moe_mul_mv_id_iq2_xxs_pair_pipeline = nil;
-        g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_id_iq2_xxs_pair_swiglu_pack2_pipeline = nil;
-        g_moe_mul_mv_id_q2_k_pipeline = nil;
-        g_moe_mul_mv_id_q2_k_sum6_pipeline = nil;
-        g_moe_mul_mv_id_iq2_xxs_sum6_pipeline = nil;
-        g_moe_mul_mv_id_q4_k_pipeline = nil;
-        g_moe_mul_mv_id_q4_k_pair_pipeline = nil;
-        g_moe_mul_mv_id_q4_k_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_id_q4_k_sum6_pipeline = nil;
-        g_moe_mul_mv_group_q4_k_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_group_q4_k_sum6_pipeline = nil;
-        g_moe_mul_mv_group6_q4_k_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_group6_q4_k_sum6_pipeline = nil;
-        g_moe_mul_mv_group8_q4_k_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_group8_q4_k_sum6_pipeline = nil;
-        g_moe_mul_mv_group24_q4_k_id_pipeline = nil;
-        g_moe_mul_mv_group24_q4_k_sum6_pipeline = nil;
-        g_moe_mul_mv_slots6_iq2_xxs_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_slots6_q2_k_sum6_pipeline = nil;
-        g_moe_mul_mv_slots6_q4_k_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_slots6_q4_k_sum6_pipeline = nil;
-        g_moe_mul_mv_id_mxfp4_pipeline = nil;
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_id_mxfp4_sum6_pipeline = nil;
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1 = nil;
-        g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1 = nil;
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_pipeline_nsg1_tg_multiple = nil;
-        g_moe_mul_mv_id_mxfp4_sum6_pipeline_nsg1_tg_multiple = nil;
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_pipeline_nsg1 = nil;
-        g_moe_mul_mv_id_mxfp4_sum6_fixed_route_pipeline_nsg1 = nil;
-        g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_pipeline_nsg1 = nil;
-        g_moe_mul_mv_id_mxfp4_pair_swiglu_fixed_route_static_pipeline_nsg1 = nil;
-        g_moe_mul_mv_id_mxfp4_sum6_fixed_route_full_rows_static_pipeline_nsg1 = nil;
-        g_moe_mul_mv_slots6_mxfp4_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_slots6_mxfp4_sum6_pipeline = nil;
-        g_moe_q4_gather_slots6_pipeline = nil;
-        g_moe_mul_mv_table_q4_k_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_table_q4_k_sum6_pipeline = nil;
-        g_moe_mul_mv_addr_q4_k_pair_swiglu_pipeline = nil;
-        g_moe_mul_mv_addr_q4_k_sum6_pipeline = nil;
-        g_moe_table_q4_pair_gate_encoder = nil;
-        g_moe_table_q4_pair_up_encoder = nil;
-        g_moe_table_q4_sum_down_encoder = nil;
         g_argsort_f32_i32_desc_pipeline = nil;
         g_argsort_merge_f32_i32_desc_pipeline = nil;
         g_sum_rows_f32_f32_pipeline = nil;
@@ -7217,9 +6364,6 @@ void ds4_gpu_cleanup(void) {
         g_moe_gate_scratch_buffer = nil;
         g_moe_down_scratch_buffer = nil;
         g_moe_id_map_buffer = nil;
-        g_moe_q4_gate_slots_buffer = nil;
-        g_moe_q4_up_slots_buffer = nil;
-        g_moe_q4_down_slots_buffer = nil;
         g_model_map_ptr = NULL;
         g_model_map_size = 0;
         g_model_mapped_offset = 0;
@@ -7236,9 +6380,6 @@ void ds4_gpu_cleanup(void) {
         g_moe_gate_scratch_bytes = 0;
         g_moe_down_scratch_bytes = 0;
         g_moe_id_map_bytes = 0;
-        g_moe_q4_gate_slots_bytes = 0;
-        g_moe_q4_up_slots_bytes = 0;
-        g_moe_q4_down_slots_bytes = 0;
         g_model_wrap_count = 0;
         g_model_wrap_bytes = 0;
         g_model_wrap_max_bytes = 0;
@@ -7249,13 +6390,8 @@ void ds4_gpu_cleanup(void) {
         ds4_gpu_model_views_clear();
         [g_pipeline_cache removeAllObjects];
         g_pipeline_cache = nil;
-        [g_q4_expert_layer_residency_cache removeAllObjects];
-        g_q4_expert_layer_residency_cache = nil;
-        [g_q4_expert_table_cache removeAllObjects];
-        g_q4_expert_table_cache = nil;
         [g_model_buffer_cache removeAllObjects];
         g_model_buffer_cache = nil;
-        g_transient_buffers = nil;
         g_pending_cbs = nil;
         g_pending_laguna_atlas_evidence = nil;
 #ifdef DS4_TEST_HOOKS
@@ -7298,6 +6434,8 @@ void ds4_gpu_cleanup(void) {
         g_test_glm_grouped_moe_batch_dispatches = 0;
         g_test_glm_grouped_moe_owned_dispatches = 0;
         g_test_glm_grouped_moe_completed_dispatches = 0;
+        g_test_glm_exact_q4_encoded_dispatches = 0;
+        g_test_glm_exact_q4_completed_dispatches = 0;
         memset(g_laguna_test_decode_route_counts, 0,
                sizeof(g_laguna_test_decode_route_counts));
         memset(g_laguna_test_decode_route_batch, 0,
@@ -7880,24 +7018,14 @@ static id<MTLBuffer> ds4_gpu_wrap_model_range(
     return nil;
 }
 
-typedef enum {
-    DS4_GPU_EXACT_VIEW_CACHED,
-    DS4_GPU_EXACT_VIEW_TRANSIENT,
-    DS4_GPU_EXACT_VIEW_OWNED,
-} ds4_gpu_exact_view_lifetime;
-
 static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_impl(
         const void *model_map,
         uint64_t    model_size,
         uint64_t    offset,
         uint64_t    len,
-        uint64_t   *inner_offset,
-        ds4_gpu_exact_view_lifetime lifetime) {
-    const bool cache_view = lifetime == DS4_GPU_EXACT_VIEW_CACHED;
-    const bool transient_view = lifetime == DS4_GPU_EXACT_VIEW_TRANSIENT;
+        uint64_t   *inner_offset) {
     if (!model_map || !g_device ||
-        (cache_view && !g_model_buffer_cache) ||
-        (transient_view && !g_transient_buffers) ||
+        !g_model_buffer_cache ||
         model_size == 0 || offset > model_size || len > model_size - offset) {
         fprintf(stderr, "ds4: Metal exact model range is outside the mapped model\n");
         return nil;
@@ -7927,14 +7055,12 @@ static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_impl(
 
     NSString *key = nil;
     id<MTLBuffer> buffer = nil;
-    if (cache_view) {
-        key = [NSString stringWithFormat:@"%p:%llu:%llu:%llu",
-               model_map,
-               (unsigned long long)model_size,
-               (unsigned long long)page_offset,
-               (unsigned long long)view_bytes];
-        buffer = [g_model_buffer_cache objectForKey:key];
-    }
+    key = [NSString stringWithFormat:@"%p:%llu:%llu:%llu",
+           model_map,
+           (unsigned long long)model_size,
+           (unsigned long long)page_offset,
+           (unsigned long long)view_bytes];
+    buffer = [g_model_buffer_cache objectForKey:key];
     if (!buffer) {
         const uintptr_t base = (uintptr_t)model_map;
         buffer = [g_device newBufferWithBytesNoCopy:(void *)(base + page_offset)
@@ -7948,19 +7074,9 @@ static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_impl(
                     ds4_gpu_mib(view_bytes));
             return nil;
         }
-        if (cache_view) {
-            buffer.label = @"ds4_model_exact_view";
-        } else if (transient_view) {
-            buffer.label = @"ds4_model_exact_transient_view";
-        } else {
-            buffer.label = @"ds4_model_exact_owned_view";
-        }
-        if (cache_view) {
-            [g_model_buffer_cache setObject:buffer forKey:key];
-            ds4_gpu_model_buffer_cache_note_insert(view_bytes);
-        } else if (transient_view) {
-            [g_transient_buffers addObject:buffer];
-        }
+        buffer.label = @"ds4_model_exact_view";
+        [g_model_buffer_cache setObject:buffer forKey:key];
+        ds4_gpu_model_buffer_cache_note_insert(view_bytes);
     }
 
     if (inner_offset) *inner_offset = leading;
@@ -7977,22 +7093,7 @@ static id<MTLBuffer> ds4_gpu_wrap_model_exact_range(
                                                model_size,
                                                offset,
                                                len,
-                                               inner_offset,
-                                               DS4_GPU_EXACT_VIEW_CACHED);
-}
-
-static id<MTLBuffer> ds4_gpu_wrap_model_exact_range_owned(
-        const void *model_map,
-        uint64_t    model_size,
-        uint64_t    offset,
-        uint64_t    len,
-        uint64_t   *inner_offset) {
-    return ds4_gpu_wrap_model_exact_range_impl(model_map,
-                                               model_size,
-                                               offset,
-                                               len,
-                                               inner_offset,
-                                               DS4_GPU_EXACT_VIEW_OWNED);
+                                               inner_offset);
 }
 
 #ifdef DS4_TEST_HOOKS
@@ -8037,10 +7138,10 @@ int ds4_gpu_test_cleanup_state_is_clean(void) {
 #endif
            !g_selected_readback_event &&
            g_selected_readback_event_value == 0 &&
-           !g_model_buffer_cache && !g_q4_expert_table_cache &&
-           !g_q4_expert_layer_residency_cache && !g_pipeline_cache &&
-           !g_transient_buffers &&
+           !g_model_buffer_cache &&
+           !g_pipeline_cache &&
            g_model_buffer_cache_bytes == 0 &&
+           g_model_buffer_cache_evictions == 0 &&
            g_model_buffer_cache_over_limit == 0 &&
            g_model_view_count == 0 && !g_model_residency_set &&
            g_model_residency_count == 0 &&
@@ -8163,582 +7264,6 @@ int ds4_gpu_test_lifecycle_cleanup(void) {
     return ok;
 }
 #endif
-
-static uint32_t ds4_gpu_q4_expert_table_group_size(uint32_t n_total_expert) {
-    const char *env = getenv("DS4_METAL_Q4_EXPERT_TABLE_GROUP_SIZE");
-    if (!env || !env[0]) return 1;
-    char *end = NULL;
-    unsigned long v = strtoul(env, &end, 10);
-    if (end == env || *end != '\0' || v < 2 || v > n_total_expert) {
-        return 1;
-    }
-    return (uint32_t)v;
-}
-
-static bool ds4_gpu_q4_table_queue_residency_requested(void) {
-    return getenv("DS4_METAL_Q4_TABLE_QUEUE_RESIDENCY_SET") != NULL;
-}
-
-static bool ds4_gpu_q4_table_queue_residency_available(void) {
-#if TARGET_OS_OSX
-    if (@available(macOS 15.0, *)) {
-        return g_queue && [g_queue respondsToSelector:@selector(addResidencySet:)];
-    }
-#endif
-    return false;
-}
-
-static bool ds4_gpu_q4_non_streaming_opt_in_enabled(void) {
-    return getenv("DS4_METAL_ENABLE_Q4_SELECTED_EXPERT_VIEWS") != NULL ||
-           getenv("DS4_METAL_ENABLE_PRO_Q4_SELECTED_EXPERT_VIEWS") != NULL ||
-           getenv("DS4_METAL_ENABLE_Q4_EXPERT_TABLE") != NULL ||
-           getenv("DS4_METAL_ENABLE_Q4_EXPERT_ADDRESS_TABLE") != NULL ||
-           getenv("DS4_METAL_ENABLE_PRO_Q4_EXPERT_TABLE_AUTO") != NULL ||
-           getenv("DS4_METAL_ENABLE_PRO_Q4_EXPERT_ADDRESS_AUTO") != NULL;
-}
-
-static bool ds4_gpu_q4_selected_paths_allowed(void) {
-    if (g_glm_model_mode) return false;
-    return ds4_gpu_q4_non_streaming_opt_in_enabled();
-}
-
-int ds4_gpu_pro_q4_expert_table_auto_available(void) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    return getenv("DS4_METAL_ENABLE_PRO_Q4_EXPERT_TABLE_AUTO") != NULL &&
-           getenv("DS4_METAL_DISABLE_PRO_Q4_EXPERT_TABLE_AUTO") == NULL &&
-           getenv("DS4_METAL_DISABLE_Q4_EXPERT_TABLE") == NULL &&
-           ds4_gpu_q4_table_queue_residency_available();
-}
-
-static bool ds4_gpu_q4_table_queue_residency_enabled(bool auto_queue_residency) {
-    return (auto_queue_residency || ds4_gpu_q4_table_queue_residency_requested()) &&
-           ds4_gpu_q4_table_queue_residency_available();
-}
-
-static bool ds4_gpu_pro_q4_expert_indirect_shape_supported(
-        uint32_t n_total_expert,
-        uint32_t n_expert,
-        uint64_t gate_tensor_bytes,
-        uint64_t down_tensor_bytes) {
-    const uint64_t q4_selected_min_tensor_bytes = 2ull * 1024ull * 1024ull * 1024ull;
-    return n_total_expert == 384 &&
-           n_expert == 6 &&
-           gate_tensor_bytes >= q4_selected_min_tensor_bytes &&
-           down_tensor_bytes >= q4_selected_min_tensor_bytes;
-}
-
-static bool ds4_gpu_pro_q4_expert_table_auto_enabled(
-        uint32_t n_total_expert,
-        uint32_t n_expert,
-        uint64_t gate_tensor_bytes,
-        uint64_t down_tensor_bytes) {
-    /*
-     * This path lets the shader choose among exact per-expert resources.
-     * It is only automatic when a Metal queue residency set can make every
-     * indirect expert resource visible up front; otherwise the selected
-     * exact-slice path remains the fallback.
-     */
-    return ds4_gpu_pro_q4_expert_indirect_shape_supported(n_total_expert,
-                                                          n_expert,
-                                                          gate_tensor_bytes,
-                                                          down_tensor_bytes) &&
-           ds4_gpu_pro_q4_expert_table_auto_available();
-}
-
-static bool ds4_gpu_pro_q4_expert_address_auto_enabled(
-        uint32_t n_total_expert,
-        uint32_t n_expert,
-        uint64_t gate_tensor_bytes,
-        uint64_t down_tensor_bytes) {
-    /*
-     * GPU-address expert tables are useful for experiments, but they are not
-     * safe as an automatic path unless every indirect expert resource is made
-     * visible to Metal. Keep this behind an explicit opt-in while the selected
-     * active-slice path remains the correctness/performance baseline.
-     */
-    return getenv("DS4_METAL_ENABLE_PRO_Q4_EXPERT_ADDRESS_AUTO") != NULL &&
-           ds4_gpu_q4_selected_paths_allowed() &&
-           ds4_gpu_pro_q4_expert_indirect_shape_supported(n_total_expert,
-                                                          n_expert,
-                                                          gate_tensor_bytes,
-                                                          down_tensor_bytes) &&
-           g_moe_mul_mv_addr_q4_k_pair_swiglu_pipeline != nil &&
-           g_moe_mul_mv_addr_q4_k_sum6_pipeline != nil &&
-           getenv("DS4_METAL_DISABLE_PRO_Q4_EXPERT_TABLE_AUTO") == NULL &&
-           getenv("DS4_METAL_DISABLE_PRO_Q4_EXPERT_ADDRESS_AUTO") == NULL &&
-           getenv("DS4_METAL_DISABLE_Q4_EXPERT_ADDRESS_TABLE") == NULL &&
-           ds4_gpu_q4_table_queue_residency_available();
-}
-
-
-
-static id ds4_gpu_q4_expert_table_residency_set(NSMutableArray<id<MTLBuffer>> *buffers) {
-    if (!buffers || [buffers count] == 0 ||
-        getenv("DS4_METAL_Q4_TABLE_RESIDENCY_SET") == NULL ||
-        getenv("DS4_METAL_Q4_TABLE_PER_TENSOR_RESIDENCY_SET") == NULL) {
-        return nil;
-    }
-#if TARGET_OS_OSX
-    if (@available(macOS 15.0, *)) {
-        MTLResidencySetDescriptor *desc = [[MTLResidencySetDescriptor alloc] init];
-        desc.label = @"ds4_q4_expert_table";
-        desc.initialCapacity = [buffers count];
-        NSError *error = nil;
-        id residency_set = [g_device newResidencySetWithDescriptor:desc error:&error];
-        if (!residency_set) {
-            fprintf(stderr, "ds4: Metal Q4 expert table residency set creation failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            return nil;
-        }
-        for (id<MTLBuffer> buffer in buffers) {
-            [residency_set addAllocation:buffer];
-        }
-        [residency_set commit];
-        [residency_set requestResidency];
-        return residency_set;
-    }
-#endif
-    return nil;
-}
-
-static void ds4_gpu_q4_residency_add_table(id residency_set,
-                                           DS4MetalQ4ExpertTable *table) {
-#if TARGET_OS_OSX
-    if (!residency_set || !table) return;
-    if (@available(macOS 15.0, *)) {
-        if (table.argumentBuffer) {
-            [residency_set addAllocation:table.argumentBuffer];
-        }
-        if (table.addressBuffer) {
-            [residency_set addAllocation:table.addressBuffer];
-        }
-        for (id<MTLBuffer> buffer in table.expertBuffers) {
-            [residency_set addAllocation:buffer];
-        }
-    }
-#else
-    (void)residency_set;
-    (void)table;
-#endif
-}
-
-static id ds4_gpu_q4_expert_layer_residency_set(DS4MetalQ4ExpertTable *gate_table,
-                                                DS4MetalQ4ExpertTable *up_table,
-                                                DS4MetalQ4ExpertTable *down_table,
-                                                bool auto_queue_residency) {
-    const bool queue_residency =
-        ds4_gpu_q4_table_queue_residency_enabled(auto_queue_residency);
-    if (!gate_table || !up_table || !down_table ||
-        !g_device || !g_q4_expert_layer_residency_cache ||
-        (getenv("DS4_METAL_Q4_TABLE_RESIDENCY_SET") == NULL &&
-         !queue_residency)) {
-        return nil;
-    }
-#if TARGET_OS_OSX
-    if (@available(macOS 15.0, *)) {
-        NSString *key = [NSString stringWithFormat:@"%p:%p:%p",
-                         gate_table, up_table, down_table];
-        DS4MetalQ4LayerResidency *cached =
-            [g_q4_expert_layer_residency_cache objectForKey:key];
-        if (cached) return cached.residencySet;
-
-        const NSUInteger capacity =
-            [gate_table.expertBuffers count] +
-            [up_table.expertBuffers count] +
-            [down_table.expertBuffers count] + 3u;
-        MTLResidencySetDescriptor *desc = [[MTLResidencySetDescriptor alloc] init];
-        desc.label = @"ds4_q4_expert_layer";
-        desc.initialCapacity = capacity;
-        NSError *error = nil;
-        id residency_set = [g_device newResidencySetWithDescriptor:desc error:&error];
-        if (!residency_set) {
-            fprintf(stderr,
-                    "ds4: Metal Q4 expert layer residency set creation failed: %s\n",
-                    [[error localizedDescription] UTF8String]);
-            return nil;
-        }
-
-        ds4_gpu_q4_residency_add_table(residency_set, gate_table);
-        ds4_gpu_q4_residency_add_table(residency_set, up_table);
-        ds4_gpu_q4_residency_add_table(residency_set, down_table);
-        [residency_set commit];
-        [residency_set requestResidency];
-
-        DS4MetalQ4LayerResidency *entry = [DS4MetalQ4LayerResidency new];
-        entry.residencySet = residency_set;
-        if (queue_residency) {
-            [g_queue addResidencySet:residency_set];
-            entry.addedToQueue = YES;
-        }
-        [g_q4_expert_layer_residency_cache setObject:entry forKey:key];
-        return residency_set;
-    }
-#endif
-    return nil;
-}
-
-static DS4MetalQ4ExpertTable *ds4_gpu_q4_expert_table(
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                tensor_offset,
-        uint64_t                expert_bytes,
-        uint32_t                n_total_expert,
-        id<MTLArgumentEncoder>  encoder);
-
-static DS4MetalQ4ExpertTable *ds4_gpu_q4_expert_address_table(
-        const void *model_map,
-        uint64_t    model_size,
-        uint64_t    tensor_offset,
-        uint64_t    expert_bytes,
-        uint32_t    n_total_expert);
-
-int ds4_gpu_preload_q4_expert_tables(const void *model_map, uint64_t model_size,
-                                     uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset,
-                                     uint64_t gate_expert_bytes, uint64_t down_expert_bytes,
-                                     uint32_t n_total_expert) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    if (!model_map || model_size == 0 || gate_expert_bytes == 0 ||
-        down_expert_bytes == 0 || n_total_expert == 0) {
-        return 0;
-    }
-    if ((uint64_t)n_total_expert > UINT64_MAX / gate_expert_bytes ||
-        (uint64_t)n_total_expert > UINT64_MAX / down_expert_bytes) {
-        fprintf(stderr, "ds4: Metal Q4 expert table preload byte size overflow\n");
-        return 0;
-    }
-
-    const uint64_t gate_tensor_bytes = (uint64_t)n_total_expert * gate_expert_bytes;
-    const uint64_t down_tensor_bytes = (uint64_t)n_total_expert * down_expert_bytes;
-    const bool address_auto =
-        ds4_gpu_pro_q4_expert_address_auto_enabled(n_total_expert,
-                                                   6,
-                                                   gate_tensor_bytes,
-                                                   down_tensor_bytes);
-    const bool table_auto =
-        ds4_gpu_pro_q4_expert_table_auto_enabled(n_total_expert,
-                                                 6,
-                                                 gate_tensor_bytes,
-                                                 down_tensor_bytes);
-    if (!address_auto && !table_auto) {
-        return 1;
-    }
-
-    if (address_auto) {
-        @autoreleasepool {
-            DS4MetalQ4ExpertTable *gate_table =
-                ds4_gpu_q4_expert_address_table(model_map,
-                                                model_size,
-                                                gate_offset,
-                                                gate_expert_bytes,
-                                                n_total_expert);
-            DS4MetalQ4ExpertTable *up_table =
-                ds4_gpu_q4_expert_address_table(model_map,
-                                                model_size,
-                                                up_offset,
-                                                gate_expert_bytes,
-                                                n_total_expert);
-            DS4MetalQ4ExpertTable *down_table =
-                ds4_gpu_q4_expert_address_table(model_map,
-                                                model_size,
-                                                down_offset,
-                                                down_expert_bytes,
-                                                n_total_expert);
-            if (!gate_table || !up_table || !down_table) {
-                return 0;
-            }
-            id residency = ds4_gpu_q4_expert_layer_residency_set(gate_table,
-                                                                 up_table,
-                                                                 down_table,
-                                                                 true);
-            if (!residency) {
-                fprintf(stderr, "ds4: Metal Q4 expert address table preload failed to create queue residency set\n");
-                return 0;
-            }
-        }
-        return 1;
-    }
-
-    if (!g_moe_table_q4_pair_gate_encoder || !g_moe_table_q4_pair_up_encoder ||
-        !g_moe_table_q4_sum_down_encoder) {
-        fprintf(stderr, "ds4: Metal Q4 expert table preload missing argument encoders\n");
-        return 0;
-    }
-
-    @autoreleasepool {
-        DS4MetalQ4ExpertTable *gate_table =
-            ds4_gpu_q4_expert_table(model_map,
-                                    model_size,
-                                    gate_offset,
-                                    gate_expert_bytes,
-                                    n_total_expert,
-                                    g_moe_table_q4_pair_gate_encoder);
-        DS4MetalQ4ExpertTable *up_table =
-            ds4_gpu_q4_expert_table(model_map,
-                                    model_size,
-                                    up_offset,
-                                    gate_expert_bytes,
-                                    n_total_expert,
-                                    g_moe_table_q4_pair_up_encoder);
-        DS4MetalQ4ExpertTable *down_table =
-            ds4_gpu_q4_expert_table(model_map,
-                                    model_size,
-                                    down_offset,
-                                    down_expert_bytes,
-                                    n_total_expert,
-                                    g_moe_table_q4_sum_down_encoder);
-        if (!gate_table || !up_table || !down_table) {
-            return 0;
-        }
-        id residency = ds4_gpu_q4_expert_layer_residency_set(gate_table,
-                                                             up_table,
-                                                             down_table,
-                                                             true);
-        if (!residency) {
-            fprintf(stderr, "ds4: Metal Q4 expert table preload failed to create queue residency set\n");
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static DS4MetalQ4ExpertTable *ds4_gpu_q4_expert_table(
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                tensor_offset,
-        uint64_t                expert_bytes,
-        uint32_t                n_total_expert,
-        id<MTLArgumentEncoder>  encoder) {
-    if (!model_map || !g_device || !g_q4_expert_table_cache || !encoder ||
-        model_size == 0 || expert_bytes == 0 ||
-        n_total_expert == 0 || n_total_expert > 384) {
-        return nil;
-    }
-    if ((uint64_t)n_total_expert > UINT64_MAX / expert_bytes) {
-        fprintf(stderr, "ds4: Metal Q4 expert table byte size overflow\n");
-        return nil;
-    }
-    const uint64_t tensor_bytes = (uint64_t)n_total_expert * expert_bytes;
-    if (tensor_offset > model_size || tensor_bytes > model_size - tensor_offset) {
-        fprintf(stderr, "ds4: Metal Q4 expert table is outside the mapped model\n");
-        return nil;
-    }
-
-    const uint32_t table_group_size =
-        ds4_gpu_q4_expert_table_group_size(n_total_expert);
-    NSString *key = [NSString stringWithFormat:@"%p:%llu:%llu:%llu:%u:%llu:%u",
-                     model_map,
-                     (unsigned long long)model_size,
-                     (unsigned long long)tensor_offset,
-                     (unsigned long long)expert_bytes,
-                     n_total_expert,
-                     (unsigned long long)[encoder encodedLength],
-                     table_group_size];
-    DS4MetalQ4ExpertTable *cached = [g_q4_expert_table_cache objectForKey:key];
-    if (cached) return cached;
-
-    id<MTLBuffer> arg_buffer =
-        [g_device newBufferWithLength:[encoder encodedLength]
-                               options:MTLResourceStorageModeShared];
-    if (!arg_buffer) {
-        fprintf(stderr, "ds4: Metal Q4 expert table argument buffer allocation failed\n");
-        return nil;
-    }
-    arg_buffer.label = @"ds4_q4_expert_table";
-    [encoder setArgumentBuffer:arg_buffer offset:0];
-
-    NSMutableArray<id<MTLBuffer>> *expert_buffers =
-        [NSMutableArray arrayWithCapacity:table_group_size > 1 ?
-            (n_total_expert + table_group_size - 1u) / table_group_size :
-            n_total_expert];
-    if (!expert_buffers) return nil;
-
-    if (table_group_size > 1) {
-        for (uint32_t first = 0; first < n_total_expert; first += table_group_size) {
-            const uint32_t remaining = n_total_expert - first;
-            const uint32_t group_n =
-                remaining < table_group_size ? remaining : table_group_size;
-            if ((uint64_t)first > UINT64_MAX / expert_bytes ||
-                (uint64_t)group_n > UINT64_MAX / expert_bytes) {
-                fprintf(stderr, "ds4: Metal Q4 expert table group byte overflow\n");
-                return nil;
-            }
-            const uint64_t rel = (uint64_t)first * expert_bytes;
-            const uint64_t group_bytes = (uint64_t)group_n * expert_bytes;
-            if (rel > UINT64_MAX - tensor_offset) {
-                fprintf(stderr, "ds4: Metal Q4 expert table group offset overflow\n");
-                return nil;
-            }
-            uint64_t inner = 0;
-            id<MTLBuffer> group_buf =
-                ds4_gpu_wrap_model_range(model_map,
-                                         model_size,
-                                         tensor_offset + rel,
-                                         group_bytes,
-                                         &inner);
-            if (!group_buf) return nil;
-            for (uint32_t j = 0; j < group_n; j++) {
-                const uint64_t expert_inner = inner + (uint64_t)j * expert_bytes;
-                [encoder setBuffer:group_buf offset:(NSUInteger)expert_inner atIndex:first + j];
-            }
-            [expert_buffers addObject:group_buf];
-        }
-    } else {
-        for (uint32_t i = 0; i < n_total_expert; i++) {
-            const uint64_t rel = (uint64_t)i * expert_bytes;
-            if (rel > UINT64_MAX - tensor_offset) {
-                fprintf(stderr, "ds4: Metal Q4 expert table offset overflow\n");
-                return nil;
-            }
-            uint64_t inner = 0;
-            id<MTLBuffer> expert_buf =
-                ds4_gpu_wrap_model_exact_range_owned(model_map,
-                                                     model_size,
-                                                     tensor_offset + rel,
-                                                     expert_bytes,
-                                                     &inner);
-            if (!expert_buf) return nil;
-            [encoder setBuffer:expert_buf offset:(NSUInteger)inner atIndex:i];
-            [expert_buffers addObject:expert_buf];
-        }
-    }
-    [arg_buffer didModifyRange:NSMakeRange(0, [encoder encodedLength])];
-
-    if (getenv("DS4_METAL_Q4_EXPERT_TABLE_PROFILE") != NULL) {
-        fprintf(stderr,
-                "ds4: Metal Q4 expert table: experts=%u group=%u buffers=%lu expert_bytes=%.2f MiB\n",
-                n_total_expert,
-                table_group_size,
-                (unsigned long)[expert_buffers count],
-                ds4_gpu_mib(expert_bytes));
-    }
-
-    DS4MetalQ4ExpertTable *table = [DS4MetalQ4ExpertTable new];
-    table.argumentBuffer = arg_buffer;
-    table.expertBuffers = expert_buffers;
-    table.residencySet = ds4_gpu_q4_expert_table_residency_set(expert_buffers);
-    table.nExpert = n_total_expert;
-    table.expertBytes = expert_bytes;
-    [g_q4_expert_table_cache setObject:table forKey:key];
-    return table;
-}
-
-static DS4MetalQ4ExpertTable *ds4_gpu_q4_expert_address_table(
-        const void *model_map,
-        uint64_t    model_size,
-        uint64_t    tensor_offset,
-        uint64_t    expert_bytes,
-        uint32_t    n_total_expert) {
-    if (!model_map || !g_device || !g_q4_expert_table_cache ||
-        model_size == 0 || expert_bytes == 0 ||
-        n_total_expert == 0 || n_total_expert > 384) {
-        return nil;
-    }
-    if ((uint64_t)n_total_expert > UINT64_MAX / expert_bytes) {
-        fprintf(stderr, "ds4: Metal Q4 expert address table byte size overflow\n");
-        return nil;
-    }
-    const uint64_t tensor_bytes = (uint64_t)n_total_expert * expert_bytes;
-    if (tensor_offset > model_size || tensor_bytes > model_size - tensor_offset) {
-        fprintf(stderr, "ds4: Metal Q4 expert address table is outside the mapped model\n");
-        return nil;
-    }
-
-    const uint32_t table_group_size =
-        ds4_gpu_q4_expert_table_group_size(n_total_expert);
-    NSString *key = [NSString stringWithFormat:@"addr:%p:%llu:%llu:%llu:%u:%u",
-                     model_map,
-                     (unsigned long long)model_size,
-                     (unsigned long long)tensor_offset,
-                     (unsigned long long)expert_bytes,
-                     n_total_expert,
-                     table_group_size];
-    DS4MetalQ4ExpertTable *cached = [g_q4_expert_table_cache objectForKey:key];
-    if (cached) return cached;
-
-    id<MTLBuffer> address_buffer =
-        [g_device newBufferWithLength:(NSUInteger)n_total_expert * sizeof(uint64_t)
-                               options:MTLResourceStorageModeShared];
-    if (!address_buffer) {
-        fprintf(stderr, "ds4: Metal Q4 expert address table allocation failed\n");
-        return nil;
-    }
-    address_buffer.label = @"ds4_q4_expert_address_table";
-    uint64_t *addresses = (uint64_t *)[address_buffer contents];
-    if (!addresses) return nil;
-
-    NSMutableArray<id<MTLBuffer>> *expert_buffers =
-        [NSMutableArray arrayWithCapacity:table_group_size > 1 ?
-            (n_total_expert + table_group_size - 1u) / table_group_size :
-            n_total_expert];
-    if (!expert_buffers) return nil;
-
-#if TARGET_OS_OSX
-    if (@available(macOS 13.0, *)) {
-        for (uint32_t first = 0; first < n_total_expert; first += table_group_size) {
-            const uint32_t remaining = n_total_expert - first;
-            const uint32_t group_n =
-                remaining < table_group_size ? remaining : table_group_size;
-            if ((uint64_t)first > UINT64_MAX / expert_bytes ||
-                (uint64_t)group_n > UINT64_MAX / expert_bytes) {
-                fprintf(stderr, "ds4: Metal Q4 expert address table group byte overflow\n");
-                return nil;
-            }
-            const uint64_t rel = (uint64_t)first * expert_bytes;
-            const uint64_t group_bytes = (uint64_t)group_n * expert_bytes;
-            if (rel > UINT64_MAX - tensor_offset) {
-                fprintf(stderr, "ds4: Metal Q4 expert address table group offset overflow\n");
-                return nil;
-            }
-            uint64_t inner = 0;
-            id<MTLBuffer> group_buf = nil;
-            if (table_group_size > 1) {
-                group_buf = ds4_gpu_wrap_model_range(model_map,
-                                                     model_size,
-                                                     tensor_offset + rel,
-                                                     group_bytes,
-                                                     &inner);
-            } else {
-                group_buf = ds4_gpu_wrap_model_exact_range_owned(model_map,
-                                                                 model_size,
-                                                                 tensor_offset + rel,
-                                                                 expert_bytes,
-                                                                 &inner);
-            }
-            if (!group_buf) return nil;
-            const uint64_t base_address = (uint64_t)[group_buf gpuAddress] + inner;
-            for (uint32_t j = 0; j < group_n; j++) {
-                addresses[first + j] = base_address + (uint64_t)j * expert_bytes;
-            }
-            [expert_buffers addObject:group_buf];
-        }
-    } else
-#endif
-    {
-        fprintf(stderr, "ds4: Metal GPU addresses require macOS 13 or newer\n");
-        return nil;
-    }
-
-    [address_buffer didModifyRange:NSMakeRange(0,
-        (NSUInteger)n_total_expert * sizeof(uint64_t))];
-
-    if (getenv("DS4_METAL_Q4_EXPERT_TABLE_PROFILE") != NULL) {
-        fprintf(stderr,
-                "ds4: Metal Q4 expert address table: experts=%u group=%u buffers=%lu expert_bytes=%.2f MiB\n",
-                n_total_expert,
-                table_group_size,
-                (unsigned long)[expert_buffers count],
-                ds4_gpu_mib(expert_bytes));
-    }
-
-    DS4MetalQ4ExpertTable *table = [DS4MetalQ4ExpertTable new];
-    table.addressBuffer = address_buffer;
-    table.expertBuffers = expert_buffers;
-    table.nExpert = n_total_expert;
-    table.expertBytes = expert_bytes;
-    [g_q4_expert_table_cache setObject:table forKey:key];
-    return table;
-}
-
 
 int ds4_gpu_indexer_topk_tensor(
         ds4_gpu_tensor       *selected,
@@ -13037,42 +11562,6 @@ static int ds4_gpu_encode_moe_swiglu_weight(
     return 1;
 }
 
-static int ds4_gpu_encode_moe_sum6(
-        id<MTLCommandBuffer> cb,
-        id<MTLBuffer>        experts,
-        NSUInteger           experts_off,
-        id<MTLBuffer>        out,
-        NSUInteger           out_off,
-        uint32_t             out_dim,
-        uint32_t             n_tokens) {
-    if (!cb || !experts || !out || out_dim == 0 || n_tokens == 0) return 0;
-
-    if (!g_moe_sum6_pipeline) return 0;
-
-    const uint64_t out_row_bytes = (uint64_t)out_dim * sizeof(float);
-    ds4_gpu_dsv4_moe_sum6_args args = {
-        .width = out_dim,
-        .tokens = n_tokens,
-        .src_token_stride = 6u * out_row_bytes,
-        .dst_token_stride = out_row_bytes,
-    };
-
-    NSUInteger nth = g_moe_sum6_pipeline.maxTotalThreadsPerThreadgroup;
-    if (nth > 256u) nth = 256u;
-    if (nth > out_dim) nth = out_dim;
-    if (nth == 0) nth = 1u;
-
-    id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
-    [enc setComputePipelineState:g_moe_sum6_pipeline];
-    [enc setBytes:&args length:sizeof(args) atIndex:0];
-    [enc setBuffer:experts offset:experts_off atIndex:1];
-    [enc setBuffer:out     offset:out_off     atIndex:2];
-    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)n_tokens, 1, 1)
-         threadsPerThreadgroup:MTLSizeMake(nth, 1, 1)];
-    ds4_gpu_end_compute_encoder(cb, enc);
-    return 1;
-}
-
 static int ds4_gpu_encode_moe_sum8(
         id<MTLCommandBuffer> cb,
         id<MTLBuffer>        experts,
@@ -13086,7 +11575,7 @@ static int ds4_gpu_encode_moe_sum8(
     if (!g_moe_sum8_pipeline) return 0;
 
     const uint64_t out_row_bytes = (uint64_t)out_dim * sizeof(float);
-    ds4_gpu_dsv4_moe_sum6_args args = {
+    ds4_gpu_dsv4_moe_sum_args args = {
         .width = out_dim,
         .tokens = n_tokens,
         .src_token_stride = 8u * out_row_bytes,
@@ -13121,7 +11610,7 @@ static int ds4_gpu_encode_moe_sum10(
     if (!g_moe_sum10_pipeline) return 0;
 
     const uint64_t out_row_bytes = (uint64_t)out_dim * sizeof(float);
-    ds4_gpu_dsv4_moe_sum6_args args = {
+    ds4_gpu_dsv4_moe_sum_args args = {
         .width = out_dim,
         .tokens = n_tokens,
         .src_token_stride = 10u * out_row_bytes,
@@ -13193,17 +11682,6 @@ static int ds4_gpu_encode_moe_sum_experts(
 
     const uint64_t out_row_bytes = (uint64_t)out_dim * sizeof(float);
     const uint64_t expert_token_stride = (uint64_t)n_expert * out_row_bytes;
-
-    if (n_expert == 6 &&
-        ds4_gpu_encode_moe_sum6(cb,
-                                  experts,
-                                  experts_off,
-                                  out,
-                                  out_off,
-                                  out_dim,
-                                  n_tokens)) {
-        return 1;
-    }
 
     if (n_expert == 8 &&
         ds4_gpu_encode_moe_sum8(cb,
@@ -17180,7 +15658,17 @@ static int ds4_gpu_glm_routed_moe_batch_tensor_impl(
         uint32_t                n_tokens,
         uint32_t                mid_token_stride,
         bool                    allow_grouped,
-        bool                    force_scalar_q4_pair) {
+        bool                    force_scalar_q4_pair,
+        bool                    exact_q4_evidence) {
+#ifndef DS4_TEST_HOOKS
+    (void)exact_q4_evidence;
+#endif
+    if (exact_q4_evidence &&
+        (gate_type != DS4_METAL_TENSOR_Q4_K ||
+         up_type != DS4_METAL_TENSOR_Q4_K ||
+         down_type != DS4_METAL_TENSOR_Q4_K)) {
+        return 0;
+    }
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (!out || !mid || !model_map || !selected || !weights || !x ||
         n_tokens == 0 ||
@@ -17505,7 +15993,17 @@ static int ds4_gpu_glm_routed_moe_batch_tensor_impl(
         DS4_METAL_PROFILE_GLM_MOE_BATCH_STAGE("down");
 
         if (!ok) return 0;
+#ifdef DS4_TEST_HOOKS
+        if (exact_q4_evidence) {
+            g_test_glm_exact_q4_encoded_dispatches++;
+        }
+#endif
         if (!ds4_gpu_finish_command_buffer(cb, owned, "GLM routed batch MoE")) return 0;
+#ifdef DS4_TEST_HOOKS
+        if (exact_q4_evidence && owned) {
+            g_test_glm_exact_q4_completed_dispatches++;
+        }
+#endif
 #undef DS4_METAL_PROFILE_GLM_MOE_BATCH_STAGE
     }
 
@@ -17570,6 +16068,7 @@ int ds4_gpu_glm_routed_moe_batch_tensor(
                                                     n_tokens,
                                                     mid_token_stride,
                                                     true,
+                                                    false,
                                                     false);
 }
 
@@ -17882,6 +16381,11 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
         const ds4_gpu_tensor *x,
         uint32_t                n_tokens,
         uint32_t                mid_token_stride) {
+    if (gate_type != DS4_METAL_TENSOR_Q4_K ||
+        up_type != DS4_METAL_TENSOR_Q4_K ||
+        down_type != DS4_METAL_TENSOR_Q4_K) {
+        return 0;
+    }
     return ds4_gpu_glm_routed_moe_batch_tensor_impl(out,
                                                     mid,
                                                     model_map,
@@ -17910,5 +16414,6 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
                                                     n_tokens,
                                                     mid_token_stride,
                                                     false,
+                                                    true,
                                                     true);
 }

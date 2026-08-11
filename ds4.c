@@ -10600,80 +10600,6 @@ int ds4_engine_generate_argmax(
 }
 
 
-static DS4_MAYBE_UNUSED bool ds4_engine_preload_pro_q4_expert_tables(
-        ds4_engine *e) {
-#ifdef DS4_NO_GPU
-    (void)e;
-    return true;
-#else
-    if (!e ||
-        DS4_MODEL_VARIANT != DS4_VARIANT_PRO ||
-        getenv("DS4_METAL_DISABLE_PRO_Q4_EXPERT_TABLE_PRELOAD") != NULL) {
-        return true;
-    }
-    if (ds4_gpu_pro_q4_expert_table_auto_available() == 0 &&
-        getenv("DS4_METAL_ENABLE_PRO_Q4_EXPERT_TABLE_AUTO") == NULL &&
-        getenv("DS4_METAL_ENABLE_PRO_Q4_EXPERT_ADDRESS_AUTO") == NULL &&
-        getenv("DS4_METAL_ENABLE_Q4_EXPERT_TABLE") == NULL &&
-        getenv("DS4_METAL_ENABLE_Q4_EXPERT_ADDRESS_TABLE") == NULL) {
-        return true;
-    }
-
-    const uint32_t start = 0;
-    const uint32_t end = DS4_N_LAYER - 1u;
-
-    bool any = false;
-    const double t0 = now_sec();
-    for (uint32_t il = start; il <= end; il++) {
-        const ds4_layer_weights *layer = &e->weights.layer[il];
-        if (!layer->ffn_gate_exps || !layer->ffn_up_exps || !layer->ffn_down_exps) {
-            continue;
-        }
-        if (layer->ffn_gate_exps->type != DS4_TENSOR_Q4_K ||
-            layer->ffn_up_exps->type != DS4_TENSOR_Q4_K ||
-            layer->ffn_down_exps->type != DS4_TENSOR_Q4_K ||
-            DS4_N_EXPERT != 384 ||
-            DS4_N_EXPERT_USED != 6) {
-            continue;
-        }
-
-        const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
-        const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
-        if (layer->ffn_gate_exps->dim[1] > UINT64_MAX / gate_row_bytes ||
-            layer->ffn_down_exps->dim[1] > UINT64_MAX / down_row_bytes) {
-            fprintf(stderr, "ds4: PRO Q4 expert table preload byte size overflow at layer %u\n", il);
-            return false;
-        }
-        const uint64_t gate_expert_bytes = layer->ffn_gate_exps->dim[1] * gate_row_bytes;
-        const uint64_t down_expert_bytes = layer->ffn_down_exps->dim[1] * down_row_bytes;
-
-        if (!ds4_gpu_preload_q4_expert_tables(e->model.map,
-                                              e->model.size,
-                                              layer->ffn_gate_exps->abs_offset,
-                                              layer->ffn_up_exps->abs_offset,
-                                              layer->ffn_down_exps->abs_offset,
-                                              gate_expert_bytes,
-                                              down_expert_bytes,
-                                              DS4_N_EXPERT)) {
-            fprintf(stderr,
-                    "ds4: Metal failed to preload PRO Q4 expert tables for layer %u\n",
-                    il);
-            return false;
-        }
-        any = true;
-    }
-
-    if (any) {
-        fprintf(stderr,
-                "ds4: Metal preloaded PRO Q4 expert tables for layers %u:%u in %.2fs\n",
-                start,
-                end,
-                now_sec() - t0);
-    }
-    return true;
-#endif
-}
-
 #ifdef DS4_TEST_HOOKS
 
 int ds4_test_session_read_logits(ds4_session *s, float *out,
@@ -10821,7 +10747,6 @@ static int ds4_engine_open_internal(ds4_engine **out,
         return 1;
     }
     ds4_gpu_set_quality(e->quality);
-    ds4_gpu_set_glm_model(false);
     const uint64_t model_tensor_bytes =
         e->model.size > e->model.tensor_data_pos ?
             e->model.size - e->model.tensor_data_pos : 0;
@@ -10858,11 +10783,6 @@ static int ds4_engine_open_internal(ds4_engine **out,
         fprintf(stderr,
                 "ds4: Metal failed to map support model views; aborting startup. "
                 "This is commonly caused by insufficient memory or accelerator VM budget.\n");
-        ds4_engine_close(e);
-        *out = NULL;
-        return 1;
-    }
-    if (!ds4_engine_preload_pro_q4_expert_tables(e)) {
         ds4_engine_close(e);
         *out = NULL;
         return 1;

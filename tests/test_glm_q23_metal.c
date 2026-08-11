@@ -13,10 +13,14 @@
 /* These values are the private Metal quant-type IDs in ds4_metal.m. */
 #define Q2_K_TYPE 10u
 #define Q3_K_TYPE 11u
+#define Q4_K_TYPE 12u
 
 #define N_TOTAL_EXPERT 4u
 #define N_EXPERT 3u
 #define DIM 256u
+#define Q4_PRODUCTION_TOTAL_EXPERT 256u
+#define Q4_PRODUCTION_EXPERT 10u
+#define Q4_PRODUCTION_TOKENS 4u
 #define GROUPED_TOTAL_EXPERT 22u
 #define GROUPED_EXPERT 2u
 #define GROUPED_TOKENS 32u
@@ -29,6 +33,10 @@ bool ds4_log_is_tty(FILE *fp) {
 #ifdef DS4_TEST_HOOKS
 void ds4_gpu_test_glm_grouped_moe_counters_reset(void);
 int ds4_gpu_test_glm_grouped_moe_counters(
+        uint64_t *encoded_dispatches,
+        uint64_t *completed_dispatches);
+void ds4_gpu_test_glm_exact_q4_counters_reset(void);
+int ds4_gpu_test_glm_exact_q4_counters(
         uint64_t *encoded_dispatches,
         uint64_t *completed_dispatches);
 #endif
@@ -47,8 +55,16 @@ typedef struct {
     uint16_t d;
 } block_q3_K_test;
 
+typedef struct {
+    uint16_t d;
+    uint16_t dmin;
+    uint8_t scales[12];
+    uint8_t qs[128];
+} block_q4_K_test;
+
 typedef char q2_k_block_size_must_match[(sizeof(block_q2_K_test) == 84u) ? 1 : -1];
 typedef char q3_k_block_size_must_match[(sizeof(block_q3_K_test) == 110u) ? 1 : -1];
+typedef char q4_k_block_size_must_match[(sizeof(block_q4_K_test) == 144u) ? 1 : -1];
 
 static uint64_t align_up(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1u) / alignment * alignment;
@@ -109,6 +125,33 @@ static void fill_q3_matrix(void *storage, uint32_t salt) {
     fill_q3_matrix_n(storage, N_TOTAL_EXPERT, salt);
 }
 
+static void fill_q4_matrix_n(void *storage,
+                             uint32_t expert_count,
+                             uint32_t salt) {
+    block_q4_K_test *matrix = (block_q4_K_test *)storage;
+    for (uint32_t expert = 0; expert < expert_count; expert++) {
+        for (uint32_t row = 0; row < DIM; row++) {
+            block_q4_K_test *block = matrix +
+                (uint64_t)expert * DIM + row;
+            for (uint32_t i = 0; i < sizeof(block->scales); i++) {
+                block->scales[i] = (uint8_t)(1u +
+                    ((salt + expert * 3u + row + i * 5u) & 0x0fu));
+            }
+            for (uint32_t i = 0; i < sizeof(block->qs); i++) {
+                block->qs[i] = (uint8_t)(salt + expert * 11u +
+                    row * 7u + i * 13u);
+            }
+            block->d = 0x3c00u;    /* 1.0 in IEEE FP16 */
+            block->dmin = 0x0000u; /* zero minimum for stable A/B values */
+        }
+    }
+}
+
+static unsigned quant_number(uint32_t quant_type) {
+    return quant_type == Q2_K_TYPE ? 2u :
+           quant_type == Q3_K_TYPE ? 3u : 4u;
+}
+
 static void fill_q2_grouped_matrix(void *storage,
                                    uint32_t expert_count,
                                    uint32_t high_expert,
@@ -162,7 +205,7 @@ static int run_case(const void *model,
     if (!x_values || !selected_values || !weight_values ||
         !legacy_mid || !multi_mid || !legacy_out || !multi_out) {
         fprintf(stderr, "Q%u Metal A/B host allocation failed\n",
-                quant_type == Q2_K_TYPE ? 2u : 3u);
+                quant_number(quant_type));
         free(x_values);
         free(selected_values);
         free(weight_values);
@@ -254,7 +297,7 @@ static int run_case(const void *model,
                     (size_t)per_token_mid * sizeof(float)) != 0 ||
              memcmp(legacy_out, multi_out, (size_t)out_bytes) != 0)) {
             fprintf(stderr, "Q%u Metal one-token mapped bind/output mismatch\n",
-                    quant_type == Q2_K_TYPE ? 2u : 3u);
+                    quant_number(quant_type));
             one_ok = 0;
         }
         if (saved_qmv_copy) {
@@ -267,11 +310,11 @@ static int run_case(const void *model,
         ds4_gpu_tensor_free(one_out);
         if (!one_ok) {
             fprintf(stderr, "Q%u Metal one-token mapped bind/output FAIL\n",
-                    quant_type == Q2_K_TYPE ? 2u : 3u);
+                    quant_number(quant_type));
             ok = 0;
         } else {
             fprintf(stderr, "Q%u Metal one-token mapped bind/output PASS\n",
-                    quant_type == Q2_K_TYPE ? 2u : 3u);
+                    quant_number(quant_type));
         }
     }
     /* Do not let a missing multirow write inherit the legacy result and make
@@ -319,7 +362,7 @@ static int run_case(const void *model,
                        (size_t)per_token_mid * sizeof(float)) != 0) {
                 fprintf(stderr,
                         "Q%u Metal A/B mid mismatch rows=%u token=%u\n",
-                        quant_type == Q2_K_TYPE ? 2u : 3u,
+                        quant_number(quant_type),
                         n_tokens, token);
                 ok = 0;
                 break;
@@ -327,13 +370,13 @@ static int run_case(const void *model,
         }
         if (ok && memcmp(legacy_out, multi_out, (size_t)out_bytes) != 0) {
             fprintf(stderr, "Q%u Metal A/B out mismatch rows=%u\n",
-                    quant_type == Q2_K_TYPE ? 2u : 3u, n_tokens);
+                    quant_number(quant_type), n_tokens);
             ok = 0;
         }
     }
     if (ok) {
         fprintf(stderr, "Q%u Metal A/B bit-exact rows=%u stride=%u\n",
-                quant_type == Q2_K_TYPE ? 2u : 3u,
+                quant_number(quant_type),
                 n_tokens, mid_token_stride);
     }
 
@@ -349,6 +392,359 @@ static int run_case(const void *model,
     free(multi_mid);
     free(legacy_out);
     free(multi_out);
+    return ok;
+}
+
+static int q4_values_finite_nonzero(const float *values, size_t count) {
+    int nonzero = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!isfinite(values[i])) return 0;
+        if (fabsf(values[i]) > 1.0e-8f) nonzero = 1;
+    }
+    return nonzero;
+}
+
+static int q4_values_all_changed_from(const float *values,
+                                      size_t count,
+                                      float sentinel) {
+    for (size_t i = 0; i < count; i++) {
+        if (values[i] == sentinel) return 0;
+    }
+    return 1;
+}
+
+static float q4_max_scaled_diff(const float *left,
+                                const float *right,
+                                size_t count) {
+    float max_scaled = 0.0f;
+    for (size_t i = 0; i < count; i++) {
+        const float scaled = fabsf(left[i] - right[i]) /
+            (1.0f + fmaxf(fabsf(left[i]), fabsf(right[i])));
+        if (scaled > max_scaled) max_scaled = scaled;
+    }
+    return max_scaled;
+}
+
+/* The exact-Q4 API must be independently checked against the ordinary
+ * one-token route.  In particular, the Q4 exact API does not consult the
+ * Q2/Q3 multirow diagnostic switch, so re-running that API for both A/B legs
+ * would only prove that the same dispatch can write twice. */
+static int run_q4_production_case(const void *model,
+                                  uint64_t model_size,
+                                  uint64_t gate_offset,
+                                  uint64_t up_offset,
+                                  uint64_t down_offset,
+                                  uint64_t expert_bytes,
+                                  uint64_t row_bytes) {
+    const uint32_t n_tokens = Q4_PRODUCTION_TOKENS;
+    const uint32_t per_token_mid = Q4_PRODUCTION_EXPERT * DIM;
+    const uint32_t mid_token_stride = per_token_mid + 16u;
+    const uint64_t x_count = (uint64_t)n_tokens * DIM;
+    const uint64_t selected_count =
+        (uint64_t)n_tokens * Q4_PRODUCTION_EXPERT;
+    const uint64_t mid_count =
+        (uint64_t)(n_tokens - 1u) * mid_token_stride + per_token_mid;
+    const uint64_t out_count = (uint64_t)n_tokens * DIM;
+    const uint64_t x_bytes = x_count * sizeof(float);
+    const uint64_t selected_bytes = selected_count * sizeof(int32_t);
+    const uint64_t weights_bytes = selected_count * sizeof(float);
+    const uint64_t mid_bytes = mid_count * sizeof(float);
+    const uint64_t out_bytes = out_count * sizeof(float);
+    /* Keep the two legs visibly independent even when this test is built
+     * with fast-math: finite sentinels make a missing write observable without
+     * relying on NaN propagation or isfinite(). */
+    const float batch_mid_sentinel = 12345.25f;
+    const float batch_out_sentinel = -23456.5f;
+    const float reference_mid_sentinel = -34567.75f;
+    const float reference_out_sentinel = 45678.125f;
+    float *x_values = calloc((size_t)x_count, sizeof(float));
+    int32_t *selected_values = calloc((size_t)selected_count, sizeof(int32_t));
+    float *weight_values = calloc((size_t)selected_count, sizeof(float));
+    float *batch_mid_values = malloc((size_t)mid_bytes);
+    float *batch_out_values = malloc((size_t)out_bytes);
+    float *reference_mid_values = malloc((size_t)mid_bytes);
+    float *reference_out_values = malloc((size_t)out_bytes);
+    float *one_mid_values = malloc((size_t)per_token_mid * sizeof(float));
+    float *one_out_values = malloc((size_t)DIM * sizeof(float));
+    int ok = x_values && selected_values && weight_values &&
+             batch_mid_values && batch_out_values &&
+             reference_mid_values && reference_out_values &&
+             one_mid_values && one_out_values;
+    if (!ok) {
+        fprintf(stderr, "Q4 production fixture host allocation failed\n");
+        goto cleanup;
+    }
+
+    for (uint32_t token = 0; token < n_tokens; token++) {
+        for (uint32_t i = 0; i < DIM; i++) {
+            x_values[(uint64_t)token * DIM + i] =
+                (float)((int32_t)((i * 29u + token * 37u) % 127u) - 63) /
+                40.0f;
+        }
+        selected_values[(uint64_t)token * Q4_PRODUCTION_EXPERT + 0u] = 0;
+        selected_values[(uint64_t)token * Q4_PRODUCTION_EXPERT + 1u] =
+            (int32_t)(Q4_PRODUCTION_TOTAL_EXPERT - 1u);
+        for (uint32_t slot = 2; slot < Q4_PRODUCTION_EXPERT; slot++) {
+            selected_values[(uint64_t)token * Q4_PRODUCTION_EXPERT + slot] =
+                (int32_t)((token * 17u + slot * 11u) %
+                          (Q4_PRODUCTION_TOTAL_EXPERT - 2u));
+        }
+        for (uint32_t slot = 0; slot < Q4_PRODUCTION_EXPERT; slot++) {
+            weight_values[(uint64_t)token * Q4_PRODUCTION_EXPERT + slot] =
+                0.03125f + 0.0078125f * (float)(token + slot);
+        }
+    }
+    for (uint64_t i = 0; i < mid_count; i++) {
+        batch_mid_values[i] = batch_mid_sentinel;
+        reference_mid_values[i] = reference_mid_sentinel;
+    }
+    for (uint64_t i = 0; i < out_count; i++) {
+        batch_out_values[i] = batch_out_sentinel;
+        reference_out_values[i] = reference_out_sentinel;
+    }
+
+    /* Reinitialize against the production-shaped map so the exact leg starts
+     * with no caller-owned command batch and therefore must take the owned
+     * command-buffer path. */
+    ds4_gpu_cleanup();
+    ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
+    ds4_gpu_set_quality(false);
+    ds4_gpu_tensor *batch_x = NULL;
+    ds4_gpu_tensor *batch_selected = NULL;
+    ds4_gpu_tensor *batch_weights = NULL;
+    ds4_gpu_tensor *batch_mid = NULL;
+    ds4_gpu_tensor *batch_out = NULL;
+    ds4_gpu_tensor *one_x = NULL;
+    ds4_gpu_tensor *one_selected = NULL;
+    ds4_gpu_tensor *one_weights = NULL;
+    ds4_gpu_tensor *one_mid = NULL;
+    ds4_gpu_tensor *one_out = NULL;
+    if (!ok || ds4_gpu_commands_active() != 0) {
+        ok = 0;
+        goto tensors_cleanup;
+    }
+
+    batch_x = ds4_gpu_tensor_alloc(x_bytes);
+    batch_selected = ds4_gpu_tensor_alloc(selected_bytes);
+    batch_weights = ds4_gpu_tensor_alloc(weights_bytes);
+    batch_mid = ds4_gpu_tensor_alloc(mid_bytes);
+    batch_out = ds4_gpu_tensor_alloc(out_bytes);
+    ok = batch_x && batch_selected && batch_weights && batch_mid && batch_out;
+    ok = ok && ds4_gpu_tensor_write(batch_x, 0, x_values, x_bytes);
+    ok = ok && ds4_gpu_tensor_write(
+        batch_selected, 0, selected_values, selected_bytes);
+    ok = ok && ds4_gpu_tensor_write(
+        batch_weights, 0, weight_values, weights_bytes);
+    ok = ok && ds4_gpu_tensor_write(batch_mid, 0, batch_mid_values, mid_bytes);
+    ok = ok && ds4_gpu_tensor_write(batch_out, 0, batch_out_values, out_bytes);
+    if (ok && ds4_gpu_commands_active() != 0) ok = 0;
+
+#ifdef DS4_TEST_HOOKS
+    if (ok) ds4_gpu_test_glm_exact_q4_counters_reset();
+#endif
+    if (ok) {
+        ok = ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
+            batch_out, batch_mid, model, model_size,
+            gate_offset, up_offset, down_offset,
+            Q4_K_TYPE, Q4_K_TYPE, Q4_K_TYPE,
+            expert_bytes, row_bytes,
+            expert_bytes, row_bytes,
+            expert_bytes, row_bytes,
+            DIM, DIM, DIM,
+            batch_selected, batch_weights,
+            Q4_PRODUCTION_TOTAL_EXPERT, Q4_PRODUCTION_EXPERT, 0u,
+            batch_x, n_tokens, mid_token_stride);
+    }
+    if (ok && ds4_gpu_commands_active() != 0) ok = 0;
+#ifdef DS4_TEST_HOOKS
+    if (ok) {
+        uint64_t encoded = 0;
+        uint64_t completed = 0;
+        ok = ds4_gpu_test_glm_exact_q4_counters(&encoded, &completed) &&
+             encoded == 1u && completed == 1u;
+        if (!ok) {
+            fprintf(stderr,
+                    "Q4 production exact route evidence mismatch "
+                    "encoded=%llu completed=%llu\n",
+                    (unsigned long long)encoded,
+                    (unsigned long long)completed);
+        }
+    }
+#endif
+    if (ok) {
+        ok = ds4_gpu_tensor_read(
+            batch_mid, 0, batch_mid_values, mid_bytes) &&
+             ds4_gpu_tensor_read(batch_out, 0, batch_out_values, out_bytes);
+    }
+    int batch_mid_good = 0;
+    int batch_mid_changed = 0;
+    int batch_out_good = 0;
+    int batch_out_changed = 0;
+    if (ok) {
+        batch_mid_good = 1;
+        batch_mid_changed = 1;
+        for (uint32_t token = 0; token < n_tokens; token++) {
+            const float *token_mid = batch_mid_values +
+                (uint64_t)token * mid_token_stride;
+            if (!q4_values_finite_nonzero(token_mid, per_token_mid)) {
+                batch_mid_good = 0;
+            }
+            if (!q4_values_all_changed_from(
+                    token_mid, per_token_mid, batch_mid_sentinel)) {
+                batch_mid_changed = 0;
+            }
+        }
+        batch_out_good = q4_values_finite_nonzero(
+            batch_out_values, (size_t)out_count);
+        batch_out_changed = q4_values_all_changed_from(
+            batch_out_values, (size_t)out_count, batch_out_sentinel);
+    }
+    if (ok &&
+        (!batch_mid_good || !batch_mid_changed ||
+         !batch_out_good || !batch_out_changed)) {
+        fprintf(stderr,
+                "Q4 production exact batch output was not changed and "
+                "finite/nonzero\n");
+        ok = 0;
+    }
+
+    const char *saved_qmv = getenv("DS4_METAL_GLM_QMV_R1");
+    char *saved_qmv_copy = saved_qmv ? strdup(saved_qmv) : NULL;
+    ok = ok && (!saved_qmv || saved_qmv_copy != NULL);
+    if (ok) ok = unsetenv("DS4_METAL_GLM_QMV_R1") == 0;
+
+    one_x = ds4_gpu_tensor_alloc((uint64_t)DIM * sizeof(float));
+    one_selected = ds4_gpu_tensor_alloc(
+        (uint64_t)Q4_PRODUCTION_EXPERT * sizeof(int32_t));
+    one_weights = ds4_gpu_tensor_alloc(
+        (uint64_t)Q4_PRODUCTION_EXPERT * sizeof(float));
+    one_mid = ds4_gpu_tensor_alloc((uint64_t)per_token_mid * sizeof(float));
+    one_out = ds4_gpu_tensor_alloc((uint64_t)DIM * sizeof(float));
+    ok = ok && one_x && one_selected && one_weights && one_mid && one_out;
+    for (uint32_t token = 0; ok && token < n_tokens; token++) {
+        for (uint32_t i = 0; i < per_token_mid; i++) {
+            one_mid_values[i] = reference_mid_sentinel;
+        }
+        for (uint32_t i = 0; i < DIM; i++) {
+            one_out_values[i] = reference_out_sentinel;
+        }
+        ok = ds4_gpu_tensor_write(
+            one_x, 0, x_values + (uint64_t)token * DIM, DIM * sizeof(float));
+        ok = ok && ds4_gpu_tensor_write(
+            one_selected, 0,
+            selected_values + (uint64_t)token * Q4_PRODUCTION_EXPERT,
+            Q4_PRODUCTION_EXPERT * sizeof(int32_t));
+        ok = ok && ds4_gpu_tensor_write(
+            one_weights, 0,
+            weight_values + (uint64_t)token * Q4_PRODUCTION_EXPERT,
+            Q4_PRODUCTION_EXPERT * sizeof(float));
+        ok = ok && ds4_gpu_tensor_write(
+            one_mid, 0, one_mid_values,
+            (uint64_t)per_token_mid * sizeof(float));
+        ok = ok && ds4_gpu_tensor_write(
+            one_out, 0, one_out_values, DIM * sizeof(float));
+        if (ok && ds4_gpu_commands_active() != 0) ok = 0;
+        if (ok) {
+            ok = ds4_gpu_glm_routed_moe_one_tensor(
+                one_out, one_mid, model, model_size,
+                gate_offset, up_offset, down_offset,
+                Q4_K_TYPE, Q4_K_TYPE, Q4_K_TYPE,
+                expert_bytes, row_bytes,
+                expert_bytes, row_bytes,
+                expert_bytes, row_bytes,
+                DIM, DIM, DIM,
+                one_selected, one_weights,
+                Q4_PRODUCTION_TOTAL_EXPERT, Q4_PRODUCTION_EXPERT, 0u,
+                one_x, false);
+        }
+        if (ok && ds4_gpu_commands_active() != 0) ok = 0;
+        if (ok) {
+            ok = ds4_gpu_tensor_read(
+                one_mid, 0, one_mid_values,
+                (uint64_t)per_token_mid * sizeof(float)) &&
+                ds4_gpu_tensor_read(one_out, 0, one_out_values,
+                                    (uint64_t)DIM * sizeof(float));
+        }
+        if (ok &&
+            (!q4_values_all_changed_from(
+                 one_mid_values, per_token_mid, reference_mid_sentinel) ||
+             !q4_values_all_changed_from(
+                 one_out_values, DIM, reference_out_sentinel) ||
+             !q4_values_finite_nonzero(one_mid_values, per_token_mid) ||
+             !q4_values_finite_nonzero(one_out_values, DIM))) {
+            fprintf(stderr,
+                "Q4 production one-token reference output was not "
+                "changed and finite/nonzero token=%u\n", token);
+            ok = 0;
+        }
+        if (ok) {
+            memcpy(reference_mid_values + (uint64_t)token * mid_token_stride,
+                   one_mid_values, (size_t)per_token_mid * sizeof(float));
+            memcpy(reference_out_values + (uint64_t)token * DIM,
+                   one_out_values, (size_t)DIM * sizeof(float));
+        }
+    }
+    if (saved_qmv_copy) {
+        setenv("DS4_METAL_GLM_QMV_R1", saved_qmv_copy, 1);
+    } else if (!saved_qmv) {
+        unsetenv("DS4_METAL_GLM_QMV_R1");
+    }
+    free(saved_qmv_copy);
+
+#ifdef DS4_TEST_HOOKS
+    if (ok) {
+        uint64_t encoded = 0;
+        uint64_t completed = 0;
+        ok = ds4_gpu_test_glm_exact_q4_counters(&encoded, &completed) &&
+             encoded == 1u && completed == 1u;
+    }
+#endif
+    if (ok) {
+        float max_mid = 0.0f;
+        float max_out = 0.0f;
+        for (uint32_t token = 0; token < n_tokens; token++) {
+            max_mid = fmaxf(max_mid,
+                q4_max_scaled_diff(
+                    batch_mid_values + (uint64_t)token * mid_token_stride,
+                    reference_mid_values + (uint64_t)token * mid_token_stride,
+                    per_token_mid));
+            max_out = fmaxf(max_out,
+                q4_max_scaled_diff(
+                    batch_out_values + (uint64_t)token * DIM,
+                    reference_out_values + (uint64_t)token * DIM,
+                    DIM));
+        }
+        fprintf(stderr,
+                "Q4 production exact-vs-one total=%u selected=%u "
+                "ids=0,%u tokens=%u max_scaled_mid=%g max_scaled_out=%g\n",
+                Q4_PRODUCTION_TOTAL_EXPERT, Q4_PRODUCTION_EXPERT,
+                Q4_PRODUCTION_TOTAL_EXPERT - 1u, n_tokens,
+                max_mid, max_out);
+        ok = max_mid < 0.02f && max_out < 0.02f;
+    }
+
+tensors_cleanup:
+    ds4_gpu_tensor_free(one_out);
+    ds4_gpu_tensor_free(one_mid);
+    ds4_gpu_tensor_free(one_weights);
+    ds4_gpu_tensor_free(one_selected);
+    ds4_gpu_tensor_free(one_x);
+    ds4_gpu_tensor_free(batch_out);
+    ds4_gpu_tensor_free(batch_mid);
+    ds4_gpu_tensor_free(batch_weights);
+    ds4_gpu_tensor_free(batch_selected);
+    ds4_gpu_tensor_free(batch_x);
+    ds4_gpu_cleanup();
+cleanup:
+    free(one_out_values);
+    free(one_mid_values);
+    free(reference_out_values);
+    free(reference_mid_values);
+    free(batch_out_values);
+    free(batch_mid_values);
+    free(weight_values);
+    free(selected_values);
+    free(x_values);
     return ok;
 }
 
@@ -761,6 +1157,40 @@ int main(void) {
         ok = run_case(model, model_size, Q3_K_TYPE,
                       q3_gate_offset, q3_up_offset, q3_down_offset,
                       q3_expert_bytes, q3_row_bytes, 4u);
+    }
+    if (ok) {
+        /* Use a full production-shaped Q4 map so the exact route exercises
+         * both long-tail IDs (0 and 255), rather than a compact test map. */
+        const uint64_t q4_row_bytes = sizeof(block_q4_K_test);
+        const uint64_t q4_expert_bytes = DIM * q4_row_bytes;
+        const uint64_t q4_tensor_bytes =
+            Q4_PRODUCTION_TOTAL_EXPERT * q4_expert_bytes;
+        const uint64_t q4_gate_offset = 0u;
+        const uint64_t q4_up_offset = align_up(
+            q4_gate_offset + q4_tensor_bytes, page);
+        const uint64_t q4_down_offset = align_up(
+            q4_up_offset + q4_tensor_bytes, page);
+        const uint64_t q4_model_size = align_up(
+            q4_down_offset + q4_tensor_bytes, page);
+        void *q4_model = NULL;
+        if (posix_memalign(&q4_model, (size_t)page,
+                           (size_t)q4_model_size) != 0) {
+            fprintf(stderr, "Q4 production model allocation failed\n");
+            ok = 0;
+        } else {
+            memset(q4_model, 0, (size_t)q4_model_size);
+            fill_q4_matrix_n((uint8_t *)q4_model + q4_gate_offset,
+                             Q4_PRODUCTION_TOTAL_EXPERT, 7u);
+            fill_q4_matrix_n((uint8_t *)q4_model + q4_up_offset,
+                             Q4_PRODUCTION_TOTAL_EXPERT, 23u);
+            fill_q4_matrix_n((uint8_t *)q4_model + q4_down_offset,
+                             Q4_PRODUCTION_TOTAL_EXPERT, 37u);
+            ok = run_q4_production_case(
+                q4_model, q4_model_size,
+                q4_gate_offset, q4_up_offset, q4_down_offset,
+                q4_expert_bytes, q4_row_bytes);
+            free(q4_model);
+        }
     }
 
     if (ok) {
