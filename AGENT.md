@@ -58,9 +58,10 @@ requirements.
   execution and active-batch-only six-layer injection recording; it never owns
   scheduler, target-output, rollback, or command completion state.
 - `ds4.c`: transitional tokenizer, Laguna scheduling, the still-separate
-  generic raw graph, sessions, and disk-cache payload serialisation; the
-  standalone GLM/DSA graph is gone. Move supported Laguna code into `lgn_*`
-  modules as the remaining obsolete graph/backend paths are deleted.
+  private generic raw graph, sessions, and disk-cache payload serialisation;
+  the standalone GLM/DSA graph and all public raw-graph/imatrix diagnostics are
+  gone. Move supported Laguna code into `lgn_*` modules as the remaining
+  obsolete graph/backend paths are deleted.
 - `ds4_cli.c`: command line and interactive transcript handling.
 - `ds4_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
   streaming, tool-call mapping, and server-side KV-cache policy.

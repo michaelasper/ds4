@@ -69,6 +69,10 @@ The refactor branch already:
   helpers remain because Laguna decode, prefill, and DFlash verification still
   call them, and the Q2/Q3 exactness fixture continues to cover that retained
   kernel surface;
+- removes the remaining public raw-graph, first-token, output-head, and
+  imatrix diagnostic APIs and CLI switches. Removed switches now fail during
+  option parsing, before model I/O, so the private raw graph can be deleted
+  without leaving a crashable Laguna entry point;
 - fixes the product name as **LagoonNebula** and the eventual repository name
   as **`lgn2`**, while deliberately postponing the mechanical identifier
   rename until unsupported implementation paths are gone;
@@ -78,7 +82,8 @@ The refactor branch already:
 
 The separate generic raw graph, low-level CUDA-oriented tensor-parallel and
 tier-aware helpers, SSD expert streaming, legacy model helpers, and broad
-shared-backend Metal code still remain internally. Graph scalarization is not
+shared-backend Metal code still remain internally, but the raw graph no longer
+has a public diagnostic or imatrix entry point. Graph scalarization is not
 complete. Their presence is transitional and must not be interpreted as
 supported behavior. A `glm_` name on one of the six retained router/MoE Metal
 helpers describes inherited implementation naming, not GLM product support.
