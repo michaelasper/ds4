@@ -1,4 +1,4 @@
-struct ds4_metal_args_glu {
+struct lgn2_metal_args_glu {
     int32_t  ne00;
     uint64_t nb01;
     int32_t  ne10;
@@ -11,10 +11,10 @@ struct ds4_metal_args_glu {
     float    limit;
 };
 
-// SwiGLU activation for the FFN inner state. DS4 clamps the shared expert with
+// SwiGLU activation for the FFN inner state. LGN2 clamps the shared expert with
 // the same swiglu_limit used by routed experts.
 kernel void kernel_swiglu_f32(
-        constant ds4_metal_args_glu & args,
+        constant lgn2_metal_args_glu & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -40,7 +40,7 @@ kernel void kernel_swiglu_f32(
 }
 
 kernel void kernel_swiglu_flat_f32(
-        constant ds4_metal_args_glu & args,
+        constant lgn2_metal_args_glu & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,

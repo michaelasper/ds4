@@ -1,6 +1,6 @@
 #define _DARWIN_C_SOURCE
 
-#include "ds4_gpu.h"
+#include "lgn2_gpu.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,7 +10,7 @@
 #include <math.h>
 #include <unistd.h>
 
-/* These values are the private Metal quant-type IDs in ds4_metal.m. */
+/* These values are the private Metal quant-type IDs in lgn2_metal.m. */
 #define Q2_K_TYPE 10u
 #define Q3_K_TYPE 11u
 #define Q4_K_TYPE 12u
@@ -25,18 +25,18 @@
 #define GROUPED_EXPERT 2u
 #define GROUPED_TOKENS 32u
 
-bool ds4_log_is_tty(FILE *fp) {
+bool lgn2_log_is_tty(FILE *fp) {
     (void)fp;
     return false;
 }
 
-#ifdef DS4_TEST_HOOKS
-void ds4_gpu_test_glm_grouped_moe_counters_reset(void);
-int ds4_gpu_test_glm_grouped_moe_counters(
+#ifdef LGN2_TEST_HOOKS
+void lgn2_gpu_test_glm_grouped_moe_counters_reset(void);
+int lgn2_gpu_test_glm_grouped_moe_counters(
         uint64_t *encoded_dispatches,
         uint64_t *completed_dispatches);
-void ds4_gpu_test_glm_exact_q4_counters_reset(void);
-int ds4_gpu_test_glm_exact_q4_counters(
+void lgn2_gpu_test_glm_exact_q4_counters_reset(void);
+int lgn2_gpu_test_glm_exact_q4_counters(
         uint64_t *encoded_dispatches,
         uint64_t *completed_dispatches);
 #endif
@@ -230,24 +230,24 @@ static int run_case(const void *model,
         }
     }
 
-    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
-    ds4_gpu_tensor *selected = ds4_gpu_tensor_alloc(selected_bytes);
-    ds4_gpu_tensor *weights = ds4_gpu_tensor_alloc(weights_bytes);
-    ds4_gpu_tensor *mid = ds4_gpu_tensor_alloc(mid_bytes);
-    ds4_gpu_tensor *out = ds4_gpu_tensor_alloc(out_bytes);
+    lgn2_gpu_tensor *x = lgn2_gpu_tensor_alloc(x_bytes);
+    lgn2_gpu_tensor *selected = lgn2_gpu_tensor_alloc(selected_bytes);
+    lgn2_gpu_tensor *weights = lgn2_gpu_tensor_alloc(weights_bytes);
+    lgn2_gpu_tensor *mid = lgn2_gpu_tensor_alloc(mid_bytes);
+    lgn2_gpu_tensor *out = lgn2_gpu_tensor_alloc(out_bytes);
     int ok = x && selected && weights && mid && out;
-    ok = ok && ds4_gpu_tensor_write(x, 0, x_values, x_bytes);
-    ok = ok && ds4_gpu_tensor_write(
+    ok = ok && lgn2_gpu_tensor_write(x, 0, x_values, x_bytes);
+    ok = ok && lgn2_gpu_tensor_write(
         selected, 0, selected_values, selected_bytes);
-    ok = ok && ds4_gpu_tensor_write(weights, 0, weight_values, weights_bytes);
+    ok = ok && lgn2_gpu_tensor_write(weights, 0, weight_values, weights_bytes);
 
-    const char *saved_env = getenv("DS4_METAL_DISABLE_Q23_EXACT_MULTIROW");
+    const char *saved_env = getenv("LGN2_METAL_DISABLE_Q23_EXACT_MULTIROW");
     char *saved_env_copy = saved_env ? strdup(saved_env) : NULL;
-    if (ok && setenv("DS4_METAL_DISABLE_Q23_EXACT_MULTIROW", "1", 1) != 0) {
+    if (ok && setenv("LGN2_METAL_DISABLE_Q23_EXACT_MULTIROW", "1", 1) != 0) {
         ok = 0;
     }
     if (ok) {
-        ok = ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
+        ok = lgn2_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
             out, mid, model, model_size,
             gate_offset, up_offset, down_offset,
             quant_type, quant_type, quant_type,
@@ -260,22 +260,22 @@ static int run_case(const void *model,
             x, n_tokens, mid_token_stride);
     }
     if (ok) {
-        ok = ds4_gpu_tensor_read(mid, 0, legacy_mid, mid_bytes) &&
-             ds4_gpu_tensor_read(out, 0, legacy_out, out_bytes);
+        ok = lgn2_gpu_tensor_read(mid, 0, legacy_mid, mid_bytes) &&
+             lgn2_gpu_tensor_read(out, 0, legacy_out, out_bytes);
     }
     if (ok && n_tokens == 1u) {
         /* The ordinary one-token helper must bind all three whole-model
          * ranges before dispatch. Compare its output with the exact Q2/Q3
          * verifier so a nil MTLBuffer cannot masquerade as success. */
-        const char *saved_qmv = getenv("DS4_METAL_GLM_QMV_R1");
+        const char *saved_qmv = getenv("LGN2_METAL_LAGUNA_QMV_R1");
         char *saved_qmv_copy = saved_qmv ? strdup(saved_qmv) : NULL;
-        ds4_gpu_tensor *one_mid = ds4_gpu_tensor_alloc(mid_bytes);
-        ds4_gpu_tensor *one_out = ds4_gpu_tensor_alloc(out_bytes);
+        lgn2_gpu_tensor *one_mid = lgn2_gpu_tensor_alloc(mid_bytes);
+        lgn2_gpu_tensor *one_out = lgn2_gpu_tensor_alloc(out_bytes);
         int one_ok = !saved_qmv || saved_qmv_copy != NULL;
-        if (one_ok) one_ok = unsetenv("DS4_METAL_GLM_QMV_R1") == 0;
+        if (one_ok) one_ok = unsetenv("LGN2_METAL_LAGUNA_QMV_R1") == 0;
         if (one_ok) {
             one_ok = one_mid && one_out &&
-                ds4_gpu_glm_routed_moe_one_tensor(
+                lgn2_gpu_glm_routed_moe_one_tensor(
                     one_out, one_mid, model, model_size,
                     gate_offset, up_offset, down_offset,
                     quant_type, quant_type, quant_type,
@@ -288,9 +288,9 @@ static int run_case(const void *model,
                     x, false);
         }
         if (one_ok) {
-            one_ok = ds4_gpu_tensor_read(
+            one_ok = lgn2_gpu_tensor_read(
                 one_mid, 0, multi_mid, mid_bytes) &&
-                ds4_gpu_tensor_read(one_out, 0, multi_out, out_bytes);
+                lgn2_gpu_tensor_read(one_out, 0, multi_out, out_bytes);
         }
         if (one_ok &&
             (memcmp(legacy_mid, multi_mid,
@@ -301,13 +301,13 @@ static int run_case(const void *model,
             one_ok = 0;
         }
         if (saved_qmv_copy) {
-            setenv("DS4_METAL_GLM_QMV_R1", saved_qmv_copy, 1);
+            setenv("LGN2_METAL_LAGUNA_QMV_R1", saved_qmv_copy, 1);
         } else if (!saved_qmv) {
-            unsetenv("DS4_METAL_GLM_QMV_R1");
+            unsetenv("LGN2_METAL_LAGUNA_QMV_R1");
         }
         free(saved_qmv_copy);
-        ds4_gpu_tensor_free(one_mid);
-        ds4_gpu_tensor_free(one_out);
+        lgn2_gpu_tensor_free(one_mid);
+        lgn2_gpu_tensor_free(one_out);
         if (!one_ok) {
             fprintf(stderr, "Q%u Metal one-token mapped bind/output FAIL\n",
                     quant_number(quant_type));
@@ -322,15 +322,15 @@ static int run_case(const void *model,
     if (ok) {
         memset(multi_mid, 0xa5, (size_t)mid_bytes);
         memset(multi_out, 0x5a, (size_t)out_bytes);
-        ok = ds4_gpu_tensor_write(mid, 0, multi_mid, mid_bytes) &&
-             ds4_gpu_tensor_write(out, 0, multi_out, out_bytes);
+        ok = lgn2_gpu_tensor_write(mid, 0, multi_mid, mid_bytes) &&
+             lgn2_gpu_tensor_write(out, 0, multi_out, out_bytes);
     }
     /* Force the production multirow path for the second half even if the
      * caller had the diagnostic switch enabled in its environment. */
-    unsetenv("DS4_METAL_DISABLE_Q23_EXACT_MULTIROW");
+    unsetenv("LGN2_METAL_DISABLE_Q23_EXACT_MULTIROW");
 
     if (ok) {
-        ok = ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
+        ok = lgn2_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
             out, mid, model, model_size,
             gate_offset, up_offset, down_offset,
             quant_type, quant_type, quant_type,
@@ -343,14 +343,14 @@ static int run_case(const void *model,
             x, n_tokens, mid_token_stride);
     }
     if (ok) {
-        ok = ds4_gpu_tensor_read(mid, 0, multi_mid, mid_bytes) &&
-             ds4_gpu_tensor_read(out, 0, multi_out, out_bytes);
+        ok = lgn2_gpu_tensor_read(mid, 0, multi_mid, mid_bytes) &&
+             lgn2_gpu_tensor_read(out, 0, multi_out, out_bytes);
     }
 
     if (saved_env_copy) {
-        setenv("DS4_METAL_DISABLE_Q23_EXACT_MULTIROW", saved_env_copy, 1);
+        setenv("LGN2_METAL_DISABLE_Q23_EXACT_MULTIROW", saved_env_copy, 1);
     } else {
-        unsetenv("DS4_METAL_DISABLE_Q23_EXACT_MULTIROW");
+        unsetenv("LGN2_METAL_DISABLE_Q23_EXACT_MULTIROW");
     }
     free(saved_env_copy);
 
@@ -380,11 +380,11 @@ static int run_case(const void *model,
                 n_tokens, mid_token_stride);
     }
 
-    ds4_gpu_tensor_free(x);
-    ds4_gpu_tensor_free(selected);
-    ds4_gpu_tensor_free(weights);
-    ds4_gpu_tensor_free(mid);
-    ds4_gpu_tensor_free(out);
+    lgn2_gpu_tensor_free(x);
+    lgn2_gpu_tensor_free(selected);
+    lgn2_gpu_tensor_free(weights);
+    lgn2_gpu_tensor_free(mid);
+    lgn2_gpu_tensor_free(out);
     free(x_values);
     free(selected_values);
     free(weight_values);
@@ -506,44 +506,44 @@ static int run_q4_production_case(const void *model,
     /* Reinitialize against the production-shaped map so the exact leg starts
      * with no caller-owned command batch and therefore must take the owned
      * command-buffer path. */
-    ds4_gpu_cleanup();
-    ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
-    ds4_gpu_set_quality(false);
-    ds4_gpu_tensor *batch_x = NULL;
-    ds4_gpu_tensor *batch_selected = NULL;
-    ds4_gpu_tensor *batch_weights = NULL;
-    ds4_gpu_tensor *batch_mid = NULL;
-    ds4_gpu_tensor *batch_out = NULL;
-    ds4_gpu_tensor *one_x = NULL;
-    ds4_gpu_tensor *one_selected = NULL;
-    ds4_gpu_tensor *one_weights = NULL;
-    ds4_gpu_tensor *one_mid = NULL;
-    ds4_gpu_tensor *one_out = NULL;
-    if (!ok || ds4_gpu_commands_active() != 0) {
+    lgn2_gpu_cleanup();
+    ok = lgn2_gpu_init() && lgn2_gpu_set_model_map(model, model_size);
+    lgn2_gpu_set_quality(false);
+    lgn2_gpu_tensor *batch_x = NULL;
+    lgn2_gpu_tensor *batch_selected = NULL;
+    lgn2_gpu_tensor *batch_weights = NULL;
+    lgn2_gpu_tensor *batch_mid = NULL;
+    lgn2_gpu_tensor *batch_out = NULL;
+    lgn2_gpu_tensor *one_x = NULL;
+    lgn2_gpu_tensor *one_selected = NULL;
+    lgn2_gpu_tensor *one_weights = NULL;
+    lgn2_gpu_tensor *one_mid = NULL;
+    lgn2_gpu_tensor *one_out = NULL;
+    if (!ok || lgn2_gpu_commands_active() != 0) {
         ok = 0;
         goto tensors_cleanup;
     }
 
-    batch_x = ds4_gpu_tensor_alloc(x_bytes);
-    batch_selected = ds4_gpu_tensor_alloc(selected_bytes);
-    batch_weights = ds4_gpu_tensor_alloc(weights_bytes);
-    batch_mid = ds4_gpu_tensor_alloc(mid_bytes);
-    batch_out = ds4_gpu_tensor_alloc(out_bytes);
+    batch_x = lgn2_gpu_tensor_alloc(x_bytes);
+    batch_selected = lgn2_gpu_tensor_alloc(selected_bytes);
+    batch_weights = lgn2_gpu_tensor_alloc(weights_bytes);
+    batch_mid = lgn2_gpu_tensor_alloc(mid_bytes);
+    batch_out = lgn2_gpu_tensor_alloc(out_bytes);
     ok = batch_x && batch_selected && batch_weights && batch_mid && batch_out;
-    ok = ok && ds4_gpu_tensor_write(batch_x, 0, x_values, x_bytes);
-    ok = ok && ds4_gpu_tensor_write(
+    ok = ok && lgn2_gpu_tensor_write(batch_x, 0, x_values, x_bytes);
+    ok = ok && lgn2_gpu_tensor_write(
         batch_selected, 0, selected_values, selected_bytes);
-    ok = ok && ds4_gpu_tensor_write(
+    ok = ok && lgn2_gpu_tensor_write(
         batch_weights, 0, weight_values, weights_bytes);
-    ok = ok && ds4_gpu_tensor_write(batch_mid, 0, batch_mid_values, mid_bytes);
-    ok = ok && ds4_gpu_tensor_write(batch_out, 0, batch_out_values, out_bytes);
-    if (ok && ds4_gpu_commands_active() != 0) ok = 0;
+    ok = ok && lgn2_gpu_tensor_write(batch_mid, 0, batch_mid_values, mid_bytes);
+    ok = ok && lgn2_gpu_tensor_write(batch_out, 0, batch_out_values, out_bytes);
+    if (ok && lgn2_gpu_commands_active() != 0) ok = 0;
 
-#ifdef DS4_TEST_HOOKS
-    if (ok) ds4_gpu_test_glm_exact_q4_counters_reset();
+#ifdef LGN2_TEST_HOOKS
+    if (ok) lgn2_gpu_test_glm_exact_q4_counters_reset();
 #endif
     if (ok) {
-        ok = ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
+        ok = lgn2_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
             batch_out, batch_mid, model, model_size,
             gate_offset, up_offset, down_offset,
             Q4_K_TYPE, Q4_K_TYPE, Q4_K_TYPE,
@@ -555,12 +555,12 @@ static int run_q4_production_case(const void *model,
             Q4_PRODUCTION_TOTAL_EXPERT, Q4_PRODUCTION_EXPERT, 0u,
             batch_x, n_tokens, mid_token_stride);
     }
-    if (ok && ds4_gpu_commands_active() != 0) ok = 0;
-#ifdef DS4_TEST_HOOKS
+    if (ok && lgn2_gpu_commands_active() != 0) ok = 0;
+#ifdef LGN2_TEST_HOOKS
     if (ok) {
         uint64_t encoded = 0;
         uint64_t completed = 0;
-        ok = ds4_gpu_test_glm_exact_q4_counters(&encoded, &completed) &&
+        ok = lgn2_gpu_test_glm_exact_q4_counters(&encoded, &completed) &&
              encoded == 1u && completed == 1u;
         if (!ok) {
             fprintf(stderr,
@@ -572,9 +572,9 @@ static int run_q4_production_case(const void *model,
     }
 #endif
     if (ok) {
-        ok = ds4_gpu_tensor_read(
+        ok = lgn2_gpu_tensor_read(
             batch_mid, 0, batch_mid_values, mid_bytes) &&
-             ds4_gpu_tensor_read(batch_out, 0, batch_out_values, out_bytes);
+             lgn2_gpu_tensor_read(batch_out, 0, batch_out_values, out_bytes);
     }
     int batch_mid_good = 0;
     int batch_mid_changed = 0;
@@ -608,18 +608,18 @@ static int run_q4_production_case(const void *model,
         ok = 0;
     }
 
-    const char *saved_qmv = getenv("DS4_METAL_GLM_QMV_R1");
+    const char *saved_qmv = getenv("LGN2_METAL_LAGUNA_QMV_R1");
     char *saved_qmv_copy = saved_qmv ? strdup(saved_qmv) : NULL;
     ok = ok && (!saved_qmv || saved_qmv_copy != NULL);
-    if (ok) ok = unsetenv("DS4_METAL_GLM_QMV_R1") == 0;
+    if (ok) ok = unsetenv("LGN2_METAL_LAGUNA_QMV_R1") == 0;
 
-    one_x = ds4_gpu_tensor_alloc((uint64_t)DIM * sizeof(float));
-    one_selected = ds4_gpu_tensor_alloc(
+    one_x = lgn2_gpu_tensor_alloc((uint64_t)DIM * sizeof(float));
+    one_selected = lgn2_gpu_tensor_alloc(
         (uint64_t)Q4_PRODUCTION_EXPERT * sizeof(int32_t));
-    one_weights = ds4_gpu_tensor_alloc(
+    one_weights = lgn2_gpu_tensor_alloc(
         (uint64_t)Q4_PRODUCTION_EXPERT * sizeof(float));
-    one_mid = ds4_gpu_tensor_alloc((uint64_t)per_token_mid * sizeof(float));
-    one_out = ds4_gpu_tensor_alloc((uint64_t)DIM * sizeof(float));
+    one_mid = lgn2_gpu_tensor_alloc((uint64_t)per_token_mid * sizeof(float));
+    one_out = lgn2_gpu_tensor_alloc((uint64_t)DIM * sizeof(float));
     ok = ok && one_x && one_selected && one_weights && one_mid && one_out;
     for (uint32_t token = 0; ok && token < n_tokens; token++) {
         for (uint32_t i = 0; i < per_token_mid; i++) {
@@ -628,24 +628,24 @@ static int run_q4_production_case(const void *model,
         for (uint32_t i = 0; i < DIM; i++) {
             one_out_values[i] = reference_out_sentinel;
         }
-        ok = ds4_gpu_tensor_write(
+        ok = lgn2_gpu_tensor_write(
             one_x, 0, x_values + (uint64_t)token * DIM, DIM * sizeof(float));
-        ok = ok && ds4_gpu_tensor_write(
+        ok = ok && lgn2_gpu_tensor_write(
             one_selected, 0,
             selected_values + (uint64_t)token * Q4_PRODUCTION_EXPERT,
             Q4_PRODUCTION_EXPERT * sizeof(int32_t));
-        ok = ok && ds4_gpu_tensor_write(
+        ok = ok && lgn2_gpu_tensor_write(
             one_weights, 0,
             weight_values + (uint64_t)token * Q4_PRODUCTION_EXPERT,
             Q4_PRODUCTION_EXPERT * sizeof(float));
-        ok = ok && ds4_gpu_tensor_write(
+        ok = ok && lgn2_gpu_tensor_write(
             one_mid, 0, one_mid_values,
             (uint64_t)per_token_mid * sizeof(float));
-        ok = ok && ds4_gpu_tensor_write(
+        ok = ok && lgn2_gpu_tensor_write(
             one_out, 0, one_out_values, DIM * sizeof(float));
-        if (ok && ds4_gpu_commands_active() != 0) ok = 0;
+        if (ok && lgn2_gpu_commands_active() != 0) ok = 0;
         if (ok) {
-            ok = ds4_gpu_glm_routed_moe_one_tensor(
+            ok = lgn2_gpu_glm_routed_moe_one_tensor(
                 one_out, one_mid, model, model_size,
                 gate_offset, up_offset, down_offset,
                 Q4_K_TYPE, Q4_K_TYPE, Q4_K_TYPE,
@@ -657,12 +657,12 @@ static int run_q4_production_case(const void *model,
                 Q4_PRODUCTION_TOTAL_EXPERT, Q4_PRODUCTION_EXPERT, 0u,
                 one_x, false);
         }
-        if (ok && ds4_gpu_commands_active() != 0) ok = 0;
+        if (ok && lgn2_gpu_commands_active() != 0) ok = 0;
         if (ok) {
-            ok = ds4_gpu_tensor_read(
+            ok = lgn2_gpu_tensor_read(
                 one_mid, 0, one_mid_values,
                 (uint64_t)per_token_mid * sizeof(float)) &&
-                ds4_gpu_tensor_read(one_out, 0, one_out_values,
+                lgn2_gpu_tensor_read(one_out, 0, one_out_values,
                                     (uint64_t)DIM * sizeof(float));
         }
         if (ok &&
@@ -685,17 +685,17 @@ static int run_q4_production_case(const void *model,
         }
     }
     if (saved_qmv_copy) {
-        setenv("DS4_METAL_GLM_QMV_R1", saved_qmv_copy, 1);
+        setenv("LGN2_METAL_LAGUNA_QMV_R1", saved_qmv_copy, 1);
     } else if (!saved_qmv) {
-        unsetenv("DS4_METAL_GLM_QMV_R1");
+        unsetenv("LGN2_METAL_LAGUNA_QMV_R1");
     }
     free(saved_qmv_copy);
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
     if (ok) {
         uint64_t encoded = 0;
         uint64_t completed = 0;
-        ok = ds4_gpu_test_glm_exact_q4_counters(&encoded, &completed) &&
+        ok = lgn2_gpu_test_glm_exact_q4_counters(&encoded, &completed) &&
              encoded == 1u && completed == 1u;
     }
 #endif
@@ -724,17 +724,17 @@ static int run_q4_production_case(const void *model,
     }
 
 tensors_cleanup:
-    ds4_gpu_tensor_free(one_out);
-    ds4_gpu_tensor_free(one_mid);
-    ds4_gpu_tensor_free(one_weights);
-    ds4_gpu_tensor_free(one_selected);
-    ds4_gpu_tensor_free(one_x);
-    ds4_gpu_tensor_free(batch_out);
-    ds4_gpu_tensor_free(batch_mid);
-    ds4_gpu_tensor_free(batch_weights);
-    ds4_gpu_tensor_free(batch_selected);
-    ds4_gpu_tensor_free(batch_x);
-    ds4_gpu_cleanup();
+    lgn2_gpu_tensor_free(one_out);
+    lgn2_gpu_tensor_free(one_mid);
+    lgn2_gpu_tensor_free(one_weights);
+    lgn2_gpu_tensor_free(one_selected);
+    lgn2_gpu_tensor_free(one_x);
+    lgn2_gpu_tensor_free(batch_out);
+    lgn2_gpu_tensor_free(batch_mid);
+    lgn2_gpu_tensor_free(batch_weights);
+    lgn2_gpu_tensor_free(batch_selected);
+    lgn2_gpu_tensor_free(batch_x);
+    lgn2_gpu_cleanup();
 cleanup:
     free(one_out_values);
     free(one_mid_values);
@@ -773,20 +773,20 @@ static int run_grouped_dispatch(const void *model,
     const uint64_t out_bytes =
         (uint64_t)GROUPED_TOKENS * DIM * sizeof(float);
 
-    ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(x_bytes);
-    ds4_gpu_tensor *selected = ds4_gpu_tensor_alloc(selected_bytes);
-    ds4_gpu_tensor *weights = ds4_gpu_tensor_alloc(weights_bytes);
-    ds4_gpu_tensor *mid = ds4_gpu_tensor_alloc(mid_bytes);
-    ds4_gpu_tensor *out = ds4_gpu_tensor_alloc(out_bytes);
+    lgn2_gpu_tensor *x = lgn2_gpu_tensor_alloc(x_bytes);
+    lgn2_gpu_tensor *selected = lgn2_gpu_tensor_alloc(selected_bytes);
+    lgn2_gpu_tensor *weights = lgn2_gpu_tensor_alloc(weights_bytes);
+    lgn2_gpu_tensor *mid = lgn2_gpu_tensor_alloc(mid_bytes);
+    lgn2_gpu_tensor *out = lgn2_gpu_tensor_alloc(out_bytes);
     int ok = x && selected && weights && mid && out;
-    if (ok) ok = ds4_gpu_tensor_write(x, 0, x_values, x_bytes);
-    if (ok) ok = ds4_gpu_tensor_write(
+    if (ok) ok = lgn2_gpu_tensor_write(x, 0, x_values, x_bytes);
+    if (ok) ok = lgn2_gpu_tensor_write(
         selected, 0, selected_values, selected_bytes);
-    if (ok) ok = ds4_gpu_tensor_write(weights, 0, weight_values, weights_bytes);
-    if (ok) ok = ds4_gpu_tensor_fill_f32(mid, 0.0f, mid_bytes / sizeof(float));
-    if (ok) ok = ds4_gpu_tensor_fill_f32(out, 0.0f, out_bytes / sizeof(float));
+    if (ok) ok = lgn2_gpu_tensor_write(weights, 0, weight_values, weights_bytes);
+    if (ok) ok = lgn2_gpu_tensor_fill_f32(mid, 0.0f, mid_bytes / sizeof(float));
+    if (ok) ok = lgn2_gpu_tensor_fill_f32(out, 0.0f, out_bytes / sizeof(float));
     if (ok) {
-        ok = ds4_gpu_glm_routed_moe_batch_tensor(
+        ok = lgn2_gpu_glm_routed_moe_batch_tensor(
             out, mid, model, model_size,
             gate_offset, up_offset, down_offset,
             Q2_K_TYPE, Q2_K_TYPE, Q2_K_TYPE,
@@ -802,13 +802,13 @@ static int run_grouped_dispatch(const void *model,
      * until its caller closes/submits the batch; the completion-evidence test
      * passes NULL here and reads no output before that boundary. */
     if (ok && out_values) {
-        ok = ds4_gpu_tensor_read(out, 0, out_values, out_bytes);
+        ok = lgn2_gpu_tensor_read(out, 0, out_values, out_bytes);
     }
-    ds4_gpu_tensor_free(x);
-    ds4_gpu_tensor_free(selected);
-    ds4_gpu_tensor_free(weights);
-    ds4_gpu_tensor_free(mid);
-    ds4_gpu_tensor_free(out);
+    lgn2_gpu_tensor_free(x);
+    lgn2_gpu_tensor_free(selected);
+    lgn2_gpu_tensor_free(weights);
+    lgn2_gpu_tensor_free(mid);
+    lgn2_gpu_tensor_free(out);
     return ok;
 }
 
@@ -835,7 +835,7 @@ static int run_grouped_full_map_case(const void *model,
     float *route_weights = calloc((size_t)route_values, sizeof(float));
     float *row_loop_out = calloc((size_t)out_values, sizeof(float));
     float *grouped_out = calloc((size_t)out_values, sizeof(float));
-    const char *env_name = "DS4_METAL_GLM_GROUPED_MOE_MIN_TOKENS";
+    const char *env_name = "LGN2_METAL_LAGUNA_GROUPED_MOE_MIN_TOKENS";
     const char *saved_env = getenv(env_name);
     char *saved_env_copy = saved_env ? strdup(saved_env) : NULL;
     int ok = x_values_host && mixed_ids && route_weights &&
@@ -864,24 +864,24 @@ static int run_grouped_full_map_case(const void *model,
         ok = 0;
         goto cleanup;
     }
-#ifdef DS4_TEST_HOOKS
-    ds4_gpu_test_glm_grouped_moe_counters_reset();
+#ifdef LGN2_TEST_HOOKS
+    lgn2_gpu_test_glm_grouped_moe_counters_reset();
 #endif
-    ds4_gpu_cleanup();
-    ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
+    lgn2_gpu_cleanup();
+    ok = lgn2_gpu_init() && lgn2_gpu_set_model_map(model, model_size);
     if (ok) {
-        ds4_gpu_set_quality(false);
+        lgn2_gpu_set_quality(false);
         ok = run_grouped_dispatch(model, model_size,
                                   gate_offset, up_offset, down_offset,
                                   expert_bytes, row_bytes,
                                   x_values_host, mixed_ids, route_weights,
                                   row_loop_out);
     }
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
     if (ok) {
         uint64_t encoded = 0;
         uint64_t completed = 0;
-        ok = ds4_gpu_test_glm_grouped_moe_counters(
+        ok = lgn2_gpu_test_glm_grouped_moe_counters(
                  &encoded, &completed) && encoded == 0u && completed == 0u;
     }
 #endif
@@ -890,21 +890,21 @@ static int run_grouped_full_map_case(const void *model,
         ok = 0;
         goto cleanup;
     }
-    ds4_gpu_cleanup();
-    if (ok) ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
+    lgn2_gpu_cleanup();
+    if (ok) ok = lgn2_gpu_init() && lgn2_gpu_set_model_map(model, model_size);
     if (ok) {
-        ds4_gpu_set_quality(false);
+        lgn2_gpu_set_quality(false);
         ok = run_grouped_dispatch(model, model_size,
                                   gate_offset, up_offset, down_offset,
                                   expert_bytes, row_bytes,
                                   x_values_host, mixed_ids, route_weights,
                                   grouped_out);
     }
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
     uint64_t grouped_encoded = 0;
     uint64_t grouped_completed = 0;
     if (ok) {
-        ok = ds4_gpu_test_glm_grouped_moe_counters(
+        ok = lgn2_gpu_test_glm_grouped_moe_counters(
                  &grouped_encoded, &grouped_completed) &&
              grouped_encoded == 1u && grouped_completed == 1u;
     }
@@ -932,7 +932,7 @@ static int run_grouped_full_map_case(const void *model,
     }
 
 cleanup:
-    ds4_gpu_cleanup();
+    lgn2_gpu_cleanup();
     if (saved_env_copy) {
         setenv(env_name, saved_env_copy, 1);
     } else {
@@ -960,7 +960,7 @@ static int run_grouped_borrowed_completion_case(
         uint64_t down_offset,
         uint64_t expert_bytes,
         uint64_t row_bytes) {
-#ifndef DS4_TEST_HOOKS
+#ifndef LGN2_TEST_HOOKS
     (void)model;
     (void)model_size;
     (void)gate_offset;
@@ -970,7 +970,7 @@ static int run_grouped_borrowed_completion_case(
     (void)row_bytes;
     return 1;
 #else
-    const char *env_name = "DS4_METAL_GLM_GROUPED_MOE_MIN_TOKENS";
+    const char *env_name = "LGN2_METAL_LAGUNA_GROUPED_MOE_MIN_TOKENS";
     const char *saved_env = getenv(env_name);
     char *saved_env_copy = saved_env ? strdup(saved_env) : NULL;
     int ok = saved_env == NULL || saved_env_copy != NULL;
@@ -1009,11 +1009,11 @@ static int run_grouped_borrowed_completion_case(
     uint64_t completed = 0;
 
     /* A successful borrowed batch: completion remains zero until end. */
-    ds4_gpu_cleanup();
-    ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
-    ds4_gpu_set_quality(false);
-    ds4_gpu_test_glm_grouped_moe_counters_reset();
-    if (ok) ok = ds4_gpu_begin_commands();
+    lgn2_gpu_cleanup();
+    ok = lgn2_gpu_init() && lgn2_gpu_set_model_map(model, model_size);
+    lgn2_gpu_set_quality(false);
+    lgn2_gpu_test_glm_grouped_moe_counters_reset();
+    if (ok) ok = lgn2_gpu_begin_commands();
     if (ok) {
         ok = run_grouped_dispatch(
             model, model_size, gate_offset, up_offset, down_offset,
@@ -1021,22 +1021,22 @@ static int run_grouped_borrowed_completion_case(
             weight_values, NULL);
     }
     if (ok) {
-        ok = ds4_gpu_test_glm_grouped_moe_counters(&encoded, &completed) &&
+        ok = lgn2_gpu_test_glm_grouped_moe_counters(&encoded, &completed) &&
              encoded == 1u && completed == 0u;
     }
-    if (ok) ok = ds4_gpu_end_commands();
+    if (ok) ok = lgn2_gpu_end_commands();
     if (ok) {
-        ok = ds4_gpu_test_glm_grouped_moe_counters(&encoded, &completed) &&
+        ok = lgn2_gpu_test_glm_grouped_moe_counters(&encoded, &completed) &&
              encoded == 1u && completed == 1u;
     }
 
     /* A discarded borrowed batch must not promote its encoded record. */
     if (ok) {
-        ds4_gpu_cleanup();
-        ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
-        ds4_gpu_set_quality(false);
-        ds4_gpu_test_glm_grouped_moe_counters_reset();
-        if (ok) ok = ds4_gpu_begin_commands();
+        lgn2_gpu_cleanup();
+        ok = lgn2_gpu_init() && lgn2_gpu_set_model_map(model, model_size);
+        lgn2_gpu_set_quality(false);
+        lgn2_gpu_test_glm_grouped_moe_counters_reset();
+        if (ok) ok = lgn2_gpu_begin_commands();
         if (ok) {
             ok = run_grouped_dispatch(
                 model, model_size, gate_offset, up_offset, down_offset,
@@ -1044,8 +1044,8 @@ static int run_grouped_borrowed_completion_case(
                 weight_values, NULL);
         }
         if (ok) {
-            ok = ds4_gpu_discard_commands();
-            ok = ok && ds4_gpu_test_glm_grouped_moe_counters(
+            ok = lgn2_gpu_discard_commands();
+            ok = ok && lgn2_gpu_test_glm_grouped_moe_counters(
                 &encoded, &completed) && encoded == 1u && completed == 0u;
         }
     }
@@ -1053,34 +1053,34 @@ static int run_grouped_borrowed_completion_case(
     /* A committed borrowed batch whose wait reports failure also stays
      * unpromoted, even though Metal has reached its terminal status. */
     if (ok) {
-        ds4_gpu_cleanup();
-        ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
-        ds4_gpu_set_quality(false);
-        ds4_gpu_test_glm_grouped_moe_counters_reset();
-        if (ok) ok = ds4_gpu_begin_commands();
+        lgn2_gpu_cleanup();
+        ok = lgn2_gpu_init() && lgn2_gpu_set_model_map(model, model_size);
+        lgn2_gpu_set_quality(false);
+        lgn2_gpu_test_glm_grouped_moe_counters_reset();
+        if (ok) ok = lgn2_gpu_begin_commands();
         if (ok) {
             ok = run_grouped_dispatch(
                 model, model_size, gate_offset, up_offset, down_offset,
                 expert_bytes, row_bytes, x_values, selected_values,
                 weight_values, NULL);
         }
-        if (ok) ok = ds4_gpu_flush_commands();
+        if (ok) ok = lgn2_gpu_flush_commands();
         if (ok) {
-            ds4_gpu_test_inject_wait_submitted_failure();
-            ok = ds4_gpu_wait_submitted_commands() == 0;
+            lgn2_gpu_test_inject_wait_submitted_failure();
+            ok = lgn2_gpu_wait_submitted_commands() == 0;
         }
         if (ok) {
-            ok = ds4_gpu_test_glm_grouped_moe_counters(
+            ok = lgn2_gpu_test_glm_grouped_moe_counters(
                 &encoded, &completed) && encoded == 1u && completed == 0u;
         }
     }
 
-    if (ds4_gpu_commands_active()) {
-        (void)ds4_gpu_discard_commands();
+    if (lgn2_gpu_commands_active()) {
+        (void)lgn2_gpu_discard_commands();
     } else {
-        (void)ds4_gpu_wait_submitted_commands();
+        (void)lgn2_gpu_wait_submitted_commands();
     }
-    ds4_gpu_cleanup();
+    lgn2_gpu_cleanup();
     if (saved_env_copy) {
         setenv(env_name, saved_env_copy, 1);
     } else {
@@ -1136,8 +1136,8 @@ int main(void) {
     fill_q3_matrix((uint8_t *)model + q3_up_offset, 19u);
     fill_q3_matrix((uint8_t *)model + q3_down_offset, 31u);
 
-    int ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
-    ds4_gpu_set_quality(false);
+    int ok = lgn2_gpu_init() && lgn2_gpu_set_model_map(model, model_size);
+    lgn2_gpu_set_quality(false);
     if (ok) {
         ok = run_case(model, model_size, Q2_K_TYPE,
                       q2_gate_offset, q2_up_offset, q2_down_offset,
@@ -1236,7 +1236,7 @@ int main(void) {
         }
     }
 
-    ds4_gpu_cleanup();
+    lgn2_gpu_cleanup();
     free(model);
     return ok ? 0 : 1;
 }

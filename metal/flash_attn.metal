@@ -27,7 +27,7 @@ void dequantize_f32(device const float4x4 * src, short il, thread type4x4 & reg)
 template <typename type4x4>
 void dequantize_f16(device const half4x4 * src, short il, thread type4x4 & reg);
 
-struct ds4_metal_args_flash_attn_ext_pad {
+struct lgn2_metal_args_flash_attn_ext_pad {
     int32_t  ne11;
     int32_t  ne_12_2;
     int32_t  ne_12_3;
@@ -45,7 +45,7 @@ struct ds4_metal_args_flash_attn_ext_pad {
     uint64_t nb33;
 };
 
-struct ds4_metal_args_flash_attn_ext {
+struct lgn2_metal_args_flash_attn_ext {
     int32_t  ne01;
     int32_t  ne02;
     int32_t  ne03;
@@ -80,7 +80,7 @@ struct ds4_metal_args_flash_attn_ext {
     float    logit_softcap;
 };
 
-struct ds4_metal_args_flash_attn_ext_vec {
+struct lgn2_metal_args_flash_attn_ext_vec {
     int32_t  ne01;
     int32_t  ne02;
     int32_t  ne03;
@@ -124,7 +124,7 @@ struct ds4_metal_args_flash_attn_ext_vec {
     uint64_t laguna_stage_nb12;
 };
 
-struct ds4_metal_args_flash_attn_ext_vec_virtual {
+struct lgn2_metal_args_flash_attn_ext_vec_virtual {
     int32_t  ne01;
     int32_t  ne02;
     int32_t  ne03;
@@ -168,70 +168,70 @@ struct ds4_metal_args_flash_attn_ext_vec_virtual {
     uint64_t laguna_stage_nb12;
 };
 
-struct ds4_metal_args_flash_attn_ext_vec_reduce {
+struct lgn2_metal_args_flash_attn_ext_vec_reduce {
     int32_t nrows;
 };
 
 /* Keep stage metadata out of the ordinary vector arithmetic.  The ordinary
  * struct retains the trailing fields for ABI compatibility, but its accessor
  * overloads never read them; only the virtual specialization consumes them. */
-inline uint ds4_flash_attn_stage_pos_mod(
-        constant ds4_metal_args_flash_attn_ext_vec &) {
+inline uint lgn2_flash_attn_stage_pos_mod(
+        constant lgn2_metal_args_flash_attn_ext_vec &) {
     return 1u;
 }
 
-inline uint ds4_flash_attn_stage_pos_mod(
-        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+inline uint lgn2_flash_attn_stage_pos_mod(
+        constant lgn2_metal_args_flash_attn_ext_vec_virtual & args) {
     return args.laguna_stage_pos_mod;
 }
 
-inline uint ds4_flash_attn_stage_n_tokens(
-        constant ds4_metal_args_flash_attn_ext_vec &) {
+inline uint lgn2_flash_attn_stage_n_tokens(
+        constant lgn2_metal_args_flash_attn_ext_vec &) {
     return 0u;
 }
 
-inline uint ds4_flash_attn_stage_n_tokens(
-        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+inline uint lgn2_flash_attn_stage_n_tokens(
+        constant lgn2_metal_args_flash_attn_ext_vec_virtual & args) {
     return args.laguna_stage_n_tokens;
 }
 
-inline uint ds4_flash_attn_stage_cache_cap(
-        constant ds4_metal_args_flash_attn_ext_vec &) {
+inline uint lgn2_flash_attn_stage_cache_cap(
+        constant lgn2_metal_args_flash_attn_ext_vec &) {
     return 1u;
 }
 
-inline uint ds4_flash_attn_stage_cache_cap(
-        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+inline uint lgn2_flash_attn_stage_cache_cap(
+        constant lgn2_metal_args_flash_attn_ext_vec_virtual & args) {
     return args.laguna_stage_cache_cap;
 }
 
-inline uint64_t ds4_flash_attn_stage_nb11(
-        constant ds4_metal_args_flash_attn_ext_vec &) {
+inline uint64_t lgn2_flash_attn_stage_nb11(
+        constant lgn2_metal_args_flash_attn_ext_vec &) {
     return 0u;
 }
 
-inline uint64_t ds4_flash_attn_stage_nb11(
-        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+inline uint64_t lgn2_flash_attn_stage_nb11(
+        constant lgn2_metal_args_flash_attn_ext_vec_virtual & args) {
     return args.laguna_stage_nb11;
 }
 
-inline uint64_t ds4_flash_attn_stage_nb12(
-        constant ds4_metal_args_flash_attn_ext_vec &) {
+inline uint64_t lgn2_flash_attn_stage_nb12(
+        constant lgn2_metal_args_flash_attn_ext_vec &) {
     return 0u;
 }
 
-inline uint64_t ds4_flash_attn_stage_nb12(
-        constant ds4_metal_args_flash_attn_ext_vec_virtual & args) {
+inline uint64_t lgn2_flash_attn_stage_nb12(
+        constant lgn2_metal_args_flash_attn_ext_vec_virtual & args) {
     return args.laguna_stage_nb12;
 }
 
 constant bool FC_flash_attn_ext_pad_has_mask [[function_constant(FC_FLASH_ATTN_EXT_PAD + 0)]];
 constant int32_t FC_flash_attn_ext_pad_ncpsg [[function_constant(FC_FLASH_ATTN_EXT_PAD + 25)]];
 
-// DS4 FlashAttention padding: pads the final partial K/V/mask cache block so the
+// LGN2 FlashAttention padding: pads the final partial K/V/mask cache block so the
 // vector FlashAttention kernel can read full 32-row chunks.
 kernel void kernel_flash_attn_ext_pad(
-        constant ds4_metal_args_flash_attn_ext_pad & args,
+        constant lgn2_metal_args_flash_attn_ext_pad & args,
         device const char * k,
         device const char * v,
         device const char * mask,
@@ -306,7 +306,7 @@ constant int32_t FC_flash_attn_ext_ns10 [[function_constant(FC_FLASH_ATTN_EXT + 
 constant int32_t FC_flash_attn_ext_ns20 [[function_constant(FC_FLASH_ATTN_EXT + 21)]];
 constant int32_t FC_flash_attn_ext_nsg  [[function_constant(FC_FLASH_ATTN_EXT + 22)]];
 
-// DS4 non-vector FlashAttention. The only exported instance uses the model's
+// LGN2 non-vector FlashAttention. The only exported instance uses the model's
 // 512-wide F16 K/V rows; keeping the template body generic preserves the same
 // arithmetic for dense and compressed-attention prefill.
 template<
@@ -339,7 +339,7 @@ template<
     short C,
     short NSG>
 void kernel_flash_attn_ext_impl(
-        constant ds4_metal_args_flash_attn_ext & args,
+        constant lgn2_metal_args_flash_attn_ext & args,
         device const char * q,
         device const char * k,
         device const char * v,
@@ -923,7 +923,7 @@ template<
     short Q  = OP_FLASH_ATTN_EXT_NQPSG,
     short C  = OP_FLASH_ATTN_EXT_NCPSG>
 kernel void kernel_flash_attn_ext(
-        constant ds4_metal_args_flash_attn_ext & args,
+        constant lgn2_metal_args_flash_attn_ext & args,
         device const char * q,
         device const char * k,
         device const char * v,
@@ -957,7 +957,7 @@ kernel void kernel_flash_attn_ext(
 typedef decltype(kernel_flash_attn_ext<FA_NONVEC_TYPES, half4x4, 1, dequantize_f16, half4x4, 1, dequantize_f16, 512, 512>) flash_attn_ext_dk512_t;
 typedef decltype(kernel_flash_attn_ext<FA_NONVEC_TYPES, half4x4, 1, dequantize_f16, half4x4, 1, dequantize_f16, 256, 256>) flash_attn_ext_dk256_t;
 
-// Host-visible prefill FlashAttention variant for DS4's 512-wide F16 K/V rows.
+// Host-visible prefill FlashAttention variant for LGN2's 512-wide F16 K/V rows.
 template [[host_name("kernel_flash_attn_ext_f16_dk512_dv512")]]
 kernel flash_attn_ext_dk512_t kernel_flash_attn_ext<FA_NONVEC_TYPES, half4x4, 1, dequantize_f16, half4x4, 1, dequantize_f16, 512, 512>;
 
@@ -978,7 +978,7 @@ constant int32_t FC_flash_attn_ext_vec_ns20 [[function_constant(FC_FLASH_ATTN_EX
 constant int32_t FC_flash_attn_ext_vec_nsg  [[function_constant(FC_FLASH_ATTN_EXT_VEC + 22)]];
 constant int32_t FC_flash_attn_ext_vec_nwg  [[function_constant(FC_FLASH_ATTN_EXT_VEC + 23)]];
 
-// Decode FlashAttention for one query row. DS4 uses this in generation to scan
+// Decode FlashAttention for one query row. LGN2 uses this in generation to scan
 // raw and compressed KV cache chunks, optionally splitting long contexts across
 // workgroups and writing partial softmax state for a later reduction.
 template<
@@ -1163,14 +1163,14 @@ kernel void kernel_flash_attn_ext_vec(
                          * virtual position for this slot; a staged row is
                          * visible only to its own and later query rows. */
                         const uint slot = ic + NE*cc + ty;
-                        const uint cap = ds4_flash_attn_stage_cache_cap(args);
-                        const uint pos_mod = ds4_flash_attn_stage_pos_mod(args);
+                        const uint cap = lgn2_flash_attn_stage_cache_cap(args);
+                        const uint pos_mod = lgn2_flash_attn_stage_pos_mod(args);
                         const uint u = (slot + cap - pos_mod) % cap;
                         const bool use_stage =
-                            u < ds4_flash_attn_stage_n_tokens(args) && u <= iq1;
+                            u < lgn2_flash_attn_stage_n_tokens(args) && u <= iq1;
                         device const char *src = use_stage ?
-                            mask + (uint64_t)u * ds4_flash_attn_stage_nb11(args) +
-                                (uint64_t)ikv2 * ds4_flash_attn_stage_nb12(args) :
+                            mask + (uint64_t)u * lgn2_flash_attn_stage_nb11(args) +
+                                (uint64_t)ikv2 * lgn2_flash_attn_stage_nb12(args) :
                             k + (uint64_t)slot * args.nb11;
                         device const k4_t *pk4_row =
                             (device const k4_t *)src;
@@ -1292,14 +1292,14 @@ kernel void kernel_flash_attn_ext_vec(
                     if (VIRTUAL_CACHE) {
                         FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
                             const uint slot = ic + NE*cc + ty;
-                            const uint cap = ds4_flash_attn_stage_cache_cap(args);
-                            const uint pos_mod = ds4_flash_attn_stage_pos_mod(args);
+                            const uint cap = lgn2_flash_attn_stage_cache_cap(args);
+                            const uint pos_mod = lgn2_flash_attn_stage_pos_mod(args);
                             const uint u = (slot + cap - pos_mod) % cap;
                             const bool use_stage =
-                                u < ds4_flash_attn_stage_n_tokens(args) && u <= iq1;
+                                u < lgn2_flash_attn_stage_n_tokens(args) && u <= iq1;
                             device const char *src = use_stage ?
-                                sinks + (uint64_t)u * ds4_flash_attn_stage_nb11(args) +
-                                    (uint64_t)ikv2 * ds4_flash_attn_stage_nb12(args) :
+                                sinks + (uint64_t)u * lgn2_flash_attn_stage_nb11(args) +
+                                    (uint64_t)ikv2 * lgn2_flash_attn_stage_nb12(args) :
                                 v + (uint64_t)slot * args.nb21;
                             device const v4_t *pv4_row =
                                 (device const v4_t *)src;
@@ -1325,14 +1325,14 @@ kernel void kernel_flash_attn_ext_vec(
                     if (VIRTUAL_CACHE) {
                         FOR_UNROLL (short cc = 0; cc < C/NE; ++cc) {
                             const uint slot = ic + NE*cc + ty;
-                            const uint cap = ds4_flash_attn_stage_cache_cap(args);
-                            const uint pos_mod = ds4_flash_attn_stage_pos_mod(args);
+                            const uint cap = lgn2_flash_attn_stage_cache_cap(args);
+                            const uint pos_mod = lgn2_flash_attn_stage_pos_mod(args);
                             const uint u = (slot + cap - pos_mod) % cap;
                             const bool use_stage =
-                                u < ds4_flash_attn_stage_n_tokens(args) && u <= iq1;
+                                u < lgn2_flash_attn_stage_n_tokens(args) && u <= iq1;
                             device const char *src = use_stage ?
-                                sinks + (uint64_t)u * ds4_flash_attn_stage_nb11(args) +
-                                    (uint64_t)ikv2 * ds4_flash_attn_stage_nb12(args) :
+                                sinks + (uint64_t)u * lgn2_flash_attn_stage_nb11(args) +
+                                    (uint64_t)ikv2 * lgn2_flash_attn_stage_nb12(args) :
                                 v + (uint64_t)slot * args.nb21;
                             device const vd4_t * pv4 =
                                 (device const vd4_t *)src;
@@ -1519,29 +1519,29 @@ kernel void kernel_flash_attn_ext_vec(
            float4
 
 typedef decltype(kernel_flash_attn_ext_vec<
-    ds4_metal_args_flash_attn_ext_vec, false,
+    lgn2_metal_args_flash_attn_ext_vec, false,
     FA_TYPES, half4, 1, dequantize_f16_t4,
     half4, 1, dequantize_f16_t4, 128, 128, 4>) flash_attn_ext_vec_t;
 typedef decltype(kernel_flash_attn_ext_vec<
-    ds4_metal_args_flash_attn_ext_vec, false,
+    lgn2_metal_args_flash_attn_ext_vec, false,
     FA_TYPES, half4, 1, dequantize_f16_t4,
     half4, 1, dequantize_f16_t4, 512, 512, 1>) flash_attn_ext_vec_f16_t;
 typedef decltype(kernel_flash_attn_ext_vec<
-    ds4_metal_args_flash_attn_ext_vec, false,
+    lgn2_metal_args_flash_attn_ext_vec, false,
     FA_TYPES_QF32, half4, 1, dequantize_f16_t4,
     half4, 1, dequantize_f16_t4, 128, 128, 1>) flash_attn_ext_vec_qf32_t;
 typedef decltype(kernel_flash_attn_ext_vec<
-    ds4_metal_args_flash_attn_ext_vec_virtual, true,
+    lgn2_metal_args_flash_attn_ext_vec_virtual, true,
     FA_TYPES_QF32, half4, 1, dequantize_f16_t4,
     half4, 1, dequantize_f16_t4, 128, 128, 1>) flash_attn_ext_vec_virtual_t;
 
-// Host-visible decode FlashAttention variant for DS4's 512-wide F16 K/V rows.
-template [[host_name("kernel_flash_attn_ext_vec_f16_dk512_dv512")]]  kernel flash_attn_ext_vec_f16_t kernel_flash_attn_ext_vec<ds4_metal_args_flash_attn_ext_vec, false, FA_TYPES,     half4,  1, dequantize_f16_t4, half4,  1, dequantize_f16_t4, 512, 512, 1>;
+// Host-visible decode FlashAttention variant for LGN2's 512-wide F16 K/V rows.
+template [[host_name("kernel_flash_attn_ext_vec_f16_dk512_dv512")]]  kernel flash_attn_ext_vec_f16_t kernel_flash_attn_ext_vec<lgn2_metal_args_flash_attn_ext_vec, false, FA_TYPES,     half4,  1, dequantize_f16_t4, half4,  1, dequantize_f16_t4, 512, 512, 1>;
 
 // Laguna keeps the query in F32 to preserve decode-path numerical behavior;
 // its cached keys and values remain F16.
-template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128")]]  kernel flash_attn_ext_vec_qf32_t kernel_flash_attn_ext_vec<ds4_metal_args_flash_attn_ext_vec, false, FA_TYPES_QF32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
-template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128_virtual")]]  kernel flash_attn_ext_vec_virtual_t kernel_flash_attn_ext_vec<ds4_metal_args_flash_attn_ext_vec_virtual, true, FA_TYPES_QF32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128")]]  kernel flash_attn_ext_vec_qf32_t kernel_flash_attn_ext_vec<lgn2_metal_args_flash_attn_ext_vec, false, FA_TYPES_QF32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
+template [[host_name("kernel_flash_attn_ext_vec_qf32_f16_dk128_dv128_virtual")]]  kernel flash_attn_ext_vec_virtual_t kernel_flash_attn_ext_vec<lgn2_metal_args_flash_attn_ext_vec_virtual, true, FA_TYPES_QF32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4, 128, 128, 1>;
 
 #undef FA_TYPES
 #undef FA_TYPES_F32
@@ -1556,8 +1556,8 @@ constant int32_t FC_flash_attn_ext_vec_reduce_NWG [[function_constant(FC_FLASH_A
 // M5 decode specialization: time-slice all 32 split-K workgroups through eight
 // physical simdgroups, then reduce through the same 32-lane topology without a
 // device partial buffer. The host gate fixes the exact F16 512-wide geometry.
-static inline void ds4_flash_attn_vec_packed8_reduce_f16_512(
-        constant ds4_metal_args_flash_attn_ext_vec & args,
+static inline void lgn2_flash_attn_vec_packed8_reduce_f16_512(
+        constant lgn2_metal_args_flash_attn_ext_vec & args,
         device const char * q,
         device const char * k,
         device const char * v,

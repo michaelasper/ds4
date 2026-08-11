@@ -1,11 +1,10 @@
-/ds4
-/ds4-server
-/ds4-bench
-/ds4-eval
-/ds4_native
-/ds4_server_test
-/ds4_test
+/lgn2
+/lgn2-server
+/lgn2-bench
+/lgn2-eval
+/lgn2_test
 /quality/score_official
+/lgn2.gguf
 /ds4flash.gguf
 /TODO.md
 /gguf/

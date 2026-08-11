@@ -2,19 +2,19 @@
  * lgn_graph.c - private Laguna target graph ownership.
  *
  * This slice owns only the target graph's resource type and lifecycle.  The
- * decode/prefill scheduling and DFlash graph remain in ds4.c until a later,
+ * decode/prefill scheduling and DFlash graph remain in lgn2_engine.c until a later,
  * separately reviewed extraction.
  */
 
 #include "lgn_graph.h"
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
 
 #include <stdio.h>
 
-static void lgn_graph_free_tensor(ds4_gpu_tensor **slot) {
+static void lgn_graph_free_tensor(lgn2_gpu_tensor **slot) {
     if (!slot) return;
-    ds4_gpu_tensor_free(*slot);
+    lgn2_gpu_tensor_free(*slot);
     *slot = NULL;
 }
 
@@ -64,10 +64,10 @@ void lgn_graph_free(lgn_gpu_graph *g) {
 
 bool lgn_graph_alloc(lgn_gpu_graph   *g,
                      uint32_t         ctx_size,
-                     const ds4_shape *shape) {
+                     const lgn2_shape *shape) {
     if (!g || !shape || ctx_size == 0 ||
         (uint64_t)ctx_size > shape->context_length ||
-        shape->family != DS4_MODEL_FAMILY_LAGUNA ||
+        shape->family != LGN2_MODEL_FAMILY_LAGUNA ||
         shape->n_layer != LGN_LAYER_COUNT ||
         shape->n_layer > LGN_MODEL_MAX_LAYER) {
         return false;
@@ -86,7 +86,7 @@ bool lgn_graph_alloc(lgn_gpu_graph   *g,
 
 #define LGN_GRAPH_ALLOC(name, bytes) do { \
         const uint64_t lgn_graph_bytes_ = (uint64_t)(bytes); \
-        g->name = ds4_gpu_tensor_alloc(lgn_graph_bytes_); \
+        g->name = lgn2_gpu_tensor_alloc(lgn_graph_bytes_); \
         if (!g->name) goto fail; \
         g->scratch_bytes += lgn_graph_bytes_; \
     } while (0)
@@ -124,11 +124,11 @@ bool lgn_graph_alloc(lgn_gpu_graph   *g,
 
     const int32_t shared_id = 0;
     const float shared_weight = 1.0f;
-    if (!ds4_gpu_tensor_write(g->shared_selected,
+    if (!lgn2_gpu_tensor_write(g->shared_selected,
                               0,
                               &shared_id,
                               sizeof(shared_id)) ||
-        !ds4_gpu_tensor_write(g->shared_weight,
+        !lgn2_gpu_tensor_write(g->shared_weight,
                               0,
                               &shared_weight,
                               sizeof(shared_weight))) {
@@ -142,15 +142,15 @@ bool lgn_graph_alloc(lgn_gpu_graph   *g,
         const uint64_t bytes =
             (uint64_t)cap * shape->n_head_kv * shape->n_head_dim *
             sizeof(uint16_t);
-        g->key_cache[il] = ds4_gpu_tensor_alloc(bytes);
-        g->value_cache[il] = ds4_gpu_tensor_alloc(bytes);
+        g->key_cache[il] = lgn2_gpu_tensor_alloc(bytes);
+        g->value_cache[il] = lgn2_gpu_tensor_alloc(bytes);
         if (!g->key_cache[il] || !g->value_cache[il]) goto fail;
         g->cache_cap[il] = cap;
         g->kv_bytes += 2u * bytes;
     }
 
     fprintf(stderr,
-            "ds4: Laguna GPU graph: ctx=%u, prefill=%u, KV %.2f GiB, "
+            "lgn2: Laguna GPU graph: ctx=%u, prefill=%u, KV %.2f GiB, "
             "scratch %.2f MiB\n",
             ctx_size,
             g->prefill_cap,
@@ -163,4 +163,4 @@ fail:
     return false;
 }
 
-#endif /* !DS4_NO_GPU */
+#endif /* !LGN2_NO_GPU */

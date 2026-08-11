@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the long-context fact-recall prompt used by ds4_test.
+"""Generate the long-context fact-recall prompt used by lgn2_test.
 
 The fixture is intentionally prose instead of a synthetic table.  The model has
 to retrieve person -> number assignments scattered through a long story, convert

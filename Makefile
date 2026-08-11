@@ -8,7 +8,7 @@ endif
 
 NATIVE_CPU_FLAG ?= -mcpu=native
 SAMPLING_TEST := tests/test_sampling
-METAL_EXACT_TEST := test-glm-q23-metal
+METAL_EXACT_TEST := test-laguna-q23-metal
 
 DEBUG_FLAGS ?= -g
 CFLAGS ?= -O3 -ffast-math $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c99
@@ -16,40 +16,37 @@ OBJCFLAGS ?= -O3 -ffast-math $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -fo
 QUALITY_CFLAGS ?= -O3 $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c11
 
 LDLIBS ?= -lm -pthread
-# Metal kernels are loaded from these files at runtime by ds4_metal.m.  Keep
+# Metal kernels are loaded from these files at runtime by lgn2_metal.m.  Keep
 # the loader's environment-name/default-path pairs explicit for the source
 # check below, but do not make the files compile-time prerequisites of the
 # large Objective-C objects.
 METAL_SOURCE_SPECS := \
-	DS4_METAL_FLASH_ATTN_SOURCE=metal/flash_attn.metal \
-	DS4_METAL_DENSE_SOURCE=metal/dense.metal \
-	DS4_METAL_MOE_SOURCE=metal/moe.metal \
-	DS4_METAL_UNARY_SOURCE=metal/unary.metal \
-	DS4_METAL_DSV4_MISC_SOURCE=metal/dsv4_misc.metal \
-	DS4_METAL_LAGUNA_SOURCE=metal/laguna.metal \
-	DS4_METAL_DFLASH_SOURCE=metal/dflash.metal \
-	DS4_METAL_ARGSORT_SOURCE=metal/argsort.metal \
-	DS4_METAL_CPY_SOURCE=metal/cpy.metal \
-	DS4_METAL_GET_ROWS_SOURCE=metal/get_rows.metal \
-	DS4_METAL_GLU_SOURCE=metal/glu.metal \
-	DS4_METAL_NORM_SOURCE=metal/norm.metal \
-	DS4_METAL_BIN_SOURCE=metal/bin.metal
-DS4_TEST_MODEL ?= ds4flash.gguf
-DS4_TEST_DFLASH ?=
-# Deliberately empty: the model-backed Laguna integration gate must never
-# pretend that the legacy DS4_TEST_MODEL default is a supported fixture.
-LAGUNA_TEST_MODEL ?=
+	LGN2_METAL_FLASH_ATTN_SOURCE=metal/flash_attn.metal \
+	LGN2_METAL_DENSE_SOURCE=metal/dense.metal \
+	LGN2_METAL_MOE_SOURCE=metal/moe.metal \
+	LGN2_METAL_UNARY_SOURCE=metal/unary.metal \
+	LGN2_METAL_DSV4_MISC_SOURCE=metal/dsv4_misc.metal \
+	LGN2_METAL_LAGUNA_SOURCE=metal/laguna.metal \
+	LGN2_METAL_DFLASH_SOURCE=metal/dflash.metal \
+	LGN2_METAL_ARGSORT_SOURCE=metal/argsort.metal \
+	LGN2_METAL_CPY_SOURCE=metal/cpy.metal \
+	LGN2_METAL_GET_ROWS_SOURCE=metal/get_rows.metal \
+	LGN2_METAL_GLU_SOURCE=metal/glu.metal \
+	LGN2_METAL_NORM_SOURCE=metal/norm.metal \
+	LGN2_METAL_BIN_SOURCE=metal/bin.metal
+LGN2_TEST_MODEL ?= lgn2.gguf
+LGN2_TEST_DFLASH ?=
 
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
-CORE_OBJS = ds4.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o lgn_dflash_exec.o ds4_metal.o
+CORE_OBJS = lgn2_engine.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o lgn_dflash_exec.o lgn2_metal.o
 
-DS4_TEST_METAL_OBJ := ds4_metal_test_hooks.o
-DS4_TEST_DS4_OBJ := ds4_test_hooks.o
-TEST_CORE_OBJS := $(filter-out ds4.o ds4_metal.o,$(CORE_OBJS)) $(DS4_TEST_DS4_OBJ) $(DS4_TEST_METAL_OBJ)
+LGN2_TEST_METAL_OBJ := lgn2_metal_test_hooks.o
+LGN2_TEST_ENGINE_OBJ := lgn2_engine_test_hooks.o
+TEST_CORE_OBJS := $(filter-out lgn2_engine.o lgn2_metal.o,$(CORE_OBJS)) $(LGN2_TEST_ENGINE_OBJ) $(LGN2_TEST_METAL_OBJ)
 
 METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 
-.PHONY: all help clean test test-legacy test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-glm-q23-metal dflash-verify-depth
+.PHONY: all help clean test test-extended test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-laguna-q23-metal dflash-verify-depth
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -68,68 +65,68 @@ check-metal-sources:
 		fi; \
 	done
 
-all: check-metal-sources ds4 ds4-server ds4-bench ds4-eval
+all: check-metal-sources lgn2 lgn2-server lgn2-bench lgn2-eval
 
 help:
-	@echo "DS4 build targets:"
-	@echo "  make              Build Metal ./ds4, ./ds4-server, ./ds4-bench, and ./ds4-eval"
+	@echo "LGN2 build targets:"
+	@echo "  make              Build Metal ./lgn2, ./lgn2-server, ./lgn2-bench, and ./lgn2-eval"
 	@echo "  make test         Build/run the model-independent Apple Metal/Laguna suite"
 	@echo "  make test-metal-laguna  Run the strict model-independent Apple Metal/Laguna suite"
-	@echo "  make test-legacy  Run the temporary umbrella regression suite (may need a model)"
-	@echo "  make test-metal-laguna-integration LAGUNA_TEST_MODEL=FILE  Run model-backed Laguna smoke"
+	@echo "  make test-extended  Run the extended model-dependent regression suite"
+	@echo "  make test-metal-laguna-integration LGN2_TEST_MODEL=FILE  Run model-backed Laguna smoke"
 	@echo "  make dflash-verify-depth  Run DFlash speculative verification smoke if support GGUF is present"
 	@echo "  make clean        Remove build outputs"
 
-ds4: ds4_cli.o ds4_help.o linenoise.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ ds4_cli.o ds4_help.o linenoise.o $(CORE_OBJS) $(METAL_LDLIBS)
+lgn2: lgn2_cli.o lgn2_help.o linenoise.o $(CORE_OBJS) | check-metal-sources
+	$(CC) $(CFLAGS) -o $@ lgn2_cli.o lgn2_help.o linenoise.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ ds4_server.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) $(METAL_LDLIBS)
+lgn2-server: lgn2_server.o lgn2_help.o lgn2_kvstore.o rax.o $(CORE_OBJS) | check-metal-sources
+	$(CC) $(CFLAGS) -o $@ lgn2_server.o lgn2_help.o lgn2_kvstore.o rax.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-bench: ds4_bench.o ds4_help.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ ds4_bench.o ds4_help.o $(CORE_OBJS) $(METAL_LDLIBS)
+lgn2-bench: lgn2_bench.o lgn2_help.o $(CORE_OBJS) | check-metal-sources
+	$(CC) $(CFLAGS) -o $@ lgn2_bench.o lgn2_help.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-eval: ds4_eval.o ds4_help.o $(CORE_OBJS) | check-metal-sources
-	$(CC) $(CFLAGS) -o $@ ds4_eval.o ds4_help.o $(CORE_OBJS) $(METAL_LDLIBS)
+lgn2-eval: lgn2_eval.o lgn2_help.o $(CORE_OBJS) | check-metal-sources
+	$(CC) $(CFLAGS) -o $@ lgn2_eval.o lgn2_help.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-quality/score_official: quality/score_official.c ds4.h $(CORE_OBJS) rax.o | check-metal-sources
+quality/score_official: quality/score_official.c lgn2.h $(CORE_OBJS) rax.o | check-metal-sources
 	$(CC) $(QUALITY_CFLAGS) -I. -o $@ quality/score_official.c $(CORE_OBJS) rax.o $(METAL_LDLIBS)
 
-tests/test_metal_session_batch.o: tests/test_metal_session_batch.c ds4.h
+tests/test_metal_session_batch.o: tests/test_metal_session_batch.c lgn2.h
 	$(CC) $(CFLAGS) -I. -c -o $@ tests/test_metal_session_batch.c
 
 tests/test_metal_session_batch: tests/test_metal_session_batch.o $(CORE_OBJS) | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
 test-metal-session-batch: tests/test_metal_session_batch
-	DS4_TEST_MODEL="$(DS4_TEST_MODEL)" ./tests/test_metal_session_batch
+	LGN2_TEST_MODEL="$(LGN2_TEST_MODEL)" ./tests/test_metal_session_batch
 
-tests/test_glm_q23_metal.o: tests/test_glm_q23_metal.c ds4_gpu.h
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
+tests/test_laguna_q23_metal.o: tests/test_laguna_q23_metal.c lgn2_gpu.h
+	$(CC) $(CFLAGS) -DLGN2_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_glm_q23_metal: tests/test_glm_q23_metal.o ds4_metal_test_hooks.o | check-metal-sources
+tests/test_laguna_q23_metal: tests/test_laguna_q23_metal.o lgn2_metal_test_hooks.o | check-metal-sources
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
 
-test-glm-q23-metal: tests/test_glm_q23_metal
-	./tests/test_glm_q23_metal
+test-laguna-q23-metal: tests/test_laguna_q23_metal
+	./tests/test_laguna_q23_metal
 
-tests/test_sampling.o: tests/test_sampling.c ds4.h
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
+tests/test_sampling.o: tests/test_sampling.c lgn2.h
+	$(CC) $(CFLAGS) -DLGN2_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o ds4_kvstore.o rax.o
+tests/test_sampling: tests/test_sampling.o lgn2_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o lgn2_kvstore.o rax.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/test_lgn.o: tests/test_lgn.c ds4.h lgn.h lgn_model.h lgn_dflash.h
-	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
+tests/test_lgn.o: tests/test_lgn.c lgn2.h lgn.h lgn_model.h lgn_dflash.h
+	$(CC) $(CFLAGS) -DLGN2_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_lgn: tests/test_lgn.o ds4_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o ds4_kvstore.o rax.o
+tests/test_lgn: tests/test_lgn.o lgn2_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o lgn2_kvstore.o rax.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test-lgn: tests/test_lgn
 	./tests/test_lgn
 
-ds4.o: ds4.c ds4.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
-	$(CC) $(CFLAGS) -c -o $@ ds4.c
+lgn2_engine.o: lgn2_engine.c lgn2.h lgn2_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+	$(CC) $(CFLAGS) -c -o $@ lgn2_engine.c
 
 lgn.o: lgn.c lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn.c
@@ -140,35 +137,35 @@ lgn_model.o: lgn_model.c lgn_model.h lgn.h
 lgn_dflash.o: lgn_dflash.c lgn_dflash.h lgn_model.h lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn_dflash.c
 
-lgn_graph.o: lgn_graph.c lgn_graph.h ds4_gpu.h lgn_model.h lgn.h
+lgn_graph.o: lgn_graph.c lgn_graph.h lgn2_gpu.h lgn_model.h lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn_graph.c
 
-lgn_dflash_graph.o: lgn_dflash_graph.c lgn_dflash_graph.h lgn_dflash.h lgn_model.h ds4_gpu.h lgn.h
+lgn_dflash_graph.o: lgn_dflash_graph.c lgn_dflash_graph.h lgn_dflash.h lgn_model.h lgn2_gpu.h lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn_dflash_graph.c
 
-lgn_dflash_exec.o: lgn_dflash_exec.c lgn_dflash_exec.h lgn_dflash_graph.h lgn_dflash.h lgn_model.h ds4_gpu.h lgn.h
+lgn_dflash_exec.o: lgn_dflash_exec.c lgn_dflash_exec.h lgn_dflash_graph.h lgn_dflash.h lgn_model.h lgn2_gpu.h lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn_dflash_exec.c
 
-ds4_cli.o: ds4_cli.c ds4.h ds4_help.h linenoise.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_cli.c
+lgn2_cli.o: lgn2_cli.c lgn2.h lgn2_help.h linenoise.h
+	$(CC) $(CFLAGS) -c -o $@ lgn2_cli.c
 
-ds4_help.o: ds4_help.c ds4_help.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_help.c
+lgn2_help.o: lgn2_help.c lgn2_help.h
+	$(CC) $(CFLAGS) -c -o $@ lgn2_help.c
 
-ds4_server.o: ds4_server.c ds4.h ds4_help.h ds4_kvstore.h rax.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_server.c
+lgn2_server.o: lgn2_server.c lgn2.h lgn2_help.h lgn2_kvstore.h rax.h
+	$(CC) $(CFLAGS) -c -o $@ lgn2_server.c
 
-ds4_bench.o: ds4_bench.c ds4.h ds4_help.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_bench.c
+lgn2_bench.o: lgn2_bench.c lgn2.h lgn2_help.h
+	$(CC) $(CFLAGS) -c -o $@ lgn2_bench.c
 
-ds4_eval.o: ds4_eval.c ds4.h ds4_help.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_eval.c
+lgn2_eval.o: lgn2_eval.c lgn2.h lgn2_help.h
+	$(CC) $(CFLAGS) -c -o $@ lgn2_eval.c
 
-ds4_kvstore.o: ds4_kvstore.c ds4_kvstore.h ds4.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_kvstore.c
+lgn2_kvstore.o: lgn2_kvstore.c lgn2_kvstore.h lgn2.h
+	$(CC) $(CFLAGS) -c -o $@ lgn2_kvstore.c
 
-ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_gpu.h ds4_help.h ds4_kvstore.h rax.h lgn.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
-	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ tests/ds4_test.c
+lgn2_test.o: tests/lgn2_test.c lgn2_server.c lgn2.h lgn2_gpu.h lgn2_help.h lgn2_kvstore.h rax.h lgn.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+	$(CC) $(CFLAGS) -Wno-unused-function -DLGN2_TEST_HOOKS -c -o $@ tests/lgn2_test.c
 
 rax.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CFLAGS) -c -o $@ rax.c
@@ -176,65 +173,65 @@ rax.o: rax.c rax.h rax_malloc.h
 linenoise.o: linenoise.c linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ linenoise.c
 
-ds4_metal.o: ds4_metal.m ds4_gpu.h | check-metal-sources
-	$(CC) $(OBJCFLAGS) -c -o $@ ds4_metal.m
+lgn2_metal.o: lgn2_metal.m lgn2_gpu.h | check-metal-sources
+	$(CC) $(OBJCFLAGS) -c -o $@ lgn2_metal.m
 
-ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h | check-metal-sources
-	$(CC) $(OBJCFLAGS) -DDS4_TEST_HOOKS -c -o $@ ds4_metal.m
+lgn2_metal_test_hooks.o: lgn2_metal.m lgn2_gpu.h | check-metal-sources
+	$(CC) $(OBJCFLAGS) -DLGN2_TEST_HOOKS -c -o $@ lgn2_metal.m
 
-ds4_test_hooks.o: ds4.c ds4.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
-	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
+lgn2_engine_test_hooks.o: lgn2_engine.c lgn2.h lgn2_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+	$(CC) $(CFLAGS) -Wno-unused-function -DLGN2_TEST_HOOKS -c -o $@ lgn2_engine.c
 
-ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
-	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -DDS4_TEST_HOOKS -c -o $@ ds4.c
+lgn2_cpu_test_hooks.o: lgn2_engine.c lgn2.h lgn2_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+	$(CC) $(CFLAGS) -Wno-unused-function -DLGN2_NO_GPU -DLGN2_TEST_HOOKS -c -o $@ lgn2_engine.c
 
-ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
-	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
+lgn2_test: lgn2_test.o lgn2_help.o lgn2_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)
+	$(CC) $(CFLAGS) -o $@ lgn2_test.o lgn2_help.o lgn2_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_LDLIBS)
 
-test-engine-lifecycle: ds4_test
-	./ds4_test --engine-lifecycle
+test-engine-lifecycle: lgn2_test
+	./lgn2_test --engine-lifecycle
 
-test-legacy: test-lgn ds4-eval q4k-dot-test mxfp4-dot-test \
-	$(SAMPLING_TEST) $(METAL_EXACT_TEST) ds4 ds4-server ds4-bench test-engine-lifecycle
-	./ds4-eval --self-test-extractors
+test-extended: test-lgn lgn2-eval q4k-dot-test mxfp4-dot-test \
+	$(SAMPLING_TEST) $(METAL_EXACT_TEST) lgn2 lgn2-server lgn2-bench test-engine-lifecycle
+	./lgn2-eval --self-test-extractors
 	./tests/test_sampling
 
-test-laguna-cli-options: ds4 ds4-server ds4-bench ds4-eval tests/test_laguna_cli_options.sh
+test-laguna-cli-options: lgn2 lgn2-server lgn2-bench lgn2-eval tests/test_laguna_cli_options.sh
 	./tests/test_laguna_cli_options.sh
 
-test-metal-laguna: check-metal-sources test-lgn test-glm-q23-metal test-laguna-cli-options test-engine-lifecycle $(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-eval
+test-metal-laguna: check-metal-sources test-lgn test-laguna-q23-metal test-laguna-cli-options test-engine-lifecycle $(SAMPLING_TEST) lgn2 lgn2-server lgn2-bench lgn2-eval
 	@set -eu; \
-	./ds4_test --laguna-moe-abi --laguna-architecture --laguna-session-surface --laguna-selector-parser --laguna-session-routes --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --laguna-dflash-exec --laguna-dflash-command-ownership --server; \
-	DS4_METAL_MOE_SOURCE=metal/moe.metal DS4_TEST_MOE_ABI_MODE=current ./ds4_test --laguna-moe-abi; \
-	./ds4_test --dflash-payload-lifecycle; \
+	./lgn2_test --laguna-moe-abi --laguna-architecture --laguna-session-surface --laguna-selector-parser --laguna-session-routes --laguna-graph-lifecycle --laguna-dflash-graph-lifecycle --laguna-dflash-exec --laguna-dflash-command-ownership --server; \
+	LGN2_METAL_MOE_SOURCE=metal/moe.metal LGN2_TEST_MOE_ABI_MODE=current ./lgn2_test --laguna-moe-abi; \
+	./lgn2_test --dflash-payload-lifecycle; \
 	./tests/test_sampling; \
-	DS4_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
-	./ds4_test --laguna-metal-core
+	LGN2_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
+	./lgn2_test --laguna-metal-core
 
 test: test-metal-laguna
 
-test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-eval tests/test_metal_session_batch
-	@test -n "$(strip $(LAGUNA_TEST_MODEL))" || { \
-		echo "error: set LAGUNA_TEST_MODEL=/path/to/laguna-s2.1.gguf for model-backed integration" >&2; \
+test-metal-laguna-integration: check-metal-sources lgn2 lgn2-server lgn2-bench lgn2-eval tests/test_metal_session_batch
+	@test -n "$(strip $(LGN2_TEST_MODEL))" || { \
+		echo "error: set LGN2_TEST_MODEL=/path/to/laguna-s2.1.gguf for model-backed integration" >&2; \
 		exit 2; \
 	}
-	@test -f "$(LAGUNA_TEST_MODEL)" || { \
-		echo "error: Laguna integration model not found: $(LAGUNA_TEST_MODEL)" >&2; \
+	@test -f "$(LGN2_TEST_MODEL)" || { \
+		echo "error: Laguna integration model not found: $(LGN2_TEST_MODEL)" >&2; \
 		exit 2; \
 	}
-	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" ./ds4 --metal --model "$(LAGUNA_TEST_MODEL)" --inspect
-	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" \
+	LGN2_TEST_MODEL="$(LGN2_TEST_MODEL)" ./lgn2 --metal --model "$(LGN2_TEST_MODEL)" --inspect
+	LGN2_TEST_MODEL="$(LGN2_TEST_MODEL)" \
 	./tests/test_metal_session_batch
 
-dflash-verify-depth: ds4_test
-	@if [ ! -f "$(DS4_TEST_MODEL)" ]; then \
-		echo "dflash-verify-depth: skipped, missing model $(DS4_TEST_MODEL)"; \
-	elif [ -z "$(strip $(DS4_TEST_DFLASH))" ]; then \
-		echo "dflash-verify-depth: skipped, set DS4_TEST_DFLASH=FILE to a DFlash support GGUF"; \
-	elif [ ! -f "$(DS4_TEST_DFLASH)" ]; then \
-		echo "dflash-verify-depth: skipped, missing DFlash support $(DS4_TEST_DFLASH)"; \
+dflash-verify-depth: lgn2_test
+	@if [ ! -f "$(LGN2_TEST_MODEL)" ]; then \
+		echo "dflash-verify-depth: skipped, missing model $(LGN2_TEST_MODEL)"; \
+	elif [ -z "$(strip $(LGN2_TEST_DFLASH))" ]; then \
+		echo "dflash-verify-depth: skipped, set LGN2_TEST_DFLASH=FILE to a DFlash support GGUF"; \
+	elif [ ! -f "$(LGN2_TEST_DFLASH)" ]; then \
+		echo "dflash-verify-depth: skipped, missing DFlash support $(LGN2_TEST_DFLASH)"; \
 	else \
-		DS4_TEST_MODEL="$(DS4_TEST_MODEL)" DS4_TEST_DFLASH="$(DS4_TEST_DFLASH)" ./ds4_test --dflash-verify-depth; \
+		LGN2_TEST_MODEL="$(LGN2_TEST_MODEL)" LGN2_TEST_DFLASH="$(LGN2_TEST_DFLASH)" ./lgn2_test --dflash-verify-depth; \
 	fi
 
 q4k-dot-test: tests/test_q4k_dot.c
@@ -246,4 +243,4 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 	./tests/test_mxfp4_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4_test tests/test_lgn tests/test_glm_q23_metal ds4_test_hooks.o ds4_metal_test_hooks.o quality/score_official quality/score_official.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_metal_session_batch tests/test_sampling tests/*.o *.o
+	rm -f lgn2 lgn2-server lgn2-bench lgn2-eval lgn2_test tests/test_lgn tests/test_laguna_q23_metal lgn2_engine_test_hooks.o lgn2_metal_test_hooks.o quality/score_official quality/score_official.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_metal_session_batch tests/test_sampling tests/*.o *.o

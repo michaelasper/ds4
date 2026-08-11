@@ -1,4 +1,4 @@
-struct ds4_metal_args_norm {
+struct lgn2_metal_args_norm {
     int32_t  ne00;
     int32_t  ne00_t;
     uint64_t nb1;
@@ -14,11 +14,11 @@ struct ds4_metal_args_norm {
 };
 
 // RMSNorm over one activation row, optionally fusing the learned weight
-// multiply. DS4 calls this before attention, before the FFN, and for plain
+// multiply. LGN2 calls this before attention, before the FFN, and for plain
 // diagnostics that need normalized but unweighted rows.
 template <typename T, short F>
 kernel void kernel_rms_norm_fuse_impl(
-        constant ds4_metal_args_norm & args,
+        constant lgn2_metal_args_norm & args,
         device const char * src0,
         device const char * src1_0,
         device const char * src1_1,
@@ -84,7 +84,7 @@ typedef decltype(kernel_rms_norm_fuse_impl<float4, 1>) kernel_rms_norm_fuse_t;
 template [[host_name("kernel_rms_norm_mul_f32_4")]] kernel kernel_rms_norm_fuse_t kernel_rms_norm_fuse_impl<float4, 2>;
 
 kernel void kernel_add_rms_norm_mul_f32_4(
-        constant ds4_metal_args_norm & args,
+        constant lgn2_metal_args_norm & args,
         device const char * src0,
         device const char * src1,
         device const char * weight,
@@ -138,7 +138,7 @@ kernel void kernel_add_rms_norm_mul_f32_4(
 // empirical result on the validated Apple compiler/GPU under default fast
 // math, not a portable arbitrary-IEEE or cross-device guarantee.
 kernel void kernel_add3_rms_norm_mul_f32_4(
-        constant ds4_metal_args_norm & args,
+        constant lgn2_metal_args_norm & args,
         device const char * src0,
         device const char * src1,
         device const char * src2,

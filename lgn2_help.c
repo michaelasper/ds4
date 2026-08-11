@@ -1,4 +1,4 @@
-#include "ds4_help.h"
+#include "lgn2_help.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -100,39 +100,39 @@ static bool topic_is(const char *topic, const char *name) {
     return topic && strcmp(topic, name) == 0;
 }
 
-static const char *tool_name(ds4_help_tool tool) {
+static const char *tool_name(lgn2_help_tool tool) {
     switch (tool) {
-    case DS4_HELP_DS4: return "ds4";
-    case DS4_HELP_SERVER: return "ds4-server";
-    case DS4_HELP_BENCH: return "ds4-bench";
-    case DS4_HELP_EVAL: return "ds4-eval";
+    case LGN2_HELP_LGN2: return "lgn2";
+    case LGN2_HELP_SERVER: return "lgn2-server";
+    case LGN2_HELP_BENCH: return "lgn2-bench";
+    case LGN2_HELP_EVAL: return "lgn2-eval";
     }
-    return "ds4";
+    return "lgn2";
 }
 
-static const char *tool_usage(ds4_help_tool tool) {
+static const char *tool_usage(lgn2_help_tool tool) {
     switch (tool) {
-    case DS4_HELP_DS4:
-        return "Usage: ds4 [(-p PROMPT | --prompt-file FILE)] [options]";
-    case DS4_HELP_SERVER:
-        return "Usage: ds4-server [options]";
-    case DS4_HELP_BENCH:
-        return "Usage: ds4-bench (--prompt-file FILE | --chat-prompt-file FILE) [options]";
-    case DS4_HELP_EVAL:
-        return "Usage: ds4-eval [options]";
+    case LGN2_HELP_LGN2:
+        return "Usage: lgn2 [(-p PROMPT | --prompt-file FILE)] [options]";
+    case LGN2_HELP_SERVER:
+        return "Usage: lgn2-server [options]";
+    case LGN2_HELP_BENCH:
+        return "Usage: lgn2-bench (--prompt-file FILE | --chat-prompt-file FILE) [options]";
+    case LGN2_HELP_EVAL:
+        return "Usage: lgn2-eval [options]";
     }
-    return "Usage: ds4 [options]";
+    return "Usage: lgn2 [options]";
 }
 
-static const char *tool_summary(ds4_help_tool tool) {
+static const char *tool_summary(lgn2_help_tool tool) {
     switch (tool) {
-    case DS4_HELP_DS4:
+    case LGN2_HELP_LGN2:
         return "Chat with a local Laguna S2.1 GGUF, run one-shot prompts, or inspect a model.";
-    case DS4_HELP_SERVER:
+    case LGN2_HELP_SERVER:
         return "Serve one loaded Laguna S2.1 GGUF through OpenAI, Responses, Anthropic, and completion-compatible HTTP APIs.";
-    case DS4_HELP_BENCH:
+    case LGN2_HELP_BENCH:
         return "Measure prefill, decode, context growth, and KV-cache size across repeatable context frontiers.";
-    case DS4_HELP_EVAL:
+    case LGN2_HELP_EVAL:
         return "Run the built-in reasoning, math, science, and security evaluation harness with a live terminal UI.";
     }
     return "";
@@ -145,23 +145,23 @@ static void print_laguna_dflash_options(FILE *fp, const help_colors *c) {
 }
 
 static void print_model_runtime(FILE *fp, const help_colors *c,
-                                ds4_help_tool tool, bool full) {
+                                lgn2_help_tool tool, bool full) {
     title(fp, c, "Model And Runtime");
-    opt(fp, c, "-m, --model FILE", "GGUF model path. Default: ds4flash.gguf");
+    opt(fp, c, "-m, --model FILE", "GGUF model path. Default: lgn2.gguf");
     opt(fp, c, "--metal", "Use Apple Metal (the only supported inference backend).");
-    if (tool != DS4_HELP_BENCH) {
+    if (tool != LGN2_HELP_BENCH) {
         opt(fp, c, "-c, --ctx N", "Allocated context tokens.");
     }
-    if (tool == DS4_HELP_SERVER) {
+    if (tool == LGN2_HELP_SERVER) {
         opt(fp, c, "-n, --tokens N", "Default max output tokens when clients omit a limit.");
     }
     opt(fp, c, "-t, --threads N", "CPU helper threads for host-side/reference work.");
     if (full) {
-        if (tool != DS4_HELP_BENCH) print_laguna_dflash_options(fp, c);
+        if (tool != LGN2_HELP_BENCH) print_laguna_dflash_options(fp, c);
         opt(fp, c, "--quality", "Prefer exact kernels where faster approximate paths exist.");
         opt(fp, c, "--warm-weights", "Touch mapped tensor pages at startup to reduce first-use stalls.");
     }
-    if (!full && (tool == DS4_HELP_DS4 || tool == DS4_HELP_SERVER)) {
+    if (!full && (tool == LGN2_HELP_LGN2 || tool == LGN2_HELP_SERVER)) {
         print_laguna_dflash_options(fp, c);
     }
     fputc('\n', fp);
@@ -192,9 +192,9 @@ static void print_cli_diagnostics(FILE *fp, const help_colors *c);
 
 static void print_cli_specific(FILE *fp, const help_colors *c, bool full) {
     title(fp, c, "CLI Modes");
-    opt(fp, c, "ds4", "Start the interactive prompt.");
-    opt(fp, c, "ds4 -p TEXT", "Run one prompt and exit.");
-    opt(fp, c, "ds4 --prompt-file FILE", "Run a long prompt from a file and exit.");
+    opt(fp, c, "lgn2", "Start the interactive prompt.");
+    opt(fp, c, "lgn2 -p TEXT", "Run one prompt and exit.");
+    opt(fp, c, "lgn2 --prompt-file FILE", "Run a long prompt from a file and exit.");
     fputc('\n', fp);
     if (full) {
         print_cli_diagnostics(fp, c);
@@ -220,7 +220,7 @@ static void print_cli_commands(FILE *fp, const help_colors *c) {
     opt(fp, c, "/ctx N", "Restart the interactive session with a new context size.");
     opt(fp, c, "/read FILE", "Read FILE and submit it as the next user message.");
     opt(fp, c, "/quit, /exit", "Leave the prompt.");
-    opt(fp, c, "Ctrl+C", "Stop current generation and return to ds4>.");
+    opt(fp, c, "Ctrl+C", "Stop current generation and return to lgn2>.");
     fputc('\n', fp);
 }
 
@@ -297,20 +297,20 @@ static void print_eval_specific(FILE *fp, const help_colors *c) {
     fputc('\n', fp);
 }
 
-static bool tool_has_topic(ds4_help_tool tool, const char *topic) {
+static bool tool_has_topic(lgn2_help_tool tool, const char *topic) {
     if (!topic) return true;
     if (streq(topic, "all")) return true;
     if (streq(topic, "runtime")) return true;
     if (streq(topic, "sampling"))
-        return tool == DS4_HELP_DS4 || tool == DS4_HELP_EVAL;
+        return tool == LGN2_HELP_LGN2 || tool == LGN2_HELP_EVAL;
     switch (tool) {
-    case DS4_HELP_DS4:
+    case LGN2_HELP_LGN2:
         return streq(topic, "diagnostics") || streq(topic, "commands");
-    case DS4_HELP_SERVER:
+    case LGN2_HELP_SERVER:
         return streq(topic, "api") || streq(topic, "kv-cache") || streq(topic, "thinking");
-    case DS4_HELP_BENCH:
+    case LGN2_HELP_BENCH:
         return streq(topic, "benchmark");
-    case DS4_HELP_EVAL:
+    case LGN2_HELP_EVAL:
         return streq(topic, "evaluation");
     }
     return false;
@@ -328,70 +328,70 @@ static void more_line(FILE *fp, const help_colors *c, const char *label, const c
     fprintf(fp, "    %s%-26s%s --help %s\n", on, label, off, topic);
 }
 
-static void print_more_info(FILE *fp, const help_colors *c, ds4_help_tool tool) {
+static void print_more_info(FILE *fp, const help_colors *c, lgn2_help_tool tool) {
     title(fp, c, "More Info");
     more_line(fp, c, "Runtime full info:", "runtime");
     if (tool_has_topic(tool, "sampling"))
         more_line(fp, c, "Sampling full info:", "sampling");
-    if (tool == DS4_HELP_DS4) {
+    if (tool == LGN2_HELP_LGN2) {
         more_line(fp, c, "Interactive commands:", "commands");
         more_line(fp, c, "Diagnostics:", "diagnostics");
-    } else if (tool == DS4_HELP_SERVER) {
+    } else if (tool == LGN2_HELP_SERVER) {
         more_line(fp, c, "HTTP API:", "api");
         more_line(fp, c, "Disk KV cache:", "kv-cache");
         more_line(fp, c, "Thinking behavior:", "thinking");
-    } else if (tool == DS4_HELP_BENCH) {
+    } else if (tool == LGN2_HELP_BENCH) {
         more_line(fp, c, "Benchmark sweep:", "benchmark");
-    } else if (tool == DS4_HELP_EVAL) {
+    } else if (tool == LGN2_HELP_EVAL) {
         more_line(fp, c, "Evaluation options:", "evaluation");
     }
     fputc('\n', fp);
 }
 
-static void print_examples(FILE *fp, const help_colors *c, ds4_help_tool tool, const char *topic) {
+static void print_examples(FILE *fp, const help_colors *c, lgn2_help_tool tool, const char *topic) {
     title(fp, c, "Examples");
     if (topic_is(topic, "runtime")) {
-        if (tool == DS4_HELP_SERVER) {
-            opt(fp, c, "Metal API", "./ds4-server -m ds4flash.gguf --metal --ctx 100000");
-            opt(fp, c, "batched API", "./ds4-server --batched-session 2 --host 127.0.0.1 --port 8000");
-        } else if (tool == DS4_HELP_BENCH) {
-            opt(fp, c, "bench", "./ds4-bench --prompt-file long.txt --ctx-max 32768");
-        } else if (tool == DS4_HELP_EVAL) {
-            opt(fp, c, "eval", "./ds4-eval --questions 10 --ctx 100000");
+        if (tool == LGN2_HELP_SERVER) {
+            opt(fp, c, "Metal API", "./lgn2-server -m lgn2.gguf --metal --ctx 100000");
+            opt(fp, c, "batched API", "./lgn2-server --batched-session 2 --host 127.0.0.1 --port 8000");
+        } else if (tool == LGN2_HELP_BENCH) {
+            opt(fp, c, "bench", "./lgn2-bench --prompt-file long.txt --ctx-max 32768");
+        } else if (tool == LGN2_HELP_EVAL) {
+            opt(fp, c, "eval", "./lgn2-eval --questions 10 --ctx 100000");
         } else {
-            opt(fp, c, "Metal", "./ds4 -m ds4flash.gguf --metal -c 100000");
+        opt(fp, c, "Metal", "./lgn2 -m lgn2.gguf --metal -c 100000");
         }
-    } else if (tool == DS4_HELP_SERVER || topic_is(topic, "api") || topic_is(topic, "kv-cache")) {
-        opt(fp, c, "local API", "./ds4-server --ctx 100000 --kv-disk-dir ~/.ds4/server-kv --kv-disk-space-mb 8192");
+    } else if (tool == LGN2_HELP_SERVER || topic_is(topic, "api") || topic_is(topic, "kv-cache")) {
+        opt(fp, c, "local API", "./lgn2-server --ctx 100000 --kv-disk-dir ~/.lgn2/server-kv --kv-disk-space-mb 8192");
         opt(fp, c, "curl", "curl http://127.0.0.1:8000/v1/models");
-    } else if (tool == DS4_HELP_BENCH || topic_is(topic, "benchmark")) {
-        opt(fp, c, "csv", "./ds4-bench --prompt-file long.txt --ctx-max 32768 --csv speed.csv");
-        opt(fp, c, "prefill only", "./ds4-bench --prompt-file long.txt --gen-tokens 0");
-    } else if (tool == DS4_HELP_EVAL || topic_is(topic, "evaluation")) {
-        opt(fp, c, "first 10", "./ds4-eval --questions 10 --trace eval.trace");
-        opt(fp, c, "plain", "./ds4-eval --plain --nothink --tokens 512");
+    } else if (tool == LGN2_HELP_BENCH || topic_is(topic, "benchmark")) {
+        opt(fp, c, "csv", "./lgn2-bench --prompt-file long.txt --ctx-max 32768 --csv speed.csv");
+        opt(fp, c, "prefill only", "./lgn2-bench --prompt-file long.txt --gen-tokens 0");
+    } else if (tool == LGN2_HELP_EVAL || topic_is(topic, "evaluation")) {
+        opt(fp, c, "first 10", "./lgn2-eval --questions 10 --trace eval.trace");
+        opt(fp, c, "plain", "./lgn2-eval --plain --nothink --tokens 512");
     } else {
-        opt(fp, c, "chat", "./ds4");
-        opt(fp, c, "one shot", "./ds4 -p \"Explain mmap in C\"");
-        opt(fp, c, "long prompt", "./ds4 --think-max --prompt-file prompt.txt --ctx 393216");
+        opt(fp, c, "chat", "./lgn2");
+        opt(fp, c, "one shot", "./lgn2 -p \"Explain mmap in C\"");
+        opt(fp, c, "long prompt", "./lgn2 --think-max --prompt-file prompt.txt --ctx 393216");
     }
     fputc('\n', fp);
 }
 
-static void print_topic(FILE *fp, const help_colors *c, ds4_help_tool tool, const char *topic) {
+static void print_topic(FILE *fp, const help_colors *c, lgn2_help_tool tool, const char *topic) {
     if (streq(topic, "all")) {
         print_model_runtime(fp, c, tool, true);
         if (tool_has_topic(tool, "sampling")) print_sampling(fp, c, true);
-        if (tool == DS4_HELP_DS4) {
+        if (tool == LGN2_HELP_LGN2) {
             print_cli_specific(fp, c, true);
             print_cli_commands(fp, c);
-        } else if (tool == DS4_HELP_SERVER) {
+        } else if (tool == LGN2_HELP_SERVER) {
             print_server_api(fp, c);
             print_server_thinking(fp, c);
             print_kv_cache(fp, c);
-        } else if (tool == DS4_HELP_BENCH) {
+        } else if (tool == LGN2_HELP_BENCH) {
             print_bench_specific(fp, c);
-        } else if (tool == DS4_HELP_EVAL) {
+        } else if (tool == LGN2_HELP_EVAL) {
             print_eval_specific(fp, c);
         }
         return;
@@ -399,32 +399,32 @@ static void print_topic(FILE *fp, const help_colors *c, ds4_help_tool tool, cons
 
     if (streq(topic, "runtime")) print_model_runtime(fp, c, tool, true);
     else if (streq(topic, "sampling")) print_sampling(fp, c, true);
-    else if (tool == DS4_HELP_DS4 && streq(topic, "diagnostics")) print_cli_diagnostics(fp, c);
-    else if (tool == DS4_HELP_DS4 && streq(topic, "commands")) print_cli_commands(fp, c);
-    else if (tool == DS4_HELP_SERVER && streq(topic, "api")) print_server_api(fp, c);
-    else if (tool == DS4_HELP_SERVER && streq(topic, "kv-cache")) print_kv_cache(fp, c);
-    else if (tool == DS4_HELP_SERVER && streq(topic, "thinking")) print_server_thinking(fp, c);
-    else if (tool == DS4_HELP_BENCH && streq(topic, "benchmark")) print_bench_specific(fp, c);
-    else if (tool == DS4_HELP_EVAL && streq(topic, "evaluation")) print_eval_specific(fp, c);
+    else if (tool == LGN2_HELP_LGN2 && streq(topic, "diagnostics")) print_cli_diagnostics(fp, c);
+    else if (tool == LGN2_HELP_LGN2 && streq(topic, "commands")) print_cli_commands(fp, c);
+    else if (tool == LGN2_HELP_SERVER && streq(topic, "api")) print_server_api(fp, c);
+    else if (tool == LGN2_HELP_SERVER && streq(topic, "kv-cache")) print_kv_cache(fp, c);
+    else if (tool == LGN2_HELP_SERVER && streq(topic, "thinking")) print_server_thinking(fp, c);
+    else if (tool == LGN2_HELP_BENCH && streq(topic, "benchmark")) print_bench_specific(fp, c);
+    else if (tool == LGN2_HELP_EVAL && streq(topic, "evaluation")) print_eval_specific(fp, c);
 }
 
-static void print_default(FILE *fp, const help_colors *c, ds4_help_tool tool) {
+static void print_default(FILE *fp, const help_colors *c, lgn2_help_tool tool) {
     print_model_runtime(fp, c, tool, false);
 
-    if (tool == DS4_HELP_DS4) {
+    if (tool == LGN2_HELP_LGN2) {
         print_cli_specific(fp, c, true);
         print_sampling(fp, c, false);
-    } else if (tool == DS4_HELP_SERVER) {
+    } else if (tool == LGN2_HELP_SERVER) {
         print_server_api(fp, c);
         print_kv_cache(fp, c);
-    } else if (tool == DS4_HELP_BENCH) {
+    } else if (tool == LGN2_HELP_BENCH) {
         print_bench_specific(fp, c);
-    } else if (tool == DS4_HELP_EVAL) {
+    } else if (tool == LGN2_HELP_EVAL) {
         print_eval_specific(fp, c);
     }
 }
 
-void ds4_help_print(FILE *fp, ds4_help_tool tool, const char *topic) {
+void lgn2_help_print(FILE *fp, lgn2_help_tool tool, const char *topic) {
     help_colors c = help_make_colors(fp);
     if (topic && !tool_has_topic(tool, topic)) {
         fprintf(fp, "%s: unknown help topic '%s'\n\n", tool_name(tool), topic);

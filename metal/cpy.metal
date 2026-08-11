@@ -1,4 +1,4 @@
-struct ds4_metal_args_cpy {
+struct lgn2_metal_args_cpy {
     int64_t  nk0;
     int64_t  ne00;
     int64_t  ne01;
@@ -18,12 +18,12 @@ struct ds4_metal_args_cpy {
     uint64_t nb3;
 };
 
-// Typed copy/conversion between graph tensors. DS4 uses this for layout
+// Typed copy/conversion between graph tensors. LGN2 uses this for layout
 // materialization and F32/F16 conversions at graph boundaries such as KV/cache
 // packing and staged attention.
 template<typename T0, typename T1>
 kernel void kernel_cpy_t_t(
-        constant ds4_metal_args_cpy & args,
+        constant lgn2_metal_args_cpy & args,
         device  const char * src0,
         device        char * dst,
         uint3   tgpig[[threadgroup_position_in_grid]],
@@ -51,7 +51,7 @@ kernel void kernel_cpy_t_t(
 }
 
 typedef decltype(kernel_cpy_t_t<float, float>) kernel_cpy_t;
-// Host-visible copy/conversion variants used by the DS4 graph.
+// Host-visible copy/conversion variants used by the LGN2 graph.
 template [[host_name("kernel_cpy_f32_f32")]] kernel kernel_cpy_t kernel_cpy_t_t<float, float>;
 template [[host_name("kernel_cpy_f32_f16")]] kernel kernel_cpy_t kernel_cpy_t_t<float, half>;
 

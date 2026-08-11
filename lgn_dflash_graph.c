@@ -1,20 +1,20 @@
 /*
  * lgn_dflash_graph.c - private DFlash support-graph storage lifecycle.
  *
- * Graph execution and command scheduling remain in ds4.c.  This module owns
+ * Graph execution and command scheduling remain in lgn2.c.  This module owns
  * only the fixed support graph's tensors and byte counters.
  */
 
 #include "lgn_dflash_graph.h"
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
 
 #include <stdio.h>
 #include <string.h>
 
-static void lgn_dflash_graph_free_tensor(ds4_gpu_tensor **slot) {
+static void lgn_dflash_graph_free_tensor(lgn2_gpu_tensor **slot) {
     if (!slot) return;
-    ds4_gpu_tensor_free(*slot);
+    lgn2_gpu_tensor_free(*slot);
     *slot = NULL;
 }
 
@@ -57,7 +57,7 @@ void lgn_dflash_graph_free(lgn_dflash_graph *g) {
 bool lgn_dflash_graph_alloc(lgn_dflash_graph *g) {
     if (!g) return false;
     const lgn_dflash_profile *profile = lgn_dflash_profile_get();
-    const ds4_shape *shape = lgn_model_shape();
+    const lgn2_shape *shape = lgn_model_shape();
     if (!profile || !shape) return false;
 
     g->feature_cap = profile->cache_cap;
@@ -75,7 +75,7 @@ bool lgn_dflash_graph_alloc(lgn_dflash_graph *g) {
 
 #define LGN_DFLASH_GRAPH_ALLOC(name, bytes) do { \
         const uint64_t lgn_dflash_bytes_ = (uint64_t)(bytes); \
-        g->name = ds4_gpu_tensor_alloc(lgn_dflash_bytes_); \
+        g->name = lgn2_gpu_tensor_alloc(lgn_dflash_bytes_); \
         if (!g->name) goto fail; \
         g->scratch_bytes += lgn_dflash_bytes_; \
     } while (0)
@@ -114,14 +114,14 @@ bool lgn_dflash_graph_alloc(lgn_dflash_graph *g) {
     /* The owner has exactly six cache pairs; keep this bound tied to the
      * storage layout even though the immutable profile currently agrees. */
     for (uint32_t il = 0; il < LGN_DFLASH_N_LAYER; il++) {
-        g->key_cache[il] = ds4_gpu_tensor_alloc(cache_bytes);
-        g->value_cache[il] = ds4_gpu_tensor_alloc(cache_bytes);
+        g->key_cache[il] = lgn2_gpu_tensor_alloc(cache_bytes);
+        g->value_cache[il] = lgn2_gpu_tensor_alloc(cache_bytes);
         if (!g->key_cache[il] || !g->value_cache[il]) goto fail;
         g->kv_bytes += 2u * cache_bytes;
     }
 
     fprintf(stderr,
-            "ds4: DFlash graph: block=%u, history=%u, KV %.2f MiB, "
+            "lgn2: DFlash graph: block=%u, history=%u, KV %.2f MiB, "
             "scratch %.2f MiB\n",
             g->block_cap,
             g->cache_cap,
@@ -134,4 +134,4 @@ fail:
     return false;
 }
 
-#endif /* !DS4_NO_GPU */
+#endif /* !LGN2_NO_GPU */

@@ -9,7 +9,7 @@
 
 #include "lgn_dflash_graph.h"
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
 
 enum {
     LGN_DFLASH_TARGET_CONTEXT_LENGTH = 262144u,
@@ -29,20 +29,20 @@ bool lgn_dflash_exec_context_valid(
 
 /* Record one support-model matrix multiply into the caller's active batch. */
 bool lgn_dflash_exec_matmul(
-        ds4_gpu_tensor                 *out,
+        lgn2_gpu_tensor                 *out,
         const lgn_dflash_exec_context  *ctx,
-        const ds4_tensor               *weight,
-        const ds4_gpu_tensor           *x,
+        const lgn2_tensor               *weight,
+        const lgn2_gpu_tensor           *x,
         uint32_t                        n_rows);
 
 /* Record the six-layer support injection into an already-active batch.
- * Ownership of begin/end/submit/discard/wait remains with ds4.c. */
+ * Ownership of begin/end/submit/discard/wait remains with lgn2_engine.c. */
 bool lgn_dflash_exec_encode_record(
         lgn_dflash_graph              *g,
         const lgn_dflash_exec_context *ctx,
         uint32_t                       pos0,
         uint32_t                       n_rows);
 
-#endif /* !DS4_NO_GPU */
+#endif /* !LGN2_NO_GPU */
 
 #endif /* LGN_DFLASH_EXEC_H */

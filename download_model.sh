@@ -9,8 +9,8 @@ MODEL_REVISION="main"
 MODEL_URL="https://huggingface.co/$MODEL_REPOSITORY/resolve/$MODEL_REVISION/$MODEL_FILE"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if [ -n "${DS4_GGUF_DIR:-}" ]; then
-    OUT_DIR=$DS4_GGUF_DIR
+if [ -n "${LGN2_GGUF_DIR:-}" ]; then
+    OUT_DIR=$LGN2_GGUF_DIR
 else
     OUT_DIR=$ROOT/gguf
 fi
@@ -21,7 +21,7 @@ esac
 
 MODEL_PATH="$OUT_DIR/$MODEL_FILE"
 PART_PATH="$MODEL_PATH.part"
-LINK_PATH="$ROOT/ds4flash.gguf"
+LINK_PATH="$ROOT/lgn2.gguf"
 TOKEN=${HF_TOKEN:-}
 DRY_RUN=0
 
@@ -39,10 +39,10 @@ The downloader fetches this exact benchmark model:
   source:     $MODEL_URL
 
 Environment:
-  DS4_GGUF_DIR   Directory for the model (default: ./gguf)
+  LGN2_GGUF_DIR   Directory for the model (default: ./gguf)
   HF_TOKEN       Optional Hugging Face access token
 
-Existing model files and ds4flash.gguf links are never replaced. A partial
+Existing model files and lgn2.gguf links are never replaced. A partial
 download is resumed in place and remains on disk if verification fails.
 EOF
 }

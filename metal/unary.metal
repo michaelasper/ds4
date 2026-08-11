@@ -33,7 +33,7 @@
 #define OP_UNARY_NUM_TRUNC       120
 #define OP_UNARY_NUM_XIELU       121
 
-struct ds4_metal_args_unary {
+struct lgn2_metal_args_unary {
     int32_t  ne00;
     int32_t  ne01;
     int32_t  ne02;
@@ -101,12 +101,12 @@ template<> inline float4 elu_approx<float4>(float4 x) {
 constant short FC_unary_op [[function_constant(FC_UNARY + 0)]];
 constant bool  FC_unary_cnt[[function_constant(FC_UNARY + 1)]];
 
-// Generic unary elementwise op selected by function constant. DS4 only uses a
+// Generic unary elementwise op selected by function constant. LGN2 only uses a
 // small subset in inference, mainly sigmoid, SiLU, softplus, sqrt, clamp,
 // scale, and fill.
 template <typename T0, typename T, typename TC>
 kernel void kernel_unary_impl(
-        constant ds4_metal_args_unary & args,
+        constant lgn2_metal_args_unary & args,
         device const char * src0,
         device       char * dst,
         uint3   tgpig[[threadgroup_position_in_grid]],
@@ -248,7 +248,7 @@ kernel void kernel_unary_impl(
 
         if (FC_OP == OP_UNARY_NUM_EXPM1) {
             // Metal target profiles used here do not all expose expm1(); this
-            // generic unary branch is not used by the DS4 inference graph.
+            // generic unary branch is not used by the LGN2 inference graph.
             dst_ptr[i0] = (T) (exp(x) - 1);
         }
 
@@ -285,10 +285,10 @@ kernel void kernel_unary_impl(
 typedef decltype(kernel_unary_impl<float, float, float>) kernel_unary_t;
 
 // Decode router probability transform. The generic path applies softplus and
-// sqrt as two elementwise kernels; DS4 decode always transforms one 256-wide
+// sqrt as two elementwise kernels; LGN2 decode always transforms one 256-wide
 // expert-logit row, so this vectorized kernel does both in one pass.
 kernel void kernel_dsv4_softplus_sqrt_f32_4(
-        constant ds4_metal_args_unary & args,
+        constant lgn2_metal_args_unary & args,
         device const char *src,
         device       char *dst,
         uint3 tgpig [[threadgroup_position_in_grid]],
@@ -306,7 +306,7 @@ kernel void kernel_dsv4_softplus_sqrt_f32_4(
     d[i0] = sqrt(sp);
 }
 
-// Host-visible unary variants. Function constants select the actual DS4 op.
+// Host-visible unary variants. Function constants select the actual LGN2 op.
 template [[host_name("kernel_unary_f32_f32")]]   kernel kernel_unary_t kernel_unary_impl<float,  float,  float>;
 template [[host_name("kernel_unary_f32_f32_4")]] kernel kernel_unary_t kernel_unary_impl<float4, float4, float4>;
 template [[host_name("kernel_unary_f16_f16")]]   kernel kernel_unary_t kernel_unary_impl<half,   half,   float>;

@@ -1,5 +1,5 @@
-#include "ds4.h"
-#include "ds4_help.h"
+#include "lgn2.h"
+#include "lgn2_help.h"
 
 /* Purpose-built throughput benchmark.
  *
@@ -22,7 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DS4_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES (UINT64_C(1) << 30)
+#define LGN2_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES (UINT64_C(1) << 30)
 
 typedef struct {
     const char *model_path;
@@ -51,8 +51,8 @@ static double bench_now_sec(void) {
 }
 
 static uint64_t bench_snapshot_max_bytes(void) {
-    const char *env = getenv("DS4_BENCH_SNAPSHOT_MAX_BYTES");
-    if (!env || env[0] == '\0') return DS4_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES;
+    const char *env = getenv("LGN2_BENCH_SNAPSHOT_MAX_BYTES");
+    if (!env || env[0] == '\0') return LGN2_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES;
     if (!strcmp(env, "unlimited") || !strcmp(env, "UNLIMITED") ||
         !strcmp(env, "inf") || !strcmp(env, "INF")) {
         return UINT64_MAX;
@@ -61,10 +61,10 @@ static uint64_t bench_snapshot_max_bytes(void) {
     unsigned long long v = strtoull(env, &end, 10);
     if (env[0] == '\0' || !end || *end != '\0') {
         fprintf(stderr,
-                "ds4-bench: invalid DS4_BENCH_SNAPSHOT_MAX_BYTES=%s; using default %llu\n",
+                "lgn2-bench: invalid LGN2_BENCH_SNAPSHOT_MAX_BYTES=%s; using default %llu\n",
                 env,
-                (unsigned long long)DS4_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES);
-        return DS4_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES;
+                (unsigned long long)LGN2_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES);
+        return LGN2_BENCH_DEFAULT_SNAPSHOT_MAX_BYTES;
     }
     return (uint64_t)v;
 }
@@ -74,14 +74,14 @@ static double bytes_to_gib(uint64_t bytes) {
 }
 
 static void usage(FILE *fp, const char *topic) {
-    ds4_help_print(fp, DS4_HELP_BENCH, topic);
+    lgn2_help_print(fp, LGN2_HELP_BENCH, topic);
 }
 
 static int parse_int(const char *s, const char *opt) {
     char *end = NULL;
     long v = strtol(s, &end, 10);
     if (s[0] == '\0' || *end != '\0' || v <= 0 || v > INT_MAX) {
-        fprintf(stderr, "ds4-bench: invalid value for %s: %s\n", opt, s);
+        fprintf(stderr, "lgn2-bench: invalid value for %s: %s\n", opt, s);
         exit(2);
     }
     return (int)v;
@@ -91,7 +91,7 @@ static int parse_nonnegative_int(const char *s, const char *opt) {
     char *end = NULL;
     long v = strtol(s, &end, 10);
     if (s[0] == '\0' || *end != '\0' || v < 0 || v > INT_MAX) {
-        fprintf(stderr, "ds4-bench: invalid value for %s: %s\n", opt, s);
+        fprintf(stderr, "lgn2-bench: invalid value for %s: %s\n", opt, s);
         exit(2);
     }
     return (int)v;
@@ -101,7 +101,7 @@ static double parse_double_arg(const char *s, const char *opt) {
     char *end = NULL;
     double v = strtod(s, &end);
     if (s[0] == '\0' || *end != '\0' || !isfinite(v)) {
-        fprintf(stderr, "ds4-bench: invalid value for %s: %s\n", opt, s);
+        fprintf(stderr, "lgn2-bench: invalid value for %s: %s\n", opt, s);
         exit(2);
     }
     return v;
@@ -109,7 +109,7 @@ static double parse_double_arg(const char *s, const char *opt) {
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
     if (*i + 1 >= argc) {
-        fprintf(stderr, "ds4-bench: %s requires an argument\n", opt);
+        fprintf(stderr, "lgn2-bench: %s requires an argument\n", opt);
         exit(2);
     }
     return argv[++*i];
@@ -139,7 +139,7 @@ static bool bench_option_is_unsupported(const char *arg) {
 
 static void bench_reject_unsupported_option(const char *arg) {
     fprintf(stderr,
-            "ds4-bench: unsupported option %s; this product supports Laguna S2.1 on Apple Metal only\n",
+            "lgn2-bench: unsupported option %s; this product supports Laguna S2.1 on Apple Metal only\n",
             arg);
     exit(2);
 }
@@ -147,33 +147,33 @@ static void bench_reject_unsupported_option(const char *arg) {
 static char *read_file(const char *path) {
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        fprintf(stderr, "ds4-bench: failed to open %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "lgn2-bench: failed to open %s: %s\n", path, strerror(errno));
         exit(1);
     }
     if (fseek(fp, 0, SEEK_END) != 0) {
-        fprintf(stderr, "ds4-bench: failed to seek %s\n", path);
+        fprintf(stderr, "lgn2-bench: failed to seek %s\n", path);
         fclose(fp);
         exit(1);
     }
     long n = ftell(fp);
     if (n < 0) {
-        fprintf(stderr, "ds4-bench: failed to tell %s\n", path);
+        fprintf(stderr, "lgn2-bench: failed to tell %s\n", path);
         fclose(fp);
         exit(1);
     }
     if (fseek(fp, 0, SEEK_SET) != 0) {
-        fprintf(stderr, "ds4-bench: failed to rewind %s\n", path);
+        fprintf(stderr, "lgn2-bench: failed to rewind %s\n", path);
         fclose(fp);
         exit(1);
     }
     char *buf = malloc((size_t)n + 1);
     if (!buf) {
-        fprintf(stderr, "ds4-bench: out of memory reading %s\n", path);
+        fprintf(stderr, "lgn2-bench: out of memory reading %s\n", path);
         fclose(fp);
         exit(1);
     }
     if (fread(buf, 1, (size_t)n, fp) != (size_t)n) {
-        fprintf(stderr, "ds4-bench: failed to read %s\n", path);
+        fprintf(stderr, "lgn2-bench: failed to read %s\n", path);
         free(buf);
         fclose(fp);
         exit(1);
@@ -185,7 +185,7 @@ static char *read_file(const char *path) {
 
 static bench_config parse_options(int argc, char **argv) {
     bench_config c = {
-        .model_path = "ds4flash.gguf",
+        .model_path = "lgn2.gguf",
         .system = "You are a helpful assistant.",
         .ctx_start = 2048,
         .ctx_max = 32768,
@@ -245,35 +245,35 @@ static bench_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--show-output")) {
             c.show_output = true;
         } else {
-            fprintf(stderr, "ds4-bench: unknown option: %s\n", arg);
+            fprintf(stderr, "lgn2-bench: unknown option: %s\n", arg);
             usage(stderr, NULL);
             exit(2);
         }
     }
 
     if (!!c.prompt_path == !!c.chat_prompt_path) {
-        fprintf(stderr, "ds4-bench: specify exactly one of --prompt-file or --chat-prompt-file\n");
+        fprintf(stderr, "lgn2-bench: specify exactly one of --prompt-file or --chat-prompt-file\n");
         exit(2);
     }
     if (c.ctx_start > c.ctx_max) {
-        fprintf(stderr, "ds4-bench: --ctx-start must be <= --ctx-max\n");
+        fprintf(stderr, "lgn2-bench: --ctx-start must be <= --ctx-max\n");
         exit(2);
     }
     if (c.step_mul < 1.0) {
-        fprintf(stderr, "ds4-bench: --step-mul must be >= 1\n");
+        fprintf(stderr, "lgn2-bench: --step-mul must be >= 1\n");
         exit(2);
     }
     if (c.step_mul == 1.0 && c.step_incr <= 0) {
-        fprintf(stderr, "ds4-bench: --step-incr must be positive when --step-mul is 1\n");
+        fprintf(stderr, "lgn2-bench: --step-incr must be positive when --step-mul is 1\n");
         exit(2);
     }
     if (c.ctx_max > INT_MAX - c.gen_tokens - 1) {
-        fprintf(stderr, "ds4-bench: requested context is too large\n");
+        fprintf(stderr, "lgn2-bench: requested context is too large\n");
         exit(2);
     }
     if (c.ctx_alloc == 0) c.ctx_alloc = c.ctx_max + c.gen_tokens + 1;
     if (c.ctx_alloc <= c.ctx_max + c.gen_tokens) {
-        fprintf(stderr, "ds4-bench: --ctx-alloc must be greater than ctx-max + gen-tokens\n");
+        fprintf(stderr, "lgn2-bench: --ctx-alloc must be greater than ctx-max + gen-tokens\n");
         exit(2);
     }
     return c;
@@ -309,7 +309,7 @@ static int write_frontier_logits_f32(
     if (!dir) return 0;
     if (sizeof(float) != 4) {
         fprintf(stderr,
-                "ds4-bench: native float is not 32-bit; cannot write %s f32 logits\n",
+                "lgn2-bench: native float is not 32-bit; cannot write %s f32 logits\n",
                 dir);
         return 1;
     }
@@ -321,7 +321,7 @@ static int write_frontier_logits_f32(
                            dir,
                            frontier);
     if (n <= 0 || (size_t)n >= sizeof(path)) {
-        fprintf(stderr, "ds4-bench: frontier logits f32 path is too long\n");
+        fprintf(stderr, "lgn2-bench: frontier logits f32 path is too long\n");
         return 1;
     }
 
@@ -331,14 +331,14 @@ static int write_frontier_logits_f32(
                                "%s.tmp.XXXXXX",
                                path);
     if (tmp_n <= 0 || (size_t)tmp_n >= sizeof(tmp_path)) {
-        fprintf(stderr, "ds4-bench: frontier logits f32 temporary path is too long\n");
+        fprintf(stderr, "lgn2-bench: frontier logits f32 temporary path is too long\n");
         return 1;
     }
 
     int fd = mkstemp(tmp_path);
     if (fd < 0) {
         fprintf(stderr,
-                "ds4-bench: failed to create %s: %s\n",
+                "lgn2-bench: failed to create %s: %s\n",
                 tmp_path,
                 strerror(errno));
         return 1;
@@ -349,7 +349,7 @@ static int write_frontier_logits_f32(
         close(fd);
         unlink(tmp_path);
         fprintf(stderr,
-                "ds4-bench: failed to open temporary %s: %s\n",
+                "lgn2-bench: failed to open temporary %s: %s\n",
                 tmp_path,
                 strerror(saved_errno));
         return 1;
@@ -372,7 +372,7 @@ static int write_frontier_logits_f32(
     }
     if (!ok) {
         fprintf(stderr,
-                "ds4-bench: failed to write temporary %s (%zu of %zu float32 values): %s\n",
+                "lgn2-bench: failed to write temporary %s (%zu of %zu float32 values): %s\n",
                 tmp_path,
                 written,
                 count,
@@ -385,7 +385,7 @@ static int write_frontier_logits_f32(
     if (rename(tmp_path, path) != 0) {
         const int saved_rename_errno = errno;
         fprintf(stderr,
-                "ds4-bench: failed to install %s: %s\n",
+                "lgn2-bench: failed to install %s: %s\n",
                 path,
                 strerror(saved_rename_errno));
         unlink(tmp_path);
@@ -396,24 +396,24 @@ static int write_frontier_logits_f32(
 
 static int write_frontier_logits_json(
         const bench_config *cfg,
-        ds4_engine         *engine,
-        ds4_session        *session,
+        lgn2_engine         *engine,
+        lgn2_session        *session,
         int                 frontier,
         int                 previous) {
     if (!cfg->dump_frontier_logits_dir && !cfg->dump_frontier_logits_f32_dir) return 0;
 
-    const int vocab = ds4_engine_vocab_size(engine);
+    const int vocab = lgn2_engine_vocab_size(engine);
     if (vocab <= 0 || (size_t)vocab > SIZE_MAX / sizeof(float)) {
-        fprintf(stderr, "ds4-bench: invalid vocabulary size %d for frontier logits\n", vocab);
+        fprintf(stderr, "lgn2-bench: invalid vocabulary size %d for frontier logits\n", vocab);
         return 1;
     }
     float *logits = malloc((size_t)vocab * sizeof(logits[0]));
     if (!logits) {
-        fprintf(stderr, "ds4-bench: out of memory copying frontier logits\n");
+        fprintf(stderr, "lgn2-bench: out of memory copying frontier logits\n");
         return 1;
     }
-    if (ds4_session_copy_logits(session, logits, vocab) != vocab) {
-        fprintf(stderr, "ds4-bench: failed to copy frontier logits at %d\n", frontier);
+    if (lgn2_session_copy_logits(session, logits, vocab) != vocab) {
+        fprintf(stderr, "lgn2-bench: failed to copy frontier logits at %d\n", frontier);
         free(logits);
         return 1;
     }
@@ -438,20 +438,20 @@ static int write_frontier_logits_json(
                            cfg->dump_frontier_logits_dir,
                            frontier);
     if (n <= 0 || (size_t)n >= sizeof(path)) {
-        fprintf(stderr, "ds4-bench: frontier logits path is too long\n");
+        fprintf(stderr, "lgn2-bench: frontier logits path is too long\n");
         free(logits);
         return 1;
     }
 
     FILE *fp = fopen(path, "wb");
     if (!fp) {
-        fprintf(stderr, "ds4-bench: failed to open %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "lgn2-bench: failed to open %s: %s\n", path, strerror(errno));
         free(logits);
         return 1;
     }
 
-    const int argmax = ds4_session_argmax(session);
-    fprintf(fp, "{\n  \"source\":\"ds4-bench\",\n  \"model\":");
+    const int argmax = lgn2_session_argmax(session);
+    fprintf(fp, "{\n  \"source\":\"lgn2-bench\",\n  \"model\":");
     json_write_string(fp, cfg->model_path);
     fprintf(fp,
             ",\n  \"backend\":\"metal\",\n  \"quality\":%s,\n"
@@ -460,7 +460,7 @@ static int write_frontier_logits_json(
             "  \"ctx\":%d,\n  \"vocab\":%d,\n"
             "  \"argmax_id\":%d,\n  \"argmax_logit\":%.9g,\n  \"logits\":[",
             cfg->quality ? "true" : "false",
-            ds4_engine_routed_quant_bits(engine),
+            lgn2_engine_routed_quant_bits(engine),
             frontier,
             frontier,
             frontier - previous,
@@ -476,7 +476,7 @@ static int write_frontier_logits_json(
     }
     fputs("\n  ]\n}\n", fp);
     if (fclose(fp) != 0) {
-        fprintf(stderr, "ds4-bench: failed to close %s\n", path);
+        fprintf(stderr, "lgn2-bench: failed to close %s\n", path);
         free(logits);
         return 1;
     }
@@ -500,9 +500,9 @@ static int next_frontier(const bench_config *c, int cur) {
 }
 
 static void log_context_memory(int ctx_size) {
-    ds4_context_memory m = ds4_context_memory_estimate(ctx_size);
+    lgn2_context_memory m = lgn2_context_memory_estimate(ctx_size);
     fprintf(stderr,
-            "ds4-bench: Metal context buffers %.2f MiB (ctx=%d, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
+            "lgn2-bench: Metal context buffers %.2f MiB (ctx=%d, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
             (double)m.total_bytes / (1024.0 * 1024.0),
             ctx_size,
             m.raw_cap,
@@ -512,43 +512,43 @@ static void log_context_memory(int ctx_size) {
 int main(int argc, char **argv) {
     bench_config cfg = parse_options(argc, argv);
 
-    ds4_engine_options opt = {
+    lgn2_engine_options opt = {
         .model_path = cfg.model_path,
         .n_threads = cfg.threads,
         .context_size = cfg.ctx_alloc,
         .warm_weights = cfg.warm_weights,
         .quality = cfg.quality,
     };
-    ds4_engine *engine = NULL;
-    if (ds4_engine_open(&engine, &opt) != 0) {
+    lgn2_engine *engine = NULL;
+    if (lgn2_engine_open(&engine, &opt) != 0) {
         return 1;
     }
     log_context_memory(cfg.ctx_alloc);
 
     char *text = read_file(cfg.prompt_path ? cfg.prompt_path : cfg.chat_prompt_path);
-    ds4_tokens prompt = {0};
+    lgn2_tokens prompt = {0};
     if (cfg.chat_prompt_path) {
-        ds4_encode_chat_prompt(engine, cfg.system, text, DS4_THINK_NONE, &prompt);
+        lgn2_encode_chat_prompt(engine, cfg.system, text, LGN2_THINK_NONE, &prompt);
     } else {
-        ds4_tokenize_text(engine, text, &prompt);
+        lgn2_tokenize_text(engine, text, &prompt);
     }
     free(text);
 
     if (prompt.len < cfg.ctx_max) {
         fprintf(stderr,
-                "ds4-bench: prompt has %d tokens, need at least --ctx-max=%d\n",
+                "lgn2-bench: prompt has %d tokens, need at least --ctx-max=%d\n",
                 prompt.len,
                 cfg.ctx_max);
-        ds4_tokens_free(&prompt);
-        ds4_engine_close(engine);
+        lgn2_tokens_free(&prompt);
+        lgn2_engine_close(engine);
         return 1;
     }
 
-    ds4_session *session = NULL;
-    if (ds4_session_create(&session, engine, cfg.ctx_alloc) != 0) {
-        fprintf(stderr, "ds4-bench: failed to create session\n");
-        ds4_tokens_free(&prompt);
-        ds4_engine_close(engine);
+    lgn2_session *session = NULL;
+    if (lgn2_session_create(&session, engine, cfg.ctx_alloc) != 0) {
+        fprintf(stderr, "lgn2-bench: failed to create session\n");
+        lgn2_tokens_free(&prompt);
+        lgn2_engine_close(engine);
         return 1;
     }
 
@@ -556,18 +556,18 @@ int main(int argc, char **argv) {
     if (cfg.csv_path) {
         out = fopen(cfg.csv_path, "wb");
         if (!out) {
-            fprintf(stderr, "ds4-bench: failed to open %s: %s\n", cfg.csv_path, strerror(errno));
-            ds4_session_free(session);
-            ds4_tokens_free(&prompt);
-            ds4_engine_close(engine);
+            fprintf(stderr, "lgn2-bench: failed to open %s: %s\n", cfg.csv_path, strerror(errno));
+            lgn2_session_free(session);
+            lgn2_tokens_free(&prompt);
+            lgn2_engine_close(engine);
             return 1;
         }
     }
     fprintf(out, "ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,gen_first_ms,gen_steady_tokens,gen_steady_tps,kvcache_bytes\n");
     fflush(out);
 
-    const int eos = ds4_token_eos(engine);
-    ds4_session_snapshot snap = {0};
+    const int eos = lgn2_token_eos(engine);
+    lgn2_session_snapshot snap = {0};
     const uint64_t snapshot_max_bytes = bench_snapshot_max_bytes();
     bool warned_large_snapshot = false;
     char err[256];
@@ -575,15 +575,15 @@ int main(int argc, char **argv) {
     int rc = 0;
 
     for (int frontier = cfg.ctx_start; ; frontier = next_frontier(&cfg, frontier)) {
-        ds4_tokens prefix = {
+        lgn2_tokens prefix = {
             .v = prompt.v,
             .len = frontier,
             .cap = frontier,
         };
 
         const double prefill_t0 = bench_now_sec();
-        if (ds4_session_sync(session, &prefix, err, sizeof(err)) != 0) {
-            fprintf(stderr, "ds4-bench: prefill to %d failed: %s\n", frontier, err);
+        if (lgn2_session_sync(session, &prefix, err, sizeof(err)) != 0) {
+            fprintf(stderr, "lgn2-bench: prefill to %d failed: %s\n", frontier, err);
             rc = 1;
             break;
         }
@@ -600,22 +600,22 @@ int main(int argc, char **argv) {
             cfg.gen_tokens > 0 && frontier < cfg.ctx_max;
         bool have_snapshot = false;
         if (need_restore_after_generation &&
-            getenv("DS4_BENCH_DISABLE_SNAPSHOT") == NULL) {
-            const uint64_t payload_bytes = ds4_session_payload_bytes(session);
+            getenv("LGN2_BENCH_DISABLE_SNAPSHOT") == NULL) {
+            const uint64_t payload_bytes = lgn2_session_payload_bytes(session);
             const bool large_snapshot_forced =
-                getenv("DS4_BENCH_FORCE_SNAPSHOT") != NULL;
+                getenv("LGN2_BENCH_FORCE_SNAPSHOT") != NULL;
             if (payload_bytes > snapshot_max_bytes && !large_snapshot_forced) {
                 if (!warned_large_snapshot) {
                     fprintf(stderr,
-                            "ds4-bench: session payload snapshot is %.2f GiB, above the %.2f GiB benchmark limit; "
-                            "replaying prefixes instead (set DS4_BENCH_FORCE_SNAPSHOT=1 to force snapshots)\n",
+                            "lgn2-bench: session payload snapshot is %.2f GiB, above the %.2f GiB benchmark limit; "
+                            "replaying prefixes instead (set LGN2_BENCH_FORCE_SNAPSHOT=1 to force snapshots)\n",
                             bytes_to_gib(payload_bytes),
                             bytes_to_gib(snapshot_max_bytes));
                     warned_large_snapshot = true;
                 }
             } else if (payload_bytes > 0) {
-                if (ds4_session_save_snapshot(session, &snap, err, sizeof(err)) != 0) {
-                    fprintf(stderr, "ds4-bench: snapshot at %d failed: %s\n", frontier, err);
+                if (lgn2_session_save_snapshot(session, &snap, err, sizeof(err)) != 0) {
+                    fprintf(stderr, "lgn2-bench: snapshot at %d failed: %s\n", frontier, err);
                     rc = 1;
                     break;
                 }
@@ -632,20 +632,20 @@ int main(int argc, char **argv) {
             : NULL;
         int gen_token_count = 0;
         for (int i = 0; i < cfg.gen_tokens; i++) {
-            if (ds4_session_pos(session) + 1 >= ds4_session_ctx(session)) {
-                fprintf(stderr, "ds4-bench: generation would exceed allocated context at frontier %d\n", frontier);
+            if (lgn2_session_pos(session) + 1 >= lgn2_session_ctx(session)) {
+                fprintf(stderr, "lgn2-bench: generation would exceed allocated context at frontier %d\n", frontier);
                 rc = 1;
                 break;
             }
-            const int token = ds4_session_argmax_excluding(session, eos);
+            const int token = lgn2_session_argmax_excluding(session, eos);
             if (token < 0) {
-                fprintf(stderr, "ds4-bench: failed to choose non-EOS token at frontier %d\n", frontier);
+                fprintf(stderr, "lgn2-bench: failed to choose non-EOS token at frontier %d\n", frontier);
                 rc = 1;
                 break;
             }
             const double token_t0 = bench_now_sec();
-            if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
-                fprintf(stderr, "ds4-bench: decode at frontier %d failed: %s\n", frontier, err);
+            if (lgn2_session_eval(session, token, err, sizeof(err)) != 0) {
+                fprintf(stderr, "lgn2-bench: decode at frontier %d failed: %s\n", frontier, err);
                 rc = 1;
                 break;
             }
@@ -657,10 +657,10 @@ int main(int argc, char **argv) {
         }
         const double gen_t1 = bench_now_sec();
         if (cfg.show_output && gen_token_buf && gen_token_count > 0) {
-            fprintf(stderr, "ds4-bench: gen[ctx=%d] decoded text: \"", frontier);
+            fprintf(stderr, "lgn2-bench: gen[ctx=%d] decoded text: \"", frontier);
             for (int i = 0; i < gen_token_count; i++) {
                 size_t tlen = 0;
-                char *txt = ds4_token_text(engine, gen_token_buf[i], &tlen);
+                char *txt = lgn2_token_text(engine, gen_token_buf[i], &tlen);
                 if (txt) {
                     fwrite(txt, 1, tlen, stderr);
                     free(txt);
@@ -675,14 +675,14 @@ int main(int argc, char **argv) {
         if (!need_restore_after_generation) {
             /* Nothing later depends on the frontier state. */
         } else if (!have_snapshot) {
-            if (ds4_session_sync(session, &prefix, err, sizeof(err)) != 0) {
-                fprintf(stderr, "ds4-bench: replay restore at %d failed: %s\n", frontier, err);
+            if (lgn2_session_sync(session, &prefix, err, sizeof(err)) != 0) {
+                fprintf(stderr, "lgn2-bench: replay restore at %d failed: %s\n", frontier, err);
                 rc = 1;
                 break;
             }
         } else {
-            if (ds4_session_load_snapshot(session, &snap, err, sizeof(err)) != 0) {
-                fprintf(stderr, "ds4-bench: restore at %d failed: %s\n", frontier, err);
+            if (lgn2_session_load_snapshot(session, &snap, err, sizeof(err)) != 0) {
+                fprintf(stderr, "lgn2-bench: restore at %d failed: %s\n", frontier, err);
                 rc = 1;
                 break;
             }
@@ -708,9 +708,9 @@ int main(int argc, char **argv) {
     }
 
     if (out != stdout) fclose(out);
-    ds4_session_snapshot_free(&snap);
-    ds4_session_free(session);
-    ds4_tokens_free(&prompt);
-    ds4_engine_close(engine);
+    lgn2_session_snapshot_free(&snap);
+    lgn2_session_free(session);
+    lgn2_tokens_free(&prompt);
+    lgn2_engine_close(engine);
     return rc;
 }

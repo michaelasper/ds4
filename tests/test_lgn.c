@@ -1,5 +1,5 @@
-#ifdef DS4_TEST_HOOKS
-#include "../ds4.h"
+#ifdef LGN2_TEST_HOOKS
+#include "../lgn2.h"
 #endif
 #include "../lgn.h"
 #include "../lgn_dflash.h"
@@ -147,13 +147,13 @@ static void test_s21_topology(void) {
 }
 
 static void test_s21_model_profile(void) {
-    const ds4_shape *shape = lgn_model_shape();
+    const lgn2_shape *shape = lgn_model_shape();
     CHECK(shape != NULL, "Laguna model profile is available");
-    CHECK(shape->family == DS4_MODEL_FAMILY_LAGUNA,
+    CHECK(shape->family == LGN2_MODEL_FAMILY_LAGUNA,
           "Laguna profile selects the Laguna family");
-    CHECK(shape->variant == DS4_VARIANT_LAGUNA_S21,
+    CHECK(shape->variant == LGN2_VARIANT_LAGUNA_S21,
           "Laguna profile selects S2.1");
-    CHECK(DS4_VARIANT_LAGUNA_S21 == 3,
+    CHECK(LGN2_VARIANT_LAGUNA_S21 == 3,
           "Laguna S2.1 keeps the explicit KVC model identity 3");
     CHECK(shape->n_layer == LGN_LAYER_COUNT && shape->n_embd == 3072u,
           "Laguna profile dimensions");
@@ -172,9 +172,9 @@ static void test_s21_model_profile(void) {
     CHECK(!lgn_model_layer_is_swa(0) && lgn_model_layer_is_swa(1),
           "private Laguna SWA topology adapter");
 
-    ds4_tensor output_norm = { .type = 0 };
-    ds4_tensor output = { .type = 1 };
-    ds4_weights weights;
+    lgn2_tensor output_norm = { .type = 0 };
+    lgn2_tensor output = { .type = 1 };
+    lgn2_weights weights;
     memset(&weights, 0, sizeof(weights));
     CHECK(!lgn_weights_have_output_head(&weights),
           "empty weights do not have an output head");
@@ -228,9 +228,9 @@ static char *test_read_repo_source(const char *path) {
 }
 
 static void test_weight_table_contract(void) {
-    char *engine = test_read_repo_source("ds4.c");
+    char *engine = test_read_repo_source("lgn2_engine.c");
     char *model_header = test_read_repo_source("lgn_model.h");
-    CHECK(engine != NULL, "weight-table contract can read ds4.c");
+    CHECK(engine != NULL, "weight-table contract can read lgn2_engine.c");
     CHECK(model_header != NULL, "weight-table contract can read lgn_model.h");
     if (!engine || !model_header) {
         free(engine);
@@ -264,16 +264,16 @@ static void test_weight_table_contract(void) {
           "private model tables use the 48-layer capacity");
     CHECK(strstr(model_header, "LGN_MODEL_MAX_LAYER = 79u") == NULL,
           "legacy 79-layer model capacity stays absent");
-    CHECK(strstr(engine, "DS4_MAX_LAYER            = 48") != NULL,
+    CHECK(strstr(engine, "LGN2_MAX_LAYER            = 48") != NULL,
           "engine layer capacity matches Laguna");
-    CHECK(strstr(engine, "DS4_MAX_EXPERT") == NULL &&
-              strstr(engine, "DS4_MAX_EXPERT_USED") == NULL,
+    CHECK(strstr(engine, "LGN2_MAX_EXPERT") == NULL &&
+              strstr(engine, "LGN2_MAX_EXPERT_USED") == NULL,
           "orphaned engine expert capacity constants stay absent");
-    CHECK(strstr(engine, "DS4_MAX_LAYER            = 79") == NULL &&
-              strstr(engine, "DS4_MAX_EXPERT           = 384") == NULL,
+    CHECK(strstr(engine, "LGN2_MAX_LAYER            = 79") == NULL &&
+              strstr(engine, "LGN2_MAX_EXPERT           = 384") == NULL,
           "legacy engine capacities stay absent");
-    CHECK(sizeof(((ds4_weights *)0)->layer) /
-              sizeof(((ds4_weights *)0)->layer[0]) == LGN_LAYER_COUNT,
+    CHECK(sizeof(((lgn2_weights *)0)->layer) /
+              sizeof(((lgn2_weights *)0)->layer[0]) == LGN_LAYER_COUNT,
           "runtime weight table has one slot per Laguna layer");
     CHECK(lgn_model_shape()->n_layer == LGN_LAYER_COUNT &&
               lgn_model_shape()->n_expert == 256u,
@@ -285,7 +285,7 @@ static void test_weight_table_contract(void) {
     free(model_header);
 }
 
-static bool synthetic_tensor_add(ds4_tensor *tensors,
+static bool synthetic_tensor_add(lgn2_tensor *tensors,
                                  size_t *n_tensors,
                                  size_t capacity,
                                  const char *name) {
@@ -330,7 +330,7 @@ static void test_whole_model_weight_bind(void) {
         (size_t)(n_layer - 1u) *
             (sizeof(common_suffixes) / sizeof(common_suffixes[0]) +
              sizeof(routed_suffixes) / sizeof(routed_suffixes[0]));
-    ds4_tensor *tensors = calloc(expected, sizeof(*tensors));
+    lgn2_tensor *tensors = calloc(expected, sizeof(*tensors));
     CHECK(tensors != NULL, "whole-model bind fixture allocates tensor table");
     if (!tensors) return;
 
@@ -361,18 +361,18 @@ static void test_whole_model_weight_bind(void) {
     CHECK(ok && n_tensors == expected,
           "whole-model bind fixture covers every executable layer tensor");
 
-    ds4_model model = {
+    lgn2_model model = {
         .n_tensors = n_tensors,
         .tensors = tensors,
     };
-    ds4_weights weights;
+    lgn2_weights weights;
     memset(&weights, 0, sizeof(weights));
     if (ok) lgn_weights_bind(&weights, &model);
     CHECK(ok && weights.token_embd && weights.output_norm && weights.output,
           "whole-model bind includes embeddings and output head");
     bool all_layers_bound = ok;
     for (uint32_t il = 0; all_layers_bound && il < n_layer; il++) {
-        const ds4_layer_weights *layer = &weights.layer[il];
+        const lgn2_layer_weights *layer = &weights.layer[il];
         all_layers_bound = layer->attn_norm && layer->attn_q &&
             layer->attn_k && layer->attn_v && layer->attn_gate &&
             layer->attn_q_norm && layer->attn_k_norm && layer->attn_output &&
@@ -404,18 +404,18 @@ static void test_model_admission(void) {
     memcpy(value, &length, sizeof(length));
     memcpy(value + sizeof(length), "laguna", 6);
 
-    ds4_kv kv = {
+    lgn2_kv kv = {
         .key = { key, sizeof(key) - 1u },
         .type = 8u, /* GGUF_VALUE_STRING */
         .value_pos = 0,
     };
-    ds4_model model = {
+    lgn2_model model = {
         .map = value,
         .size = sizeof(value),
         .n_kv = 1,
         .kv = &kv,
     };
-    ds4_str arch = {0};
+    lgn2_str arch = {0};
     CHECK(lgn_model_is_laguna(&model, &arch),
           "Laguna model admission accepts literal architecture");
     CHECK(arch.len == 6u && memcmp(arch.ptr, "laguna", 6) == 0,
@@ -430,7 +430,7 @@ static void test_model_admission(void) {
           "Laguna model admission rejects a missing model");
 }
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 enum {
     TEST_LAGUNA_SUMMARY_KV_CAP = 40u,
     TEST_LAGUNA_SUMMARY_STORAGE = 8192u,
@@ -439,9 +439,9 @@ enum {
 typedef struct {
     uint8_t map[TEST_LAGUNA_SUMMARY_STORAGE];
     size_t cursor;
-    ds4_kv kv[TEST_LAGUNA_SUMMARY_KV_CAP];
+    lgn2_kv kv[TEST_LAGUNA_SUMMARY_KV_CAP];
     uint32_t n_kv;
-    ds4_model model;
+    lgn2_model model;
 } test_laguna_summary_fixture;
 
 static uint64_t test_laguna_summary_reserve(
@@ -460,7 +460,7 @@ static void test_laguna_summary_add_kv(
     CHECK(fixture->n_kv < TEST_LAGUNA_SUMMARY_KV_CAP,
           "Laguna summary fixture metadata table has room");
     if (fixture->n_kv >= TEST_LAGUNA_SUMMARY_KV_CAP) return;
-    fixture->kv[fixture->n_kv++] = (ds4_kv){
+    fixture->kv[fixture->n_kv++] = (lgn2_kv){
         .key = { key, strlen(key) },
         .type = type,
         .value_pos = value_pos,
@@ -540,7 +540,7 @@ static void test_laguna_summary_fixture_init(
         test_laguna_summary_fixture *fixture) {
     memset(fixture, 0, sizeof(*fixture));
     fixture->cursor = 64u;
-    const ds4_shape *shape = lgn_model_shape();
+    const lgn2_shape *shape = lgn_model_shape();
     uint32_t head_count[LGN_LAYER_COUNT];
     for (uint32_t il = 0; il < LGN_LAYER_COUNT; il++) {
         head_count[il] = lgn_layer_head_count(il);
@@ -612,7 +612,7 @@ static void test_laguna_summary_fixture_init(
     test_laguna_summary_add_f32(fixture, "laguna.expert_weights_scale",
                                 shape->expert_weight_scale);
     test_laguna_summary_add_bool(fixture, "laguna.expert_weights_norm", true);
-    fixture->model = (ds4_model){
+    fixture->model = (lgn2_model){
         .version = 3u,
         .map = fixture->map,
         .size = sizeof(fixture->map),
@@ -643,7 +643,7 @@ static void test_dflash_profile_and_binding(void) {
                  sizeof(expected_targets)) == 0,
           "DFlash profile target layer list");
 
-    ds4_tensor tensor = {0};
+    lgn2_tensor tensor = {0};
     lgn_dflash_weights weights;
     memset(&weights, 0, sizeof(weights));
     weights.aux_norm = &tensor;
@@ -686,12 +686,12 @@ enum {
 typedef struct {
     uint8_t map[TEST_DFLASH_STORAGE];
     size_t cursor;
-    ds4_kv kv[TEST_DFLASH_KV_CAP];
+    lgn2_kv kv[TEST_DFLASH_KV_CAP];
     uint32_t n_kv;
-    ds4_tensor tensors[TEST_DFLASH_TENSOR_CAP];
+    lgn2_tensor tensors[TEST_DFLASH_TENSOR_CAP];
     char tensor_names[TEST_DFLASH_TENSOR_CAP][96];
     uint32_t n_tensors;
-    ds4_model model;
+    lgn2_model model;
 } test_dflash_bind_fixture;
 
 static uint64_t test_dflash_reserve(test_dflash_bind_fixture *fixture,
@@ -725,7 +725,7 @@ static void test_dflash_add_kv(test_dflash_bind_fixture *fixture,
     CHECK(fixture->n_kv < TEST_DFLASH_KV_CAP,
           "DFlash fixture metadata table has room");
     if (fixture->n_kv >= TEST_DFLASH_KV_CAP) return;
-    fixture->kv[fixture->n_kv++] = (ds4_kv){
+    fixture->kv[fixture->n_kv++] = (lgn2_kv){
         .key = { key, strlen(key) },
         .type = type,
         .value_pos = value_pos,
@@ -788,7 +788,7 @@ static void test_dflash_add_array(test_dflash_bind_fixture *fixture,
     test_dflash_add_kv(fixture, key, LGN_GGUF_VALUE_ARRAY, pos);
 }
 
-static ds4_tensor *test_dflash_add_tensor(test_dflash_bind_fixture *fixture,
+static lgn2_tensor *test_dflash_add_tensor(test_dflash_bind_fixture *fixture,
                                            const char *name,
                                            uint32_t type,
                                            uint32_t ndim,
@@ -803,8 +803,8 @@ static ds4_tensor *test_dflash_add_tensor(test_dflash_bind_fixture *fixture,
                            "%s", name);
     CHECK(n >= 0 && (size_t)n < sizeof(fixture->tensor_names[index]),
           "DFlash fixture tensor name has room");
-    ds4_tensor *tensor = &fixture->tensors[index];
-    tensor->name = (ds4_str){ fixture->tensor_names[index], (size_t)n };
+    lgn2_tensor *tensor = &fixture->tensors[index];
+    tensor->name = (lgn2_str){ fixture->tensor_names[index], (size_t)n };
     tensor->ndim = ndim;
     tensor->dim[0] = d0;
     tensor->dim[1] = d1;
@@ -927,7 +927,7 @@ static void test_dflash_bind_fixture_init(test_dflash_bind_fixture *fixture) {
                           2u, profile->n_ff_dense, profile->n_embd);
 #undef ADD_DFLASH_TENSOR
     }
-    fixture->model = (ds4_model){
+    fixture->model = (lgn2_model){
         .map = fixture->map,
         .size = sizeof(fixture->map),
         .n_kv = fixture->n_kv,
@@ -962,7 +962,7 @@ static void test_dflash_binding_fixture(void) {
                                    LGN_DFLASH_N_AUX,
                                    &count) && count == 0,
           "DFlash metadata array rejects oversized input");
-    ds4_model truncated = fixture.model;
+    lgn2_model truncated = fixture.model;
     truncated.size = fixture.cursor;
     CHECK(!lgn_model_get_u32_array(&truncated,
                                    "test.truncated.array",
@@ -1003,32 +1003,32 @@ static void test_dflash_binding_fixture(void) {
                                    &count),
           "model u32 array getter rejects NULL storage");
 
-    ds4_model missing_kv = fixture.model;
+    lgn2_model missing_kv = fixture.model;
     missing_kv.kv = NULL;
     CHECK(!lgn_model_get_u32(&missing_kv,
                              "dflash.block_count",
                              &count),
           "model getter rejects a nonzero KV count with NULL table");
-    ds4_model missing_storage = fixture.model;
+    lgn2_model missing_storage = fixture.model;
     missing_storage.map = NULL;
     CHECK(!lgn_model_get_u32(&missing_storage,
                              "dflash.block_count",
                              &count),
           "model getter rejects a missing backing storage mapping");
-    ds4_model missing_tensors = fixture.model;
+    lgn2_model missing_tensors = fixture.model;
     missing_tensors.tensors = NULL;
     CHECK(lgn_model_find_tensor(&missing_tensors, "fc.weight") == NULL,
           "tensor finder rejects a nonzero tensor count with NULL table");
 }
 
-#ifdef DS4_TEST_HOOKS
-static bool test_model_summary_capture(const ds4_model *model,
+#ifdef LGN2_TEST_HOOKS
+static bool test_model_summary_capture(const lgn2_model *model,
                                        char *output,
                                        size_t output_cap) {
     if (!model || !output || output_cap < 2u) return false;
     FILE *fp = tmpfile();
     if (!fp) return false;
-    bool ok = ds4_test_model_summary(model, fp) && fflush(fp) == 0;
+    bool ok = lgn2_test_model_summary(model, fp) && fflush(fp) == 0;
     size_t length = 0;
     if (ok) {
         rewind(fp);
@@ -1122,26 +1122,26 @@ static void test_dflash_shadow_map(void) {
         0x7c00u, 0x0000u, 0x8000u, 0x2000u,
     };
     uint8_t source[128] = {0};
-    ds4_tensor tensors[2] = {0};
+    lgn2_tensor tensors[2] = {0};
     char names[2][16] = { "f32", "bf16" };
     uint32_t f32_bits[] = { UINT32_C(0x11223344), UINT32_C(0x55667788) };
     memcpy(source + 16u, f32_bits, sizeof(f32_bits));
     memcpy(source + 64u, bf16_input, sizeof(bf16_input));
-    tensors[0] = (ds4_tensor){
+    tensors[0] = (lgn2_tensor){
         .name = { names[0], 3u },
         .type = LGN_TENSOR_F32,
         .abs_offset = 16u,
         .elements = 2u,
         .bytes = sizeof(f32_bits),
     };
-    tensors[1] = (ds4_tensor){
+    tensors[1] = (lgn2_tensor){
         .name = { names[1], 4u },
         .type = LGN_TENSOR_BF16,
         .abs_offset = 64u,
         .elements = sizeof(bf16_input) / sizeof(bf16_input[0]),
         .bytes = sizeof(bf16_input),
     };
-    ds4_model model = {
+    lgn2_model model = {
         .map = source,
         .size = sizeof(source),
         .n_tensors = 2u,
@@ -1199,11 +1199,11 @@ static void test_dflash_shadow_map(void) {
           "DFlash shadow map rejects overflowing BF16 element counts");
     tensors[1].elements = sizeof(bf16_input) / sizeof(bf16_input[0]);
     tensors[1].bytes = sizeof(bf16_input);
-    ds4_model missing_tensors = model;
+    lgn2_model missing_tensors = model;
     missing_tensors.tensors = NULL;
     CHECK(lgn_dflash_prepare_f16_map(&missing_tensors, NULL, NULL) == NULL,
           "DFlash shadow map rejects a nonzero tensor count with NULL table");
-    ds4_model missing_map = model;
+    lgn2_model missing_map = model;
     missing_map.map = NULL;
     CHECK(lgn_dflash_prepare_f16_map(&missing_map, NULL, NULL) == NULL,
           "DFlash shadow map rejects a missing model mapping");
@@ -1466,9 +1466,9 @@ int main(void) {
     test_model_admission();
     test_dflash_profile_and_binding();
     test_dflash_binding_fixture();
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
     test_production_model_summary();
-    CHECK(ds4_test_laguna_chat(),
+    CHECK(lgn2_test_laguna_chat(),
           "Laguna chat/tokenizer and stop-token contract");
 #endif
     test_dflash_shadow_map();

@@ -1,5 +1,5 @@
 /* =========================================================================
- * ds4.c - Laguna inference engine.
+ * lgn2_engine.c - Laguna inference engine.
  * =========================================================================
  *
  * This file is deliberately vertical: it owns GGUF loading, the fixed
@@ -39,7 +39,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "ds4.h"
+#include "lgn2.h"
 #include "lgn.h"
 #include "lgn_dflash.h"
 #include "lgn_dflash_exec.h"
@@ -47,11 +47,11 @@
 #include "lgn_graph.h"
 #include "lgn_model.h"
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 /* Counts only the main model-open boundary.  The lifecycle test uses this
  * process-local seam to prove pre-model option rejection without relying on a
  * deliberately missing model path. */
-static uint64_t g_ds4_test_engine_model_open_calls;
+static uint64_t g_lgn2_test_engine_model_open_calls;
 #endif
 
 #if defined(__ARM_NEON)
@@ -62,9 +62,9 @@ static uint64_t g_ds4_test_engine_model_open_calls;
 #define M_PI 3.14159265358979323846
 #endif
 
-#define DS4_NEG_INF (-1.0e30f)
-#define DS4_POS_INF ( 1.0e30f)
-static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
+#define LGN2_NEG_INF (-1.0e30f)
+#define LGN2_POS_INF ( 1.0e30f)
+static const char LGN2_REASONING_EFFORT_MAX_PREFIX[] =
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
     "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n";
@@ -72,7 +72,7 @@ static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
 /* Think Max requires at least a 384K-token context window.
  * Below that size we keep ordinary thinking to avoid injecting a prompt that
  * asks for a reasoning budget the allocated context is not meant to hold. */
-#define DS4_THINK_MAX_MIN_CONTEXT 393216u
+#define LGN2_THINK_MAX_MIN_CONTEXT 393216u
 
 /* =========================================================================
  * Model Shape Profiles.
@@ -84,13 +84,13 @@ static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
  */
 
 enum {
-    DS4_MAX_LAYER            = 48,
+    LGN2_MAX_LAYER            = 48,
 };
 
-static ds4_shape g_ds4_shape = {
+static lgn2_shape g_lgn2_shape = {
     .name = "Laguna S 2.1",
-    .family = DS4_MODEL_FAMILY_LAGUNA,
-    .variant = DS4_VARIANT_LAGUNA_S21,
+    .family = LGN2_MODEL_FAMILY_LAGUNA,
+    .variant = LGN2_VARIANT_LAGUNA_S21,
     .n_layer = 48,
     .n_embd = 3072,
     .n_vocab = 100352,
@@ -120,58 +120,58 @@ static ds4_shape g_ds4_shape = {
     .rope_orig_ctx = UINT64_C(8192),
 };
 
-#define DS4_MODEL_SHAPE_NAME          (g_ds4_shape.name)
-#define DS4_MODEL_FAMILY              (g_ds4_shape.family)
-#define DS4_MODEL_VARIANT             (g_ds4_shape.variant)
-#define DS4_N_LAYER                   (g_ds4_shape.n_layer)
-#define DS4_N_EMBD                    (g_ds4_shape.n_embd)
-#define DS4_N_VOCAB                   (g_ds4_shape.n_vocab)
-#define DS4_N_HEAD                    (g_ds4_shape.n_head)
-#define DS4_N_HEAD_KV                 (g_ds4_shape.n_head_kv)
-#define DS4_N_HEAD_DIM                (g_ds4_shape.n_head_dim)
-#define DS4_N_VALUE_DIM               (g_ds4_shape.n_value_dim)
-#define DS4_N_ROT                     (g_ds4_shape.n_rot)
-#define DS4_N_EXPERT                  (g_ds4_shape.n_expert)
-#define DS4_N_EXPERT_USED             (g_ds4_shape.n_expert_used)
-#define DS4_N_EXPERT_SHARED           (g_ds4_shape.n_expert_shared)
-#define DS4_N_FF_EXP                  (g_ds4_shape.n_ff_exp)
-#define DS4_N_FF_SHARED               (g_ds4_shape.n_ff_shared)
-#define DS4_N_FF_DENSE                (g_ds4_shape.n_ff_dense)
-#define DS4_N_SWA                     (g_ds4_shape.n_swa)
-#define DS4_N_LEADING_DENSE           (g_ds4_shape.n_leading_dense)
-#define DS4_N_ROT_SWA                 (g_ds4_shape.n_rot_swa)
-#define DS4_RMS_EPS                   (g_ds4_shape.rms_eps)
-#define DS4_EXPERT_WEIGHT_SCALE       (g_ds4_shape.expert_weight_scale)
-#define DS4_ROPE_FREQ_BASE            (g_ds4_shape.rope_freq_base)
-#define DS4_ROPE_SCALE_FACTOR         (g_ds4_shape.rope_scale_factor)
-#define DS4_ROPE_YARN_BETA_FAST       (g_ds4_shape.rope_yarn_beta_fast)
-#define DS4_ROPE_YARN_BETA_SLOW       (g_ds4_shape.rope_yarn_beta_slow)
-#define DS4_ROPE_YARN_ATTN_FACTOR     (g_ds4_shape.rope_yarn_attn_factor)
-#define DS4_ROPE_FREQ_BASE_SWA        (g_ds4_shape.rope_freq_base_swa)
-#define DS4_CONTEXT_LENGTH            (g_ds4_shape.context_length)
-#define DS4_ROPE_ORIG_CTX             (g_ds4_shape.rope_orig_ctx)
+#define LGN2_MODEL_SHAPE_NAME          (g_lgn2_shape.name)
+#define LGN2_MODEL_FAMILY              (g_lgn2_shape.family)
+#define LGN2_MODEL_VARIANT             (g_lgn2_shape.variant)
+#define LGN2_N_LAYER                   (g_lgn2_shape.n_layer)
+#define LGN2_N_EMBD                    (g_lgn2_shape.n_embd)
+#define LGN2_N_VOCAB                   (g_lgn2_shape.n_vocab)
+#define LGN2_N_HEAD                    (g_lgn2_shape.n_head)
+#define LGN2_N_HEAD_KV                 (g_lgn2_shape.n_head_kv)
+#define LGN2_N_HEAD_DIM                (g_lgn2_shape.n_head_dim)
+#define LGN2_N_VALUE_DIM               (g_lgn2_shape.n_value_dim)
+#define LGN2_N_ROT                     (g_lgn2_shape.n_rot)
+#define LGN2_N_EXPERT                  (g_lgn2_shape.n_expert)
+#define LGN2_N_EXPERT_USED             (g_lgn2_shape.n_expert_used)
+#define LGN2_N_EXPERT_SHARED           (g_lgn2_shape.n_expert_shared)
+#define LGN2_N_FF_EXP                  (g_lgn2_shape.n_ff_exp)
+#define LGN2_N_FF_SHARED               (g_lgn2_shape.n_ff_shared)
+#define LGN2_N_FF_DENSE                (g_lgn2_shape.n_ff_dense)
+#define LGN2_N_SWA                     (g_lgn2_shape.n_swa)
+#define LGN2_N_LEADING_DENSE           (g_lgn2_shape.n_leading_dense)
+#define LGN2_N_ROT_SWA                 (g_lgn2_shape.n_rot_swa)
+#define LGN2_RMS_EPS                   (g_lgn2_shape.rms_eps)
+#define LGN2_EXPERT_WEIGHT_SCALE       (g_lgn2_shape.expert_weight_scale)
+#define LGN2_ROPE_FREQ_BASE            (g_lgn2_shape.rope_freq_base)
+#define LGN2_ROPE_SCALE_FACTOR         (g_lgn2_shape.rope_scale_factor)
+#define LGN2_ROPE_YARN_BETA_FAST       (g_lgn2_shape.rope_yarn_beta_fast)
+#define LGN2_ROPE_YARN_BETA_SLOW       (g_lgn2_shape.rope_yarn_beta_slow)
+#define LGN2_ROPE_YARN_ATTN_FACTOR     (g_lgn2_shape.rope_yarn_attn_factor)
+#define LGN2_ROPE_FREQ_BASE_SWA        (g_lgn2_shape.rope_freq_base_swa)
+#define LGN2_CONTEXT_LENGTH            (g_lgn2_shape.context_length)
+#define LGN2_ROPE_ORIG_CTX             (g_lgn2_shape.rope_orig_ctx)
 
 /* Temporary source-compatible alias while Laguna shape ownership moves to
  * lgn_model.c.  Execution code can retain the established fixed-shape reads;
  * the immutable profile itself no longer lives in this orchestration unit. */
-#define DS4_SHAPE_LAGUNA_S21           (*lgn_model_shape())
+#define LGN2_SHAPE_LAGUNA_S21           (*lgn_model_shape())
 
-static int g_ds4_lock_fd = -1;
+static int g_lgn2_lock_fd = -1;
 
 #if defined(__GNUC__) || defined(__clang__)
-#define DS4_MAYBE_UNUSED __attribute__((unused))
+#define LGN2_MAYBE_UNUSED __attribute__((unused))
 #else
-#define DS4_MAYBE_UNUSED
+#define LGN2_MAYBE_UNUSED
 #endif
 
-static const char DS4_RUNTIME_NAME[] DS4_MAYBE_UNUSED = "metal";
+static const char LGN2_RUNTIME_NAME[] LGN2_MAYBE_UNUSED = "metal";
 
 /* =========================================================================
  * GGUF Quant Block Formats.
  * =========================================================================
  *
  * These layouts match the GGUF quantized tensor format,
- * reduced to only the formats ds4.c currently reads or sizes:
+ * reduced to only the formats lgn2_engine.c currently reads or sizes:
  *   - Q2_K/Q3_K routed experts
  *   - Q4_K routed experts in the high-memory variant
  *   - Q5_K/Q6_K routed experts
@@ -227,14 +227,14 @@ typedef struct {
     uint8_t qs[QK_MXFP4 / 2];
 } block_mxfp4;
 
-#define DS4_STATIC_ASSERT(name, cond) typedef char name[(cond) ? 1 : -1]
-DS4_STATIC_ASSERT(ds4_block_q2_k_size, sizeof(block_q2_K) == 84);
-DS4_STATIC_ASSERT(ds4_block_q3_k_size, sizeof(block_q3_K) == 110);
-DS4_STATIC_ASSERT(ds4_block_q4_k_size, sizeof(block_q4_K) == 144);
-DS4_STATIC_ASSERT(ds4_block_q5_k_size, sizeof(block_q5_K) == 176);
-DS4_STATIC_ASSERT(ds4_block_q6_k_size, sizeof(block_q6_K) == 210);
-DS4_STATIC_ASSERT(ds4_block_iq2_xxs_size, sizeof(block_iq2_xxs) == 66);
-DS4_STATIC_ASSERT(ds4_block_mxfp4_size, sizeof(block_mxfp4) == 17);
+#define LGN2_STATIC_ASSERT(name, cond) typedef char name[(cond) ? 1 : -1]
+LGN2_STATIC_ASSERT(lgn2_block_q2_k_size, sizeof(block_q2_K) == 84);
+LGN2_STATIC_ASSERT(lgn2_block_q3_k_size, sizeof(block_q3_K) == 110);
+LGN2_STATIC_ASSERT(lgn2_block_q4_k_size, sizeof(block_q4_K) == 144);
+LGN2_STATIC_ASSERT(lgn2_block_q5_k_size, sizeof(block_q5_K) == 176);
+LGN2_STATIC_ASSERT(lgn2_block_q6_k_size, sizeof(block_q6_K) == 210);
+LGN2_STATIC_ASSERT(lgn2_block_iq2_xxs_size, sizeof(block_iq2_xxs) == 66);
+LGN2_STATIC_ASSERT(lgn2_block_mxfp4_size, sizeof(block_mxfp4) == 17);
 
 
 
@@ -247,56 +247,56 @@ DS4_STATIC_ASSERT(ds4_block_mxfp4_size, sizeof(block_mxfp4) == 17);
  * and the small byte cursor used to parse GGUF metadata.
  */
 
-#define DS4_GGUF_MAGIC 0x46554747u /* "GGUF", little endian. */
-#define DS4_MAX_DIMS   8
+#define LGN2_GGUF_MAGIC 0x46554747u /* "GGUF", little endian. */
+#define LGN2_MAX_DIMS   8
 
-typedef ds4_tokens token_vec;
+typedef lgn2_tokens token_vec;
 
 typedef struct {
     const uint8_t *base;
     uint64_t size;
     uint64_t pos;
     char error[256];
-} ds4_cursor;
+} lgn2_cursor;
 
-static void ds4_die(const char *msg) {
-    fprintf(stderr, "ds4: %s\n", msg);
+static void lgn2_die(const char *msg) {
+    fprintf(stderr, "lgn2: %s\n", msg);
     exit(1);
 }
 
-#ifndef DS4_NO_GPU
-static uint32_t ds4_layer_head_count(uint32_t il) {
-    if (il >= DS4_N_LAYER) ds4_die("layer index is outside the loaded model layout");
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
+#ifndef LGN2_NO_GPU
+static uint32_t lgn2_layer_head_count(uint32_t il) {
+    if (il >= LGN2_N_LAYER) lgn2_die("layer index is outside the loaded model layout");
+    if (LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA) {
         const uint32_t n = lgn_model_layer_head_count(il);
-        if (n == 0) ds4_die("Laguna layer topology is not initialized");
+        if (n == 0) lgn2_die("Laguna layer topology is not initialized");
         return n;
     }
-    return DS4_N_HEAD;
+    return LGN2_N_HEAD;
 }
 #endif
 
-#ifndef DS4_NO_GPU
-static bool ds4_laguna_layer_is_swa(uint32_t il) {
-    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return false;
-    (void)ds4_layer_head_count(il);
+#ifndef LGN2_NO_GPU
+static bool lgn2_laguna_layer_is_swa(uint32_t il) {
+    if (LGN2_MODEL_FAMILY != LGN2_MODEL_FAMILY_LAGUNA) return false;
+    (void)lgn2_layer_head_count(il);
     return lgn_model_layer_is_swa(il);
 }
 #endif
 
-static void ds4_die_errno(const char *what, const char *path) {
-    fprintf(stderr, "ds4: %s '%s': %s\n", what, path, strerror(errno));
+static void lgn2_die_errno(const char *what, const char *path) {
+    fprintf(stderr, "lgn2: %s '%s': %s\n", what, path, strerror(errno));
     exit(1);
 }
 
-static bool ds4_streq(ds4_str s, const char *z) {
+static bool lgn2_streq(lgn2_str s, const char *z) {
     size_t n = strlen(z);
     return s.len == n && memcmp(s.ptr, z, n) == 0;
 }
 
 
 
-static bool ds4_str_eq(ds4_str a, ds4_str b) {
+static bool lgn2_str_eq(lgn2_str a, lgn2_str b) {
     return a.len == b.len && memcmp(a.ptr, b.ptr, a.len) == 0;
 }
 
@@ -313,10 +313,10 @@ static uint64_t hash_bytes(const void *ptr, uint64_t len) {
 static bool g_alloc_guard_enabled;
 static const char *g_alloc_guard_phase;
 
-static void ds4_alloc_guard_check(const char *op, size_t size) {
+static void lgn2_alloc_guard_check(const char *op, size_t size) {
     if (!g_alloc_guard_enabled) return;
     fprintf(stderr,
-            "ds4: internal allocation during %s: %s(%zu). "
+            "lgn2: internal allocation during %s: %s(%zu). "
             "guarded execution requires preallocated buffers.\n",
             g_alloc_guard_phase ? g_alloc_guard_phase : "guarded phase",
             op,
@@ -325,20 +325,20 @@ static void ds4_alloc_guard_check(const char *op, size_t size) {
 }
 
 static void *xcalloc(size_t n, size_t size) {
-    ds4_alloc_guard_check("calloc", n * size);
+    lgn2_alloc_guard_check("calloc", n * size);
     void *p = calloc(n, size);
-    if (!p) ds4_die("out of memory");
+    if (!p) lgn2_die("out of memory");
     return p;
 }
 
 static void *xmalloc(size_t size) {
-    ds4_alloc_guard_check("malloc", size);
+    lgn2_alloc_guard_check("malloc", size);
     void *p = malloc(size);
-    if (!p) ds4_die("out of memory");
+    if (!p) lgn2_die("out of memory");
     return p;
 }
 
-static char *ds4_strdup(const char *s) {
+static char *lgn2_strdup(const char *s) {
     size_t n = strlen(s);
     char *p = xmalloc(n + 1);
     memcpy(p, s, n + 1);
@@ -346,9 +346,9 @@ static char *ds4_strdup(const char *s) {
 }
 
 static void *xrealloc(void *ptr, size_t size) {
-    ds4_alloc_guard_check("realloc", size);
+    lgn2_alloc_guard_check("realloc", size);
     void *p = realloc(ptr, size);
-    if (!p) ds4_die("out of memory");
+    if (!p) lgn2_die("out of memory");
     return p;
 }
 
@@ -358,55 +358,55 @@ static double now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
 }
 
-static const char *ds4_log_color_code(ds4_log_type type) {
+static const char *lgn2_log_color_code(lgn2_log_type type) {
     switch (type) {
-    case DS4_LOG_PREFILL:
-    case DS4_LOG_TIMING:
+    case LGN2_LOG_PREFILL:
+    case LGN2_LOG_TIMING:
         return "\x1b[36m";
-    case DS4_LOG_GENERATION:
-    case DS4_LOG_OK:
+    case LGN2_LOG_GENERATION:
+    case LGN2_LOG_OK:
         return "\x1b[32m";
-    case DS4_LOG_KVCACHE:
+    case LGN2_LOG_KVCACHE:
         return "\x1b[33m";
-    case DS4_LOG_TOOL:
+    case LGN2_LOG_TOOL:
         return "\x1b[90m";
-    case DS4_LOG_WARNING:
+    case LGN2_LOG_WARNING:
         return "\x1b[38;5;208m";
-    case DS4_LOG_ERROR:
+    case LGN2_LOG_ERROR:
         return "\x1b[31m";
     default:
         return "";
     }
 }
 
-bool ds4_log_is_tty(FILE *fp) {
+bool lgn2_log_is_tty(FILE *fp) {
     int fd = fileno(fp);
     return fd >= 0 && isatty(fd) != 0;
 }
 
-static void ds4_vlog(FILE *fp, ds4_log_type type, const char *fmt, va_list ap) {
-    const bool colorize = type != DS4_LOG_DEFAULT && ds4_log_is_tty(fp);
-    if (colorize) fputs(ds4_log_color_code(type), fp);
+static void lgn2_vlog(FILE *fp, lgn2_log_type type, const char *fmt, va_list ap) {
+    const bool colorize = type != LGN2_LOG_DEFAULT && lgn2_log_is_tty(fp);
+    if (colorize) fputs(lgn2_log_color_code(type), fp);
     vfprintf(fp, fmt, ap);
     if (colorize) fputs("\x1b[0m", fp);
 }
 
-void ds4_log(FILE *fp, ds4_log_type type, const char *fmt, ...) {
+void lgn2_log(FILE *fp, lgn2_log_type type, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    ds4_vlog(fp, type, fmt, ap);
+    lgn2_vlog(fp, type, fmt, ap);
     va_end(ap);
 }
 
 
 
 
-typedef void (*ds4_parallel_fn)(void *ctx, uint64_t row0, uint64_t row1);
+typedef void (*lgn2_parallel_fn)(void *ctx, uint64_t row0, uint64_t row1);
 
-#define DS4_MAX_THREADS 32
+#define LGN2_MAX_THREADS 32
 
 typedef struct {
-    pthread_t threads[DS4_MAX_THREADS];
+    pthread_t threads[LGN2_MAX_THREADS];
     pthread_mutex_t mutex;
     pthread_cond_t work_cond;
     pthread_cond_t done_cond;
@@ -416,16 +416,16 @@ typedef struct {
     uint32_t done;
     bool initialized;
     bool shutdown;
-    ds4_parallel_fn fn;
+    lgn2_parallel_fn fn;
     void *ctx;
     uint64_t n_rows;
-} ds4_thread_pool;
+} lgn2_thread_pool;
 
-static ds4_thread_pool g_pool;
+static lgn2_thread_pool g_pool;
 static __thread int g_parallel_depth;
 static uint32_t g_requested_threads;
 
-static void *ds4_worker_main(void *arg) {
+static void *lgn2_worker_main(void *arg) {
     const uint32_t tid = (uint32_t)(uintptr_t)arg;
     uint32_t seen_generation = 0;
 
@@ -440,7 +440,7 @@ static void *ds4_worker_main(void *arg) {
         }
 
         seen_generation = g_pool.generation;
-        ds4_parallel_fn fn = g_pool.fn;
+        lgn2_parallel_fn fn = g_pool.fn;
         void *ctx = g_pool.ctx;
         const uint64_t n_rows = g_pool.n_rows;
         const uint32_t n_threads = g_pool.n_threads;
@@ -467,7 +467,7 @@ static void *ds4_worker_main(void *arg) {
 
 /* Create the persistent CPU worker pool.  Decode reuses these threads instead
  * of creating pthreads in the token loop. */
-static void ds4_threads_init(void) {
+static void lgn2_threads_init(void) {
     if (g_pool.initialized) return;
 
     uint32_t n_threads = 12;
@@ -476,13 +476,13 @@ static void ds4_threads_init(void) {
         n_threads = online_cpus < 12 ? (uint32_t)online_cpus : 12;
     }
 
-    const char *env = getenv("DS4_THREADS");
+    const char *env = getenv("LGN2_THREADS");
     if (env && env[0]) {
         long v = strtol(env, NULL, 10);
         if (v > 0) n_threads = (uint32_t)v;
     }
     if (g_requested_threads > 0) n_threads = g_requested_threads;
-    if (n_threads > DS4_MAX_THREADS) n_threads = DS4_MAX_THREADS;
+    if (n_threads > LGN2_MAX_THREADS) n_threads = LGN2_MAX_THREADS;
     if (n_threads == 0) n_threads = 1;
 
     pthread_mutex_init(&g_pool.mutex, NULL);
@@ -496,13 +496,13 @@ static void ds4_threads_init(void) {
     g_pool.initialized = true;
 
     for (uint32_t i = 1; i < n_threads; i++) {
-        if (pthread_create(&g_pool.threads[i], NULL, ds4_worker_main, (void *)(uintptr_t)i) != 0) {
-            ds4_die("failed to create worker thread");
+        if (pthread_create(&g_pool.threads[i], NULL, lgn2_worker_main, (void *)(uintptr_t)i) != 0) {
+            lgn2_die("failed to create worker thread");
         }
     }
 }
 
-static void ds4_threads_shutdown(void) {
+static void lgn2_threads_shutdown(void) {
     if (!g_pool.initialized) return;
 
     pthread_mutex_lock(&g_pool.mutex);
@@ -523,8 +523,8 @@ static void ds4_threads_shutdown(void) {
 
 /* Run a row-parallel CPU kernel, falling back to serial execution for small
  * jobs or nested calls where spawning more work would only add latency. */
-static void ds4_parallel_for_min_rows(uint64_t n_rows, ds4_parallel_fn fn, void *ctx, uint64_t min_parallel_rows) {
-    ds4_threads_init();
+static void lgn2_parallel_for_min_rows(uint64_t n_rows, lgn2_parallel_fn fn, void *ctx, uint64_t min_parallel_rows) {
+    lgn2_threads_init();
 
     if (g_parallel_depth > 0 || g_pool.n_threads <= 1 || n_rows < min_parallel_rows) {
         fn(ctx, 0, n_rows);
@@ -557,22 +557,22 @@ static void ds4_parallel_for_min_rows(uint64_t n_rows, ds4_parallel_fn fn, void 
     pthread_mutex_unlock(&g_pool.mutex);
 }
 
-static void ds4_lgn_dflash_parallel_for(void *parallel_ctx,
+static void lgn2_lgn_dflash_parallel_for(void *parallel_ctx,
                                         uint64_t n_rows,
                                         lgn_dflash_range_fn fn,
                                         void *ctx,
                                         uint64_t min_parallel_rows) {
     (void)parallel_ctx;
-    ds4_parallel_for_min_rows(n_rows, fn, ctx, min_parallel_rows);
+    lgn2_parallel_for_min_rows(n_rows, fn, ctx, min_parallel_rows);
 }
 
-static void cursor_error(ds4_cursor *c, const char *msg) {
+static void cursor_error(lgn2_cursor *c, const char *msg) {
     if (c->error[0] == '\0') {
         snprintf(c->error, sizeof(c->error), "%s at byte %" PRIu64, msg, c->pos);
     }
 }
 
-static bool cursor_has(ds4_cursor *c, uint64_t n) {
+static bool cursor_has(lgn2_cursor *c, uint64_t n) {
     if (n > c->size || c->pos > c->size - n) {
         cursor_error(c, "truncated GGUF file");
         return false;
@@ -580,28 +580,28 @@ static bool cursor_has(ds4_cursor *c, uint64_t n) {
     return true;
 }
 
-static bool cursor_read(ds4_cursor *c, void *dst, uint64_t n) {
+static bool cursor_read(lgn2_cursor *c, void *dst, uint64_t n) {
     if (!cursor_has(c, n)) return false;
     memcpy(dst, c->base + c->pos, (size_t)n);
     c->pos += n;
     return true;
 }
 
-static bool cursor_skip(ds4_cursor *c, uint64_t n) {
+static bool cursor_skip(lgn2_cursor *c, uint64_t n) {
     if (!cursor_has(c, n)) return false;
     c->pos += n;
     return true;
 }
 
-static bool cursor_u32(ds4_cursor *c, uint32_t *v) {
+static bool cursor_u32(lgn2_cursor *c, uint32_t *v) {
     return cursor_read(c, v, sizeof(*v));
 }
 
-static bool cursor_u64(ds4_cursor *c, uint64_t *v) {
+static bool cursor_u64(lgn2_cursor *c, uint64_t *v) {
     return cursor_read(c, v, sizeof(*v));
 }
 
-static bool cursor_string(ds4_cursor *c, ds4_str *s) {
+static bool cursor_string(lgn2_cursor *c, lgn2_str *s) {
     uint64_t len;
     if (!cursor_u64(c, &len)) return false;
     if (!cursor_has(c, len)) return false;
@@ -682,19 +682,19 @@ static const gguf_type_info gguf_types[] = {
 };
 
 enum {
-    DS4_TENSOR_F32      = LGN_TENSOR_F32,
-    DS4_TENSOR_F16      = LGN_TENSOR_F16,
-    DS4_TENSOR_Q4_0     = LGN_TENSOR_Q4_0,
-    DS4_TENSOR_Q8_0     = LGN_TENSOR_Q8_0,
-    DS4_TENSOR_Q2_K     = LGN_TENSOR_Q2_K,
-    DS4_TENSOR_Q3_K     = LGN_TENSOR_Q3_K,
-    DS4_TENSOR_Q4_K     = LGN_TENSOR_Q4_K,
-    DS4_TENSOR_Q5_K     = LGN_TENSOR_Q5_K,
-    DS4_TENSOR_Q6_K     = LGN_TENSOR_Q6_K,
-    DS4_TENSOR_IQ2_XXS  = LGN_TENSOR_IQ2_XXS,
-    DS4_TENSOR_I32      = LGN_TENSOR_I32,
-    DS4_TENSOR_BF16     = LGN_TENSOR_BF16,
-    DS4_TENSOR_MXFP4    = LGN_TENSOR_MXFP4,
+    LGN2_TENSOR_F32      = LGN_TENSOR_F32,
+    LGN2_TENSOR_F16      = LGN_TENSOR_F16,
+    LGN2_TENSOR_Q4_0     = LGN_TENSOR_Q4_0,
+    LGN2_TENSOR_Q8_0     = LGN_TENSOR_Q8_0,
+    LGN2_TENSOR_Q2_K     = LGN_TENSOR_Q2_K,
+    LGN2_TENSOR_Q3_K     = LGN_TENSOR_Q3_K,
+    LGN2_TENSOR_Q4_K     = LGN_TENSOR_Q4_K,
+    LGN2_TENSOR_Q5_K     = LGN_TENSOR_Q5_K,
+    LGN2_TENSOR_Q6_K     = LGN_TENSOR_Q6_K,
+    LGN2_TENSOR_IQ2_XXS  = LGN_TENSOR_IQ2_XXS,
+    LGN2_TENSOR_I32      = LGN_TENSOR_I32,
+    LGN2_TENSOR_BF16     = LGN_TENSOR_BF16,
+    LGN2_TENSOR_MXFP4    = LGN_TENSOR_MXFP4,
 };
 
 static uint64_t scalar_value_size(uint32_t type) {
@@ -719,7 +719,7 @@ static uint64_t scalar_value_size(uint32_t type) {
     }
 }
 
-static bool skip_value(ds4_cursor *c, uint32_t type, int depth) {
+static bool skip_value(lgn2_cursor *c, uint32_t type, int depth) {
     if (depth > 8) {
         cursor_error(c, "metadata array nesting is too deep");
         return false;
@@ -729,7 +729,7 @@ static bool skip_value(ds4_cursor *c, uint32_t type, int depth) {
     if (scalar != 0) return cursor_skip(c, scalar);
 
     if (type == GGUF_VALUE_STRING) {
-        ds4_str ignored;
+        lgn2_str ignored;
         return cursor_string(c, &ignored);
     }
 
@@ -779,8 +779,8 @@ static bool tensor_nbytes(uint32_t type, uint64_t elements, uint64_t *bytes) {
     return true;
 }
 
-static ds4_cursor cursor_at(const ds4_model *m, uint64_t pos) {
-    ds4_cursor c = {
+static lgn2_cursor cursor_at(const lgn2_model *m, uint64_t pos) {
+    lgn2_cursor c = {
         .base = m->map,
         .size = m->size,
         .pos = pos,
@@ -789,32 +789,32 @@ static ds4_cursor cursor_at(const ds4_model *m, uint64_t pos) {
     return c;
 }
 
-static ds4_kv *model_find_kv(const ds4_model *m, const char *key) {
+static lgn2_kv *model_find_kv(const lgn2_model *m, const char *key) {
     for (uint64_t i = 0; i < m->n_kv; i++) {
-        if (ds4_streq(m->kv[i].key, key)) return &m->kv[i];
+        if (lgn2_streq(m->kv[i].key, key)) return &m->kv[i];
     }
     return NULL;
 }
 
-static bool model_get_string(const ds4_model *m, const char *key, ds4_str *out) {
-    ds4_kv *kv = model_find_kv(m, key);
+static bool model_get_string(const lgn2_model *m, const char *key, lgn2_str *out) {
+    lgn2_kv *kv = model_find_kv(m, key);
     if (!kv || kv->type != GGUF_VALUE_STRING) return false;
-    ds4_cursor c = cursor_at(m, kv->value_pos);
+    lgn2_cursor c = cursor_at(m, kv->value_pos);
     return cursor_string(&c, out);
 }
 
-static bool model_get_u32(const ds4_model *m, const char *key, uint32_t *out) {
-    ds4_kv *kv = model_find_kv(m, key);
+static bool model_get_u32(const lgn2_model *m, const char *key, uint32_t *out) {
+    lgn2_kv *kv = model_find_kv(m, key);
     if (!kv || kv->type != GGUF_VALUE_UINT32) return false;
-    ds4_cursor c = cursor_at(m, kv->value_pos);
+    lgn2_cursor c = cursor_at(m, kv->value_pos);
     return cursor_u32(&c, out);
 }
 
-static bool model_get_token_id(const ds4_model *m, const char *key, int *out) {
-    ds4_kv *kv = model_find_kv(m, key);
+static bool model_get_token_id(const lgn2_model *m, const char *key, int *out) {
+    lgn2_kv *kv = model_find_kv(m, key);
     if (!kv) return false;
 
-    ds4_cursor c = cursor_at(m, kv->value_pos);
+    lgn2_cursor c = cursor_at(m, kv->value_pos);
     switch (kv->type) {
     case GGUF_VALUE_UINT32: {
         uint32_t v = 0;
@@ -845,10 +845,10 @@ static bool model_get_token_id(const ds4_model *m, const char *key, int *out) {
     }
 }
 
-static bool model_get_u64_compat(const ds4_model *m, const char *key, uint64_t *out) {
-    ds4_kv *kv = model_find_kv(m, key);
+static bool model_get_u64_compat(const lgn2_model *m, const char *key, uint64_t *out) {
+    lgn2_kv *kv = model_find_kv(m, key);
     if (!kv) return false;
-    ds4_cursor c = cursor_at(m, kv->value_pos);
+    lgn2_cursor c = cursor_at(m, kv->value_pos);
     if (kv->type == GGUF_VALUE_UINT64) {
         return cursor_u64(&c, out);
     }
@@ -865,20 +865,20 @@ typedef struct {
     uint32_t type;
     uint64_t len;
     uint64_t data_pos;
-} ds4_array_ref;
+} lgn2_array_ref;
 
-static bool model_get_array(const ds4_model *m, const char *key, ds4_array_ref *out) {
-    ds4_kv *kv = model_find_kv(m, key);
+static bool model_get_array(const lgn2_model *m, const char *key, lgn2_array_ref *out) {
+    lgn2_kv *kv = model_find_kv(m, key);
     if (!kv || kv->type != GGUF_VALUE_ARRAY) return false;
 
-    ds4_cursor c = cursor_at(m, kv->value_pos);
+    lgn2_cursor c = cursor_at(m, kv->value_pos);
     if (!cursor_u32(&c, &out->type)) return false;
     if (!cursor_u64(&c, &out->len)) return false;
     out->data_pos = c.pos;
     return true;
 }
 
-static void model_close(ds4_model *m) {
+static void model_close(lgn2_model *m) {
     if (!m) return;
     free(m->kv);
     free(m->tensors);
@@ -888,7 +888,7 @@ static void model_close(ds4_model *m) {
     m->fd = -1;
 }
 
-static void model_prefetch_cpu_mapping(const ds4_model *m) {
+static void model_prefetch_cpu_mapping(const lgn2_model *m) {
     if (!m || !m->map || m->size == 0) return;
 
     /*
@@ -902,9 +902,9 @@ static void model_prefetch_cpu_mapping(const ds4_model *m) {
 #if defined(POSIX_MADV_WILLNEED)
     const int rc = posix_madvise((void *)m->map, (size_t)m->size, POSIX_MADV_WILLNEED);
     if (rc != 0) {
-        ds4_log(stderr,
-                DS4_LOG_WARNING,
-                "ds4: warning: POSIX_MADV_WILLNEED failed for CPU model mapping: %s\n",
+        lgn2_log(stderr,
+                LGN2_LOG_WARNING,
+                "lgn2: warning: POSIX_MADV_WILLNEED failed for CPU model mapping: %s\n",
                 strerror(rc));
     }
 #else
@@ -914,73 +914,73 @@ static void model_prefetch_cpu_mapping(const ds4_model *m) {
 
 /* Read the GGUF metadata table.  Values stay in the mmap; we store offsets so
  * later validation can decode only the keys it needs. */
-static void parse_metadata(ds4_model *m, ds4_cursor *c) {
+static void parse_metadata(lgn2_model *m, lgn2_cursor *c) {
     /* n_kv comes from the header. Every entry consumes at least one byte in the
      * file, so a count larger than the bytes remaining cannot be real; reject it
      * before calloc so a tiny file can't request an enormous allocation. */
-    if (m->n_kv > c->size - c->pos) ds4_die("GGUF metadata count exceeds file size");
+    if (m->n_kv > c->size - c->pos) lgn2_die("GGUF metadata count exceeds file size");
     m->kv = calloc((size_t)m->n_kv, sizeof(m->kv[0]));
-    if (!m->kv) ds4_die("out of memory while allocating metadata table");
+    if (!m->kv) lgn2_die("out of memory while allocating metadata table");
 
     m->alignment = 32;
 
     for (uint64_t i = 0; i < m->n_kv; i++) {
-        ds4_kv *kv = &m->kv[i];
+        lgn2_kv *kv = &m->kv[i];
 
-        if (!cursor_string(c, &kv->key)) ds4_die(c->error);
-        if (!cursor_u32(c, &kv->type)) ds4_die(c->error);
+        if (!cursor_string(c, &kv->key)) lgn2_die(c->error);
+        if (!cursor_u32(c, &kv->type)) lgn2_die(c->error);
 
         kv->value_pos = c->pos;
 
-        if (ds4_streq(kv->key, "general.alignment") &&
+        if (lgn2_streq(kv->key, "general.alignment") &&
             kv->type == GGUF_VALUE_UINT32)
         {
-            ds4_cursor tmp = cursor_at(m, kv->value_pos);
+            lgn2_cursor tmp = cursor_at(m, kv->value_pos);
             uint32_t alignment;
             if (cursor_u32(&tmp, &alignment) && alignment != 0) {
                 m->alignment = alignment;
             }
         }
 
-        if (!skip_value(c, kv->type, 0)) ds4_die(c->error);
+        if (!skip_value(c, kv->type, 0)) lgn2_die(c->error);
     }
 }
 
 /* Read the tensor directory and convert relative GGUF offsets to absolute
  * mmap offsets.  Tensor bytes are still never copied here. */
-static void parse_tensors(ds4_model *m, ds4_cursor *c) {
+static void parse_tensors(lgn2_model *m, lgn2_cursor *c) {
     /* As in parse_metadata: each tensor directory entry needs at least one byte
      * in the file, so reject a count larger than the bytes remaining before the
      * allocation. */
-    if (m->n_tensors > c->size - c->pos) ds4_die("GGUF tensor count exceeds file size");
+    if (m->n_tensors > c->size - c->pos) lgn2_die("GGUF tensor count exceeds file size");
     m->tensors = calloc((size_t)m->n_tensors, sizeof(m->tensors[0]));
-    if (!m->tensors) ds4_die("out of memory while allocating tensor table");
+    if (!m->tensors) lgn2_die("out of memory while allocating tensor table");
 
     for (uint64_t i = 0; i < m->n_tensors; i++) {
-        ds4_tensor *t = &m->tensors[i];
+        lgn2_tensor *t = &m->tensors[i];
 
-        if (!cursor_string(c, &t->name)) ds4_die(c->error);
-        if (!cursor_u32(c, &t->ndim)) ds4_die(c->error);
-        if (t->ndim == 0 || t->ndim > DS4_MAX_DIMS) {
-            ds4_die("tensor has an unsupported number of dimensions");
+        if (!cursor_string(c, &t->name)) lgn2_die(c->error);
+        if (!cursor_u32(c, &t->ndim)) lgn2_die(c->error);
+        if (t->ndim == 0 || t->ndim > LGN2_MAX_DIMS) {
+            lgn2_die("tensor has an unsupported number of dimensions");
         }
 
         t->elements = 1;
         for (uint32_t d = 0; d < t->ndim; d++) {
-            if (!cursor_u64(c, &t->dim[d])) ds4_die(c->error);
+            if (!cursor_u64(c, &t->dim[d])) lgn2_die(c->error);
             if (t->dim[d] != 0 && t->elements > UINT64_MAX / t->dim[d]) {
-                ds4_die("tensor element count overflow");
+                lgn2_die("tensor element count overflow");
             }
             t->elements *= t->dim[d];
         }
 
-        if (!cursor_u32(c, &t->type)) ds4_die(c->error);
-        if (!cursor_u64(c, &t->rel_offset)) ds4_die(c->error);
+        if (!cursor_u32(c, &t->type)) lgn2_die(c->error);
+        if (!cursor_u64(c, &t->rel_offset)) lgn2_die(c->error);
 
         if (!tensor_nbytes(t->type, t->elements, &t->bytes)) {
-            ds4_log(stderr,
-                DS4_LOG_WARNING,
-                "ds4: warning: tensor %.*s has unsupported GGUF type %u\n",
+            lgn2_log(stderr,
+                LGN2_LOG_WARNING,
+                "lgn2: warning: tensor %.*s has unsupported GGUF type %u\n",
                 (int)t->name.len, t->name.ptr, t->type);
         }
     }
@@ -988,15 +988,15 @@ static void parse_tensors(ds4_model *m, ds4_cursor *c) {
     m->tensor_data_pos = align_up(c->pos, m->alignment);
 
     for (uint64_t i = 0; i < m->n_tensors; i++) {
-        ds4_tensor *t = &m->tensors[i];
+        lgn2_tensor *t = &m->tensors[i];
         if (t->rel_offset > UINT64_MAX - m->tensor_data_pos) {
-            ds4_die("tensor offset overflow");
+            lgn2_die("tensor offset overflow");
         }
         t->abs_offset = m->tensor_data_pos + t->rel_offset;
         if (t->bytes != 0 &&
             (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset))
         {
-            ds4_die("tensor points outside GGUF file");
+            lgn2_die("tensor points outside GGUF file");
         }
         if (t->bytes > m->max_tensor_bytes) {
             m->max_tensor_bytes = t->bytes;
@@ -1008,17 +1008,17 @@ static void parse_tensors(ds4_model *m, ds4_cursor *c) {
  * MTLBuffers; tokenizer/host-only callers use a private read-only mapping.
  * They pass prefetch_cpu=false so inspecting tokens never walks the huge tensor
  * payload. */
-static void model_open(ds4_model *m, const char *path, bool metal_mapping,
+static void model_open(lgn2_model *m, const char *path, bool metal_mapping,
                        bool prefetch_cpu) {
     memset(m, 0, sizeof(*m));
     m->fd = -1;
 
     int fd = open(path, O_RDONLY);
-    if (fd == -1) ds4_die_errno("cannot open model", path);
+    if (fd == -1) lgn2_die_errno("cannot open model", path);
 
     struct stat st;
-    if (fstat(fd, &st) == -1) ds4_die_errno("cannot stat model", path);
-    if (st.st_size < 32) ds4_die("model file is too small to be GGUF");
+    if (fstat(fd, &st) == -1) lgn2_die_errno("cannot stat model", path);
+    if (st.st_size < 32) lgn2_die("model file is too small to be GGUF");
 
     /* Metal wraps slices of this mapping as no-copy MTLBuffers, so the Metal
      * path keeps the file-backed shared mapping. Host-only readers use a private
@@ -1026,21 +1026,21 @@ static void model_open(ds4_model *m, const char *path, bool metal_mapping,
      * the Darwin VM map-count path observed with very large shared mappings. */
     const int mmap_flags = metal_mapping ? MAP_SHARED : MAP_PRIVATE;
     void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, mmap_flags, fd, 0);
-    if (map == MAP_FAILED) ds4_die_errno("cannot mmap model", path);
+    if (map == MAP_FAILED) lgn2_die_errno("cannot mmap model", path);
 
     m->fd = fd;
     m->map = map;
     m->size = (uint64_t)st.st_size;
 
-    ds4_cursor c = cursor_at(m, 0);
+    lgn2_cursor c = cursor_at(m, 0);
     uint32_t magic;
-    if (!cursor_u32(&c, &magic)) ds4_die(c.error);
-    if (magic != DS4_GGUF_MAGIC) ds4_die("model is not a GGUF file");
-    if (!cursor_u32(&c, &m->version)) ds4_die(c.error);
-    if (!cursor_u64(&c, &m->n_tensors)) ds4_die(c.error);
-    if (!cursor_u64(&c, &m->n_kv)) ds4_die(c.error);
+    if (!cursor_u32(&c, &magic)) lgn2_die(c.error);
+    if (magic != LGN2_GGUF_MAGIC) lgn2_die("model is not a GGUF file");
+    if (!cursor_u32(&c, &m->version)) lgn2_die(c.error);
+    if (!cursor_u64(&c, &m->n_tensors)) lgn2_die(c.error);
+    if (!cursor_u64(&c, &m->n_kv)) lgn2_die(c.error);
 
-    if (m->version != 3) ds4_die("only GGUF v3 is supported");
+    if (m->version != 3) lgn2_die("only GGUF v3 is supported");
 
     parse_metadata(m, &c);
     parse_tensors(m, &c);
@@ -1054,15 +1054,15 @@ static void print_size(FILE *out, uint64_t bytes) {
 }
 
 typedef enum {
-    DS4_SUPPORT_NONE = 0,
-    DS4_SUPPORT_DFLASH,
-} ds4_support_kind;
+    LGN2_SUPPORT_NONE = 0,
+    LGN2_SUPPORT_DFLASH,
+} lgn2_support_kind;
 
-static void model_summary_to(const ds4_model *m, FILE *out) {
+static void model_summary_to(const lgn2_model *m, FILE *out) {
     if (!m || !out) return;
 
-    ds4_str name = {0};
-    ds4_str arch = {0};
+    lgn2_str name = {0};
+    lgn2_str arch = {0};
     uint32_t layers = 0;
     uint64_t ctx_train = 0;
     uint32_t n_head = 0;
@@ -1090,7 +1090,7 @@ static void model_summary_to(const ds4_model *m, FILE *out) {
         n_swa = laguna.n_swa;
         n_expert = laguna.n_expert;
         n_expert_used = laguna.n_expert_used;
-    } else if (ds4_streq(arch, "dflash")) {
+    } else if (lgn2_streq(arch, "dflash")) {
         /* DFlash support models are summarized from their stable metadata;
          * they are not target Laguna profiles and must not borrow its shape. */
         model_get_u32(m, "dflash.block_count", &layers);
@@ -1146,12 +1146,12 @@ static void model_summary_to(const ds4_model *m, FILE *out) {
 
 }
 
-static void model_summary(const ds4_model *m) {
+static void model_summary(const lgn2_model *m) {
     model_summary_to(m, stdout);
 }
 
-#ifdef DS4_TEST_HOOKS
-bool ds4_test_model_summary(const struct ds4_model *model, FILE *out) {
+#ifdef LGN2_TEST_HOOKS
+bool lgn2_test_model_summary(const struct lgn2_model *model, FILE *out) {
     if (!model || !out) return false;
     model_summary_to(model, out);
     return ferror(out) == 0;
@@ -1159,33 +1159,33 @@ bool ds4_test_model_summary(const struct ds4_model *model, FILE *out) {
 #endif
 
 
-static const char *support_kind_name(ds4_support_kind kind) {
+static const char *support_kind_name(lgn2_support_kind kind) {
     switch (kind) {
-    case DS4_SUPPORT_DFLASH:     return "DFlash";
-    case DS4_SUPPORT_NONE:       return "none";
+    case LGN2_SUPPORT_DFLASH:     return "DFlash";
+    case LGN2_SUPPORT_NONE:       return "none";
     }
     return "unknown";
 }
 
-static ds4_support_kind support_model_detect(
-        const ds4_model *m,
+static lgn2_support_kind support_model_detect(
+        const lgn2_model *m,
         uint32_t        *stages_out) {
     if (stages_out) *stages_out = 0;
-    if (!m) return DS4_SUPPORT_NONE;
+    if (!m) return LGN2_SUPPORT_NONE;
 
-    ds4_str arch = {0};
+    lgn2_str arch = {0};
     if (model_get_string(m, "general.architecture", &arch) &&
-        ds4_streq(arch, "dflash")) {
-        return DS4_SUPPORT_DFLASH;
+        lgn2_streq(arch, "dflash")) {
+        return LGN2_SUPPORT_DFLASH;
     }
 
     /* Keep the detector fail-closed so a non-DFlash support file cannot be
      * loaded into an inert engine field. */
-    return DS4_SUPPORT_NONE;
+    return LGN2_SUPPORT_NONE;
 }
 
 /* Optional startup pass that touches tensor pages before timing generation. */
-static void model_warm_weights(const ds4_model *m) {
+static void model_warm_weights(const lgn2_model *m) {
     const uint64_t start = m->tensor_data_pos;
     const uint64_t end = m->size;
     if (start >= end) return;
@@ -1195,7 +1195,7 @@ static void model_warm_weights(const ds4_model *m) {
     volatile uint64_t checksum = 0;
     const double t0 = now_sec();
 
-    fprintf(stderr, "ds4: warming mapped tensor pages: %.2f GiB\n",
+    fprintf(stderr, "lgn2: warming mapped tensor pages: %.2f GiB\n",
             (double)(end - start) / (1024.0 * 1024.0 * 1024.0));
 
 #if defined(POSIX_MADV_WILLNEED)
@@ -1208,7 +1208,7 @@ static void model_warm_weights(const ds4_model *m) {
     checksum += p[end - 1];
 
     const double t1 = now_sec();
-    fprintf(stderr, "ds4: warmed tensor pages in %.3fs (checksum=%llu)\n",
+    fprintf(stderr, "lgn2: warmed tensor pages in %.3fs (checksum=%llu)\n",
             t1 - t0, (unsigned long long)checksum);
 }
 
@@ -1224,48 +1224,48 @@ static void model_warm_weights(const ds4_model *m) {
  * Fixed Weight Binding and Model Validation.
  * =========================================================================
  *
- * The GGUF tensor directory is converted into a DS4-specific pointer table.
+ * The GGUF tensor directory is converted into a LGN2-specific pointer table.
  * After this section, the rest of the program addresses tensors by semantic
  * fields such as layer->attn_q or layer->ffn_gate_exps rather than by string
  * lookup.  Shape validation is intentionally strict.
  */
 
-static DS4_MAYBE_UNUSED uint64_t routed_expert_block_bytes(uint32_t type) {
+static LGN2_MAYBE_UNUSED uint64_t routed_expert_block_bytes(uint32_t type) {
     switch (type) {
-    case DS4_TENSOR_Q8_0:    return 34;
-    case DS4_TENSOR_IQ2_XXS: return sizeof(block_iq2_xxs);
-    case DS4_TENSOR_Q2_K:    return sizeof(block_q2_K);
-    case DS4_TENSOR_Q3_K:    return sizeof(block_q3_K);
-    case DS4_TENSOR_Q4_K:    return sizeof(block_q4_K);
-    case DS4_TENSOR_Q5_K:    return sizeof(block_q5_K);
-    case DS4_TENSOR_Q6_K:    return sizeof(block_q6_K);
-    case DS4_TENSOR_MXFP4:   return sizeof(block_mxfp4);
-    default:                 ds4_die("unsupported routed expert tensor type");
+    case LGN2_TENSOR_Q8_0:    return 34;
+    case LGN2_TENSOR_IQ2_XXS: return sizeof(block_iq2_xxs);
+    case LGN2_TENSOR_Q2_K:    return sizeof(block_q2_K);
+    case LGN2_TENSOR_Q3_K:    return sizeof(block_q3_K);
+    case LGN2_TENSOR_Q4_K:    return sizeof(block_q4_K);
+    case LGN2_TENSOR_Q5_K:    return sizeof(block_q5_K);
+    case LGN2_TENSOR_Q6_K:    return sizeof(block_q6_K);
+    case LGN2_TENSOR_MXFP4:   return sizeof(block_mxfp4);
+    default:                 lgn2_die("unsupported routed expert tensor type");
     }
     return 0;
 }
 
-static DS4_MAYBE_UNUSED uint64_t routed_expert_row_bytes(const ds4_tensor *t) {
+static LGN2_MAYBE_UNUSED uint64_t routed_expert_row_bytes(const lgn2_tensor *t) {
     const gguf_type_info *info = tensor_type(t->type);
-    if (!info || info->block_elems == 0) ds4_die("unsupported routed expert tensor type");
-    if ((t->dim[0] % info->block_elems) != 0) ds4_die("routed expert row is not quant block aligned");
+    if (!info || info->block_elems == 0) lgn2_die("unsupported routed expert tensor type");
+    if ((t->dim[0] % info->block_elems) != 0) lgn2_die("routed expert row is not quant block aligned");
     return (t->dim[0] / info->block_elems) * routed_expert_block_bytes(t->type);
 }
 
-static uint64_t ds4_add_sat_u64(uint64_t a, uint64_t b) {
+static uint64_t lgn2_add_sat_u64(uint64_t a, uint64_t b) {
     return a > UINT64_MAX - b ? UINT64_MAX : a + b;
 }
 
-static double ds4_bytes_to_gib(uint64_t bytes) {
+static double lgn2_bytes_to_gib(uint64_t bytes) {
     return (double)bytes / 1073741824.0;
 }
 
-static bool weights_have_output_head(const ds4_weights *w) {
+static bool weights_have_output_head(const lgn2_weights *w) {
     return lgn_weights_have_output_head(w);
 }
 
 static void weights_validate_laguna_layout(
-        const ds4_weights *w,
+        const lgn2_weights *w,
         uint32_t           layer_start,
         uint32_t           layer_end,
         bool               require_token_embd,
@@ -1278,7 +1278,7 @@ static void weights_validate_laguna_layout(
 }
 
 static void weights_validate_layout(
-        const ds4_weights *w,
+        const lgn2_weights *w,
         uint32_t           layer_start,
         uint32_t           layer_end,
         bool               require_token_embd,
@@ -1290,38 +1290,38 @@ static void weights_validate_layout(
                                    require_output);
 }
 
-static void config_validate_laguna_model(const ds4_model *m) {
-    g_ds4_shape = *lgn_model_shape();
+static void config_validate_laguna_model(const lgn2_model *m) {
+    g_lgn2_shape = *lgn_model_shape();
     lgn_model_validate_config(m);
 }
 
 /* Architecture admission is deliberately side-effect free.  Keep this
  * predicate ahead of every family validator: those validators select global
  * shape state, and a non-Laguna GGUF must never reach the legacy branches. */
-static void config_require_laguna_architecture(const ds4_model *m) {
+static void config_require_laguna_architecture(const lgn2_model *m) {
     lgn_model_require_laguna_architecture(m);
 }
 
-static void config_validate_model(const ds4_model *m) {
+static void config_validate_model(const lgn2_model *m) {
     /* Fail closed before any legacy model-family selection or shape mutation. */
     config_require_laguna_architecture(m);
     config_validate_laguna_model(m);
 }
 
-/* Bind tensor names once into the fixed DS4 layer layout.  This is the point
+/* Bind tensor names once into the fixed LGN2 layer layout.  This is the point
  * where stringly GGUF metadata becomes direct model-specific pointers. */
 static void weights_bind(
-        ds4_weights     *w,
-        const ds4_model *m) {
+        lgn2_weights     *w,
+        const lgn2_model *m) {
     lgn_weights_bind(w, m);
-    weights_validate_layout(w, 0, DS4_N_LAYER - 1u, true, true);
+    weights_validate_layout(w, 0, LGN2_N_LAYER - 1u, true, true);
 }
 
-static void weights_free(ds4_weights *w) {
+static void weights_free(lgn2_weights *w) {
     memset(w, 0, sizeof(*w));
 }
 
-typedef struct ds4_vocab ds4_vocab;
+typedef struct lgn2_vocab lgn2_vocab;
 
 /* =========================================================================
  * Tokenizer and Chat Prompt Encoding.
@@ -1335,7 +1335,7 @@ typedef struct ds4_vocab ds4_vocab;
  */
 
 typedef struct {
-    ds4_str key;
+    lgn2_str key;
     int value;
     bool used;
 } str_i32_entry;
@@ -1363,12 +1363,12 @@ static void table_free(str_i32_table *t) {
     memset(t, 0, sizeof(*t));
 }
 
-static void table_put(str_i32_table *t, ds4_str key, int value) {
+static void table_put(str_i32_table *t, lgn2_str key, int value) {
     uint64_t mask = t->cap - 1;
     uint64_t i = hash_bytes(key.ptr, key.len) & mask;
 
     while (t->entry[i].used) {
-        if (ds4_str_eq(t->entry[i].key, key)) {
+        if (lgn2_str_eq(t->entry[i].key, key)) {
             t->entry[i].value = value;
             return;
         }
@@ -1388,7 +1388,7 @@ static bool table_get(const str_i32_table *t, const char *ptr, uint64_t len, int
     uint64_t i = hash_bytes(ptr, len) & mask;
 
     while (t->entry[i].used) {
-        ds4_str key = t->entry[i].key;
+        lgn2_str key = t->entry[i].key;
         if (key.len == len && memcmp(key.ptr, ptr, len) == 0) {
             *value = t->entry[i].value;
             return true;
@@ -1411,20 +1411,20 @@ static void token_vec_free(token_vec *tv) {
     memset(tv, 0, sizeof(*tv));
 }
 
-void ds4_tokens_push(ds4_tokens *tv, int token) {
+void lgn2_tokens_push(lgn2_tokens *tv, int token) {
     token_vec_push(tv, token);
 }
 
-void ds4_tokens_free(ds4_tokens *tv) {
+void lgn2_tokens_free(lgn2_tokens *tv) {
     token_vec_free(tv);
 }
 
-void ds4_tokens_copy(ds4_tokens *dst, const ds4_tokens *src) {
+void lgn2_tokens_copy(lgn2_tokens *dst, const lgn2_tokens *src) {
     dst->len = 0;
     for (int i = 0; i < src->len; i++) token_vec_push(dst, src->v[i]);
 }
 
-bool ds4_tokens_starts_with(const ds4_tokens *tokens, const ds4_tokens *prefix) {
+bool lgn2_tokens_starts_with(const lgn2_tokens *tokens, const lgn2_tokens *prefix) {
     if (prefix->len > tokens->len) return false;
     for (int i = 0; i < prefix->len; i++) {
         if (tokens->v[i] != prefix->v[i]) return false;
@@ -1432,8 +1432,8 @@ bool ds4_tokens_starts_with(const ds4_tokens *tokens, const ds4_tokens *prefix) 
     return true;
 }
 
-struct ds4_vocab {
-    ds4_str *token;
+struct lgn2_vocab {
+    lgn2_str *token;
     int n_vocab;
     int bos_id;
     int eos_id;
@@ -1458,15 +1458,15 @@ struct ds4_vocab {
     str_i32_table merge_rank;
 };
 
-struct ds4_engine {
-    ds4_model model;
-    ds4_model dflash_model;
-    ds4_vocab vocab;
-    ds4_weights weights;
-    ds4_dflash_weights dflash_weights;
+struct lgn2_engine {
+    lgn2_model model;
+    lgn2_model dflash_model;
+    lgn2_vocab vocab;
+    lgn2_weights weights;
+    lgn2_dflash_weights dflash_weights;
     void *dflash_f16_map;
     uint64_t dflash_f16_map_size;
-    ds4_support_kind support_kind;
+    lgn2_support_kind support_kind;
     uint32_t support_stages;
     int dflash_draft_tokens;
     float dflash_p_min;
@@ -1479,35 +1479,35 @@ struct ds4_engine {
 
 };
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 typedef enum {
-    DS4_ENGINE_CLOSE_BEGIN,
-    DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN,
-    DS4_ENGINE_CLOSE_GPU_DRAINED,
-    DS4_ENGINE_CLOSE_GPU_CLEANUP_BEGIN,
-    DS4_ENGINE_CLOSE_GPU_CLEANED,
-    DS4_ENGINE_CLOSE_CPU_WORKERS_STOPPED,
-    DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED,
-    DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED,
-    DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED,
-    DS4_ENGINE_CLOSE_LOCK_RELEASED,
-    DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING,
-} ds4_engine_close_phase;
+    LGN2_ENGINE_CLOSE_BEGIN,
+    LGN2_ENGINE_CLOSE_GPU_DRAIN_BEGIN,
+    LGN2_ENGINE_CLOSE_GPU_DRAINED,
+    LGN2_ENGINE_CLOSE_GPU_CLEANUP_BEGIN,
+    LGN2_ENGINE_CLOSE_GPU_CLEANED,
+    LGN2_ENGINE_CLOSE_CPU_WORKERS_STOPPED,
+    LGN2_ENGINE_CLOSE_HOST_ALIASES_CLEARED,
+    LGN2_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED,
+    LGN2_ENGINE_CLOSE_MODEL_MAPS_CLOSED,
+    LGN2_ENGINE_CLOSE_LOCK_RELEASED,
+    LGN2_ENGINE_CLOSE_ALLOCATIONS_RELEASING,
+} lgn2_engine_close_phase;
 
 typedef struct {
-    ds4_engine *engine;
-    ds4_engine_close_phase phases[16];
+    lgn2_engine *engine;
+    lgn2_engine_close_phase phases[16];
     size_t phase_count;
     bool maps_live_through_gpu;
     bool aliases_cleared_before_unmap;
     bool dflash_shadow_unmapped_first;
     bool model_maps_unmapped;
     bool gpu_drain_reported_failure;
-} ds4_test_engine_close_trace;
+} lgn2_test_engine_close_trace;
 
-static ds4_test_engine_close_trace *g_ds4_test_engine_close_trace;
+static lgn2_test_engine_close_trace *g_lgn2_test_engine_close_trace;
 
-static bool ds4_test_engine_bytes_zero(const void *ptr, size_t size) {
+static bool lgn2_test_engine_bytes_zero(const void *ptr, size_t size) {
     const unsigned char *bytes = ptr;
     for (size_t i = 0; i < size; i++) {
         if (bytes[i] != 0) return false;
@@ -1515,64 +1515,64 @@ static bool ds4_test_engine_bytes_zero(const void *ptr, size_t size) {
     return true;
 }
 
-static void ds4_engine_close_note(ds4_engine *e,
-                                  ds4_engine_close_phase phase) {
-    ds4_test_engine_close_trace *trace = g_ds4_test_engine_close_trace;
+static void lgn2_engine_close_note(lgn2_engine *e,
+                                  lgn2_engine_close_phase phase) {
+    lgn2_test_engine_close_trace *trace = g_lgn2_test_engine_close_trace;
     if (!trace || trace->engine != e) return;
     if (trace->phase_count < sizeof(trace->phases) / sizeof(trace->phases[0])) {
         trace->phases[trace->phase_count++] = phase;
     }
 
-    if (phase >= DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN &&
-        phase <= DS4_ENGINE_CLOSE_GPU_CLEANED) {
+    if (phase >= LGN2_ENGINE_CLOSE_GPU_DRAIN_BEGIN &&
+        phase <= LGN2_ENGINE_CLOSE_GPU_CLEANED) {
         trace->maps_live_through_gpu =
             trace->maps_live_through_gpu &&
             e->model.map != NULL &&
             e->dflash_model.map != NULL && e->dflash_f16_map != NULL;
-    } else if (phase == DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED) {
+    } else if (phase == LGN2_ENGINE_CLOSE_HOST_ALIASES_CLEARED) {
         trace->aliases_cleared_before_unmap =
             e->model.map != NULL &&
             e->dflash_model.map != NULL && e->dflash_f16_map != NULL &&
-            ds4_test_engine_bytes_zero(&e->weights, sizeof(e->weights)) &&
-            ds4_test_engine_bytes_zero(&e->dflash_weights,
+            lgn2_test_engine_bytes_zero(&e->weights, sizeof(e->weights)) &&
+            lgn2_test_engine_bytes_zero(&e->dflash_weights,
                                        sizeof(e->dflash_weights));
-    } else if (phase == DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED) {
+    } else if (phase == LGN2_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED) {
         trace->dflash_shadow_unmapped_first =
             e->dflash_f16_map == NULL &&
             e->dflash_f16_map_size == 0 &&
             e->model.map != NULL &&
             e->dflash_model.map != NULL;
-    } else if (phase == DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED) {
+    } else if (phase == LGN2_ENGINE_CLOSE_MODEL_MAPS_CLOSED) {
         trace->model_maps_unmapped =
             e->model.map == NULL &&
             e->dflash_model.map == NULL;
     }
 }
 
-#if !defined(DS4_NO_GPU)
-static void ds4_engine_close_note_drain_result(ds4_engine *e, bool drained) {
-    ds4_test_engine_close_trace *trace = g_ds4_test_engine_close_trace;
+#if !defined(LGN2_NO_GPU)
+static void lgn2_engine_close_note_drain_result(lgn2_engine *e, bool drained) {
+    lgn2_test_engine_close_trace *trace = g_lgn2_test_engine_close_trace;
     if (!trace || trace->engine != e) return;
     trace->gpu_drain_reported_failure = !drained;
 }
 #else
-#define ds4_engine_close_note_drain_result(engine, drained) \
+#define lgn2_engine_close_note_drain_result(engine, drained) \
     ((void)(engine), (void)(drained))
 #endif
 #else
-#define ds4_engine_close_note(engine, phase) ((void)(engine))
-#define ds4_engine_close_note_drain_result(engine, drained) \
+#define lgn2_engine_close_note(engine, phase) ((void)(engine))
+#define lgn2_engine_close_note_drain_result(engine, drained) \
     ((void)(engine), (void)(drained))
 #endif
 
 #if defined(__APPLE__)
 static bool laguna_metal_router_simd_topk_preflight(
-        const ds4_engine *engine,
+        const lgn2_engine *engine,
         const char       *operation,
         char             *err,
         size_t            errlen);
 static bool laguna_metal_swa_gqa9_preflight(
-        const ds4_engine *engine,
+        const lgn2_engine *engine,
         const char       *operation,
         char             *err,
         size_t            errlen);
@@ -1581,44 +1581,44 @@ static void laguna_metal_router_simd_topk_trace_reset(void);
 static void laguna_metal_router_simd_topk_trace_report(const char *operation);
 #endif
 
-static void ds4_engine_print_startup_memory(
-        const ds4_engine *e,
+static void lgn2_engine_print_startup_memory(
+        const lgn2_engine *e,
         int               ctx_size) {
     if (!e || ctx_size <= 0) return;
 
-    const ds4_context_memory mem = ds4_context_memory_estimate(ctx_size);
+    const lgn2_context_memory mem = lgn2_context_memory_estimate(ctx_size);
     const uint64_t kv_bytes =
-        ds4_add_sat_u64(mem.raw_bytes, mem.compressed_bytes);
+        lgn2_add_sat_u64(mem.raw_bytes, mem.compressed_bytes);
     const uint64_t support_model_bytes =
         e->dflash_ready &&
         e->dflash_model.size > e->dflash_model.tensor_data_pos ?
             e->dflash_model.size - e->dflash_model.tensor_data_pos : 0;
     uint64_t total = kv_bytes;
-    total = ds4_add_sat_u64(total, mem.scratch_bytes);
-    total = ds4_add_sat_u64(total, e->startup_model_span_bytes);
-    total = ds4_add_sat_u64(total, support_model_bytes);
+    total = lgn2_add_sat_u64(total, mem.scratch_bytes);
+    total = lgn2_add_sat_u64(total, e->startup_model_span_bytes);
+    total = lgn2_add_sat_u64(total, support_model_bytes);
 
-    const bool color = ds4_log_is_tty(stderr);
+    const bool color = lgn2_log_is_tty(stderr);
     const char *green = color ? "\x1b[32m" : "";
     const char *bright_green = color ? "\x1b[1;32m" : "";
     const char *reset = color ? "\x1b[0m" : "";
     fprintf(stderr,
-            "%sds4: memory: KV %.2f GiB (raw %.2f + compressed %.2f) "
+            "%slgn2: memory: KV %.2f GiB (raw %.2f + compressed %.2f) "
             "+ buffers %.2f GiB + resident model %.2f GiB",
             green,
-            ds4_bytes_to_gib(kv_bytes),
-            ds4_bytes_to_gib(mem.raw_bytes),
-            ds4_bytes_to_gib(mem.compressed_bytes),
-            ds4_bytes_to_gib(mem.scratch_bytes),
-            ds4_bytes_to_gib(e->startup_model_span_bytes));
+            lgn2_bytes_to_gib(kv_bytes),
+            lgn2_bytes_to_gib(mem.raw_bytes),
+            lgn2_bytes_to_gib(mem.compressed_bytes),
+            lgn2_bytes_to_gib(mem.scratch_bytes),
+            lgn2_bytes_to_gib(e->startup_model_span_bytes));
     if (support_model_bytes != 0) {
         fprintf(stderr, " + support model %.2f GiB",
-                ds4_bytes_to_gib(support_model_bytes));
+                lgn2_bytes_to_gib(support_model_bytes));
     }
     fprintf(stderr, " = %s%.2f GiB planned%s\n",
-            bright_green, ds4_bytes_to_gib(total), reset);
+            bright_green, lgn2_bytes_to_gib(total), reset);
     fprintf(stderr,
-            "%sds4: memory detail: ctx=%d prefill_cap=%u raw_kv_rows=%u "
+            "%slgn2: memory detail: ctx=%d prefill_cap=%u raw_kv_rows=%u "
             "compressed_kv_rows=%u backend=metal%s\n",
             green, ctx_size, mem.prefill_cap, mem.raw_cap, mem.comp_cap,
             reset);
@@ -1661,7 +1661,7 @@ static uint32_t gpt2_byte_to_codepoint(uint8_t b) {
 
 /* GPT-2 byte-level BPE first maps raw bytes to printable Unicode codepoints
  * so merges can operate on UTF-8 strings without losing byte identity. */
-static char *byte_encode(ds4_str in, uint64_t *out_len) {
+static char *byte_encode(lgn2_str in, uint64_t *out_len) {
     char *out = xmalloc((size_t)in.len * 4 + 1);
     char *p = out;
 
@@ -1695,7 +1695,7 @@ static owned_str owned_copy(const char *ptr, uint64_t len) {
 }
 
 /* Look up the merge rank for two adjacent BPE symbols. */
-static int bpe_rank(const ds4_vocab *vocab, const owned_str *a, const owned_str *b) {
+static int bpe_rank(const lgn2_vocab *vocab, const owned_str *a, const owned_str *b) {
     uint64_t len = a->len + 1 + b->len;
     char stack[512];
     char *buf = len <= sizeof(stack) ? stack : xmalloc((size_t)len);
@@ -1712,7 +1712,7 @@ static int bpe_rank(const ds4_vocab *vocab, const owned_str *a, const owned_str 
 }
 
 /* Apply byte-level BPE to one regex-like pre-tokenized piece and emit token ids. */
-static void bpe_emit_piece(const ds4_vocab *vocab, ds4_str raw_piece, token_vec *out) {
+static void bpe_emit_piece(const lgn2_vocab *vocab, lgn2_str raw_piece, token_vec *out) {
     uint64_t encoded_len = 0;
     char *encoded = byte_encode(raw_piece, &encoded_len);
 
@@ -1780,7 +1780,7 @@ static void bpe_emit_piece(const ds4_vocab *vocab, ds4_str raw_piece, token_vec 
 }
 
 typedef struct {
-    const ds4_vocab *vocab;
+    const lgn2_vocab *vocab;
     token_vec       *out;
 } bpe_emit_context;
 
@@ -1789,22 +1789,22 @@ static bool bpe_emit_lgn_piece(const char *piece,
                                void       *userdata) {
     bpe_emit_context *context = userdata;
     bpe_emit_piece(context->vocab,
-                   (ds4_str){ piece, (uint64_t)piece_len },
+                   (lgn2_str){ piece, (uint64_t)piece_len },
                    context->out);
     return true;
 }
 
-static void bpe_tokenize_text(const ds4_vocab *vocab, const char *text, token_vec *out) {
+static void bpe_tokenize_text(const lgn2_vocab *vocab, const char *text, token_vec *out) {
     bpe_emit_context context = { vocab, out };
     if (!lgn_bpe_pretokenize(text, bpe_emit_lgn_piece, &context)) {
-        ds4_die("Laguna BPE pre-tokenizer rejected its input");
+        lgn2_die("Laguna BPE pre-tokenizer rejected its input");
     }
 }
 
-static int vocab_lookup(const ds4_vocab *vocab, const char *text) {
+static int vocab_lookup(const lgn2_vocab *vocab, const char *text) {
     int token = -1;
     if (!table_get(&vocab->token_to_id, text, strlen(text), &token)) {
-        fprintf(stderr, "ds4: required tokenizer token is missing: %s\n", text);
+        fprintf(stderr, "lgn2: required tokenizer token is missing: %s\n", text);
         exit(1);
     }
     return token;
@@ -1812,42 +1812,42 @@ static int vocab_lookup(const ds4_vocab *vocab, const char *text) {
 
 /* Load token strings, special token ids, and merge ranks from GGUF metadata. */
 
-static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
+static void vocab_load(lgn2_vocab *vocab, const lgn2_model *model) {
     memset(vocab, 0, sizeof(*vocab));
 
-    ds4_array_ref tokens;
-    ds4_array_ref merges;
+    lgn2_array_ref tokens;
+    lgn2_array_ref merges;
     if (!model_get_array(model, "tokenizer.ggml.tokens", &tokens) ||
         tokens.type != GGUF_VALUE_STRING ||
         tokens.len > INT32_MAX) {
-        ds4_die("GGUF tokenizer token table is missing or invalid");
+        lgn2_die("GGUF tokenizer token table is missing or invalid");
     }
     if (!model_get_array(model, "tokenizer.ggml.merges", &merges) ||
         merges.type != GGUF_VALUE_STRING) {
-        ds4_die("GGUF tokenizer merge table is missing or invalid");
+        lgn2_die("GGUF tokenizer merge table is missing or invalid");
     }
 
     vocab->n_vocab = (int)tokens.len;
     vocab->token = xcalloc((size_t)vocab->n_vocab, sizeof(vocab->token[0]));
     table_init(&vocab->token_to_id, tokens.len);
 
-    ds4_cursor c = cursor_at(model, tokens.data_pos);
+    lgn2_cursor c = cursor_at(model, tokens.data_pos);
     for (int i = 0; i < vocab->n_vocab; i++) {
-        if (!cursor_string(&c, &vocab->token[i])) ds4_die(c.error);
+        if (!cursor_string(&c, &vocab->token[i])) lgn2_die(c.error);
         table_put(&vocab->token_to_id, vocab->token[i], i);
     }
 
     table_init(&vocab->merge_rank, merges.len);
     c = cursor_at(model, merges.data_pos);
     for (uint64_t i = 0; i < merges.len; i++) {
-        ds4_str merge;
-        if (!cursor_string(&c, &merge)) ds4_die(c.error);
+        lgn2_str merge;
+        if (!cursor_string(&c, &merge)) lgn2_die(c.error);
         table_put(&vocab->merge_rank, merge, (int)i);
     }
 
     if (!model_get_token_id(model, "tokenizer.ggml.bos_token_id", &vocab->bos_id) ||
         !model_get_token_id(model, "tokenizer.ggml.eos_token_id", &vocab->eos_id)) {
-        ds4_die("Laguna tokenizer is missing BOS/EOS token metadata");
+        lgn2_die("Laguna tokenizer is missing BOS/EOS token metadata");
     }
     if (!model_get_token_id(model, "tokenizer.ggml.eot_token_id", &vocab->eot_id)) {
         vocab->eot_id = vocab_lookup(vocab, "</assistant>");
@@ -1870,25 +1870,25 @@ static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
     vocab->dsml_id = -1;
 }
 
-static void vocab_free(ds4_vocab *vocab) {
+static void vocab_free(lgn2_vocab *vocab) {
     free(vocab->token);
     table_free(&vocab->token_to_id);
     table_free(&vocab->merge_rank);
     memset(vocab, 0, sizeof(*vocab));
 }
 
-/* Build the DS4 chat prompt: BOS, optional system text, user prompt, assistant
+/* Build the LGN2 chat prompt: BOS, optional system text, user prompt, assistant
  * marker, and either <think> or </think> depending on the requested mode.  Max
  * thinking is only a prompt prefix: the model still enters through <think>. */
-static void chat_push_bos_sequence(const ds4_vocab *vocab, token_vec *out) {
+static void chat_push_bos_sequence(const lgn2_vocab *vocab, token_vec *out) {
     token_vec_push(out, vocab->bos_id);
 }
 
-static void tokenize_rendered_chat_vocab(const ds4_vocab *vocab,
+static void tokenize_rendered_chat_vocab(const lgn2_vocab *vocab,
                                          const char *text,
                                          token_vec *out);
 
-static void laguna_chat_append_wrapped(const ds4_vocab *vocab,
+static void laguna_chat_append_wrapped(const lgn2_vocab *vocab,
                                        token_vec       *out,
                                        const char      *open,
                                        const char      *content,
@@ -1899,7 +1899,7 @@ static void laguna_chat_append_wrapped(const ds4_vocab *vocab,
     const size_t close_len = strlen(close);
     if (open_len > SIZE_MAX - content_len ||
         open_len + content_len > SIZE_MAX - close_len - 2u) {
-        ds4_die("Laguna chat message is too large");
+        lgn2_die("Laguna chat message is too large");
     }
     const size_t len = open_len + content_len + close_len + 1u;
     char *rendered = xmalloc(len + 1u);
@@ -1917,16 +1917,16 @@ static void laguna_chat_append_wrapped(const ds4_vocab *vocab,
 }
 
 static void encode_chat_prompt(
-        const ds4_vocab *vocab,
+        const lgn2_vocab *vocab,
         const char      *system,
         const char      *prompt,
-        ds4_think_mode   think_mode,
+        lgn2_think_mode   think_mode,
         token_vec       *out) {
     if (vocab->bos_id < 0 ||
         vocab->assistant_id < 0 ||
         vocab->think_start_id < 0 ||
         vocab->think_end_id < 0) {
-        ds4_die("this tokenizer does not provide the Laguna chat markers; use raw prompt tokenization");
+        lgn2_die("this tokenizer does not provide the Laguna chat markers; use raw prompt tokenization");
     }
     chat_push_bos_sequence(vocab, out);
     if (system && system[0]) {
@@ -1934,15 +1934,15 @@ static void encode_chat_prompt(
     }
     laguna_chat_append_wrapped(vocab, out, "<user>", prompt, "</user>");
     token_vec_push(out, vocab->assistant_id);
-    token_vec_push(out, ds4_think_mode_enabled(think_mode) ?
+    token_vec_push(out, lgn2_think_mode_enabled(think_mode) ?
                    vocab->think_start_id : vocab->think_end_id);
 }
 
-void ds4_tokenize_text(ds4_engine *e, const char *text, ds4_tokens *out) {
+void lgn2_tokenize_text(lgn2_engine *e, const char *text, lgn2_tokens *out) {
     bpe_tokenize_text(&e->vocab, text ? text : "", out);
 }
 
-static bool special_token_at(const ds4_vocab *vocab, const char *p, int *token, size_t *len) {
+static bool special_token_at(const lgn2_vocab *vocab, const char *p, int *token, size_t *len) {
     struct special {
         const char *text;
         int token;
@@ -1985,7 +1985,7 @@ static bool special_token_at(const ds4_vocab *vocab, const char *p, int *token, 
     return false;
 }
 
-static void tokenize_span(const ds4_vocab *vocab, const char *p, size_t n, token_vec *out) {
+static void tokenize_span(const lgn2_vocab *vocab, const char *p, size_t n, token_vec *out) {
     if (!n) return;
     char *tmp = xmalloc(n + 1);
     memcpy(tmp, p, n);
@@ -1997,7 +1997,7 @@ static void tokenize_span(const ds4_vocab *vocab, const char *p, size_t n, token
 
 
 
-static void tokenize_rendered_chat_vocab(const ds4_vocab *vocab, const char *text,
+static void tokenize_rendered_chat_vocab(const lgn2_vocab *vocab, const char *text,
                                          token_vec *out) {
     if (!text) text = "";
 
@@ -2018,28 +2018,28 @@ static void tokenize_rendered_chat_vocab(const ds4_vocab *vocab, const char *tex
     tokenize_span(vocab, span, (size_t)(p - span), out);
 }
 
-void ds4_tokenize_rendered_chat(ds4_engine *e, const char *text, ds4_tokens *out) {
+void lgn2_tokenize_rendered_chat(lgn2_engine *e, const char *text, lgn2_tokens *out) {
     tokenize_rendered_chat_vocab(&e->vocab, text, out);
 }
 
-void ds4_chat_begin(ds4_engine *e, ds4_tokens *tokens) {
+void lgn2_chat_begin(lgn2_engine *e, lgn2_tokens *tokens) {
     chat_push_bos_sequence(&e->vocab, tokens);
 }
 
-void ds4_encode_chat_prompt(
-        ds4_engine *e,
+void lgn2_encode_chat_prompt(
+        lgn2_engine *e,
         const char *system,
         const char *prompt,
-        ds4_think_mode think_mode,
-        ds4_tokens *out) {
+        lgn2_think_mode think_mode,
+        lgn2_tokens *out) {
     encode_chat_prompt(&e->vocab, system, prompt ? prompt : "", think_mode, out);
 }
 
-void ds4_chat_append_max_effort_prefix(ds4_engine *e, ds4_tokens *tokens) {
-    bpe_tokenize_text(&e->vocab, DS4_REASONING_EFFORT_MAX_PREFIX, tokens);
+void lgn2_chat_append_max_effort_prefix(lgn2_engine *e, lgn2_tokens *tokens) {
+    bpe_tokenize_text(&e->vocab, LGN2_REASONING_EFFORT_MAX_PREFIX, tokens);
 }
 
-static void laguna_chat_append_tool_response(ds4_vocab *vocab,
+static void laguna_chat_append_tool_response(lgn2_vocab *vocab,
                                              token_vec *out,
                                              const char *content) {
     static const char open[] = "<tool_response>";
@@ -2051,12 +2051,12 @@ static void laguna_chat_append_tool_response(ds4_vocab *vocab,
     for (const char *p = content; *p; p++) {
         if (!strncmp(p, close, close_len)) {
             if (escaped_len > SIZE_MAX - 3u)
-                ds4_die("Laguna tool response is too large");
+                lgn2_die("Laguna tool response is too large");
             escaped_len += 3u; /* '<' becomes "&lt;". */
         }
     }
     if (escaped_len > SIZE_MAX - sizeof(open) - sizeof(close))
-        ds4_die("Laguna tool response is too large");
+        lgn2_die("Laguna tool response is too large");
 
     const size_t rendered_len =
         (sizeof(open) - 1u) + escaped_len + close_len + 1u;
@@ -2084,8 +2084,8 @@ static void laguna_chat_append_tool_response(ds4_vocab *vocab,
     free(rendered);
 }
 
-void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role, const char *content) {
-    ds4_vocab *vocab = &e->vocab;
+void lgn2_chat_append_message(lgn2_engine *e, lgn2_tokens *tokens, const char *role, const char *content) {
+    lgn2_vocab *vocab = &e->vocab;
     if (!role) role = "user";
     if (!content) content = "";
 
@@ -2108,39 +2108,39 @@ void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role
 }
 
 
-void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode think_mode) {
+void lgn2_chat_append_assistant_prefix(lgn2_engine *e, lgn2_tokens *tokens, lgn2_think_mode think_mode) {
     token_vec_push(tokens, e->vocab.assistant_id);
-    token_vec_push(tokens, ds4_think_mode_enabled(think_mode) ?
+    token_vec_push(tokens, lgn2_think_mode_enabled(think_mode) ?
                    e->vocab.think_start_id : e->vocab.think_end_id);
 }
 
-void ds4_chat_append_assistant_end(ds4_engine *e, ds4_tokens *tokens) {
+void lgn2_chat_append_assistant_end(lgn2_engine *e, lgn2_tokens *tokens) {
     if (!e || !tokens) return;
     token_vec_push(tokens, e->vocab.eot_id);
     bpe_tokenize_text(&e->vocab, "\n", tokens);
 }
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 /* Keep tokenizer/chat coverage model-free.  Every raw byte is represented by
  * its GPT-2 byte-level codepoint, while the protocol markers get named token
  * ids.  One explicit `a b` merge proves the BPE path; decoding the public
  * token output proves the wrapper text and marker boundaries. */
 enum {
-    DS4_CHAT_TEST_BOS = 256,
-    DS4_CHAT_TEST_EOS,
-    DS4_CHAT_TEST_EOT,
-    DS4_CHAT_TEST_ASSISTANT,
-    DS4_CHAT_TEST_THINK_START,
-    DS4_CHAT_TEST_THINK_END,
-    DS4_CHAT_TEST_TOOL_CALL_START,
-    DS4_CHAT_TEST_TOOL_CALL_END,
-    DS4_CHAT_TEST_DSML,
-    DS4_CHAT_TEST_MERGED_AB,
-    DS4_CHAT_TEST_VOCAB_SIZE,
+    LGN2_CHAT_TEST_BOS = 256,
+    LGN2_CHAT_TEST_EOS,
+    LGN2_CHAT_TEST_EOT,
+    LGN2_CHAT_TEST_ASSISTANT,
+    LGN2_CHAT_TEST_THINK_START,
+    LGN2_CHAT_TEST_THINK_END,
+    LGN2_CHAT_TEST_TOOL_CALL_START,
+    LGN2_CHAT_TEST_TOOL_CALL_END,
+    LGN2_CHAT_TEST_DSML,
+    LGN2_CHAT_TEST_MERGED_AB,
+    LGN2_CHAT_TEST_VOCAB_SIZE,
 };
 
-static bool ds4_test_chat_vocab_add(
-        ds4_vocab   *vocab,
+static bool lgn2_test_chat_vocab_add(
+        lgn2_vocab   *vocab,
         int          token,
         const char  *ptr,
         size_t       len) {
@@ -2148,12 +2148,12 @@ static bool ds4_test_chat_vocab_add(
     char *copy = malloc(len ? len : 1u);
     if (!copy) return false;
     if (len) memcpy(copy, ptr, len);
-    vocab->token[token] = (ds4_str){ copy, len };
+    vocab->token[token] = (lgn2_str){ copy, len };
     table_put(&vocab->token_to_id, vocab->token[token], token);
     return true;
 }
 
-static void ds4_test_chat_vocab_free(ds4_vocab *vocab) {
+static void lgn2_test_chat_vocab_free(lgn2_vocab *vocab) {
     if (!vocab) return;
     if (vocab->token) {
         for (int i = 0; i < vocab->n_vocab; i++) {
@@ -2163,10 +2163,10 @@ static void ds4_test_chat_vocab_free(ds4_vocab *vocab) {
     vocab_free(vocab);
 }
 
-static bool ds4_test_chat_vocab_init(ds4_vocab *vocab) {
+static bool lgn2_test_chat_vocab_init(lgn2_vocab *vocab) {
     if (!vocab) return false;
     memset(vocab, 0, sizeof(*vocab));
-    vocab->n_vocab = DS4_CHAT_TEST_VOCAB_SIZE;
+    vocab->n_vocab = LGN2_CHAT_TEST_VOCAB_SIZE;
     vocab->token = calloc((size_t)vocab->n_vocab, sizeof(vocab->token[0]));
     if (!vocab->token) return false;
     table_init(&vocab->token_to_id, 266u);
@@ -2176,71 +2176,71 @@ static bool ds4_test_chat_vocab_init(ds4_vocab *vocab) {
         char encoded[4];
         char *p = encoded;
         utf8_put(&p, gpt2_byte_to_codepoint((uint8_t)byte));
-        if (!ds4_test_chat_vocab_add(
+        if (!lgn2_test_chat_vocab_add(
                 vocab, byte, encoded, (size_t)(p - encoded))) {
-            ds4_test_chat_vocab_free(vocab);
+            lgn2_test_chat_vocab_free(vocab);
             return false;
         }
     }
 
-    if (!ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_BOS,
+    if (!lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_BOS,
                                  "<bos>", sizeof("<bos>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_EOS,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_EOS,
                                  "<eos>", sizeof("<eos>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_EOT,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_EOT,
                                  "</assistant>", sizeof("</assistant>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_ASSISTANT,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_ASSISTANT,
                                  "<assistant>", sizeof("<assistant>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_THINK_START,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_THINK_START,
                                  "<think>", sizeof("<think>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_THINK_END,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_THINK_END,
                                  "</think>", sizeof("</think>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_TOOL_CALL_START,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_TOOL_CALL_START,
                                  "<tool_call>", sizeof("<tool_call>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_TOOL_CALL_END,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_TOOL_CALL_END,
                                  "</tool_call>", sizeof("</tool_call>") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_DSML,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_DSML,
                                  "｜DSML｜", sizeof("｜DSML｜") - 1u) ||
-        !ds4_test_chat_vocab_add(vocab, DS4_CHAT_TEST_MERGED_AB,
+        !lgn2_test_chat_vocab_add(vocab, LGN2_CHAT_TEST_MERGED_AB,
                                  "ab", sizeof("ab") - 1u)) {
-        ds4_test_chat_vocab_free(vocab);
+        lgn2_test_chat_vocab_free(vocab);
         return false;
     }
 
     static const char merge_ab[] = "a b";
     table_put(&vocab->merge_rank,
-              (ds4_str){ merge_ab, sizeof(merge_ab) - 1u }, 0);
+              (lgn2_str){ merge_ab, sizeof(merge_ab) - 1u }, 0);
 
-    vocab->bos_id = DS4_CHAT_TEST_BOS;
-    vocab->eos_id = DS4_CHAT_TEST_EOS;
-    vocab->eot_id = DS4_CHAT_TEST_EOT;
+    vocab->bos_id = LGN2_CHAT_TEST_BOS;
+    vocab->eos_id = LGN2_CHAT_TEST_EOS;
+    vocab->eot_id = LGN2_CHAT_TEST_EOT;
     vocab->system_id = -1;
     vocab->user_id = -1;
-    vocab->assistant_id = DS4_CHAT_TEST_ASSISTANT;
+    vocab->assistant_id = LGN2_CHAT_TEST_ASSISTANT;
     vocab->observation_id = -1;
     vocab->sop_id = -1;
-    vocab->think_start_id = DS4_CHAT_TEST_THINK_START;
-    vocab->think_end_id = DS4_CHAT_TEST_THINK_END;
-    vocab->tool_call_start_id = DS4_CHAT_TEST_TOOL_CALL_START;
-    vocab->tool_call_end_id = DS4_CHAT_TEST_TOOL_CALL_END;
+    vocab->think_start_id = LGN2_CHAT_TEST_THINK_START;
+    vocab->think_end_id = LGN2_CHAT_TEST_THINK_END;
+    vocab->tool_call_start_id = LGN2_CHAT_TEST_TOOL_CALL_START;
+    vocab->tool_call_end_id = LGN2_CHAT_TEST_TOOL_CALL_END;
     vocab->tool_response_start_id = -1;
     vocab->tool_response_end_id = -1;
     vocab->arg_key_start_id = -1;
     vocab->arg_key_end_id = -1;
     vocab->arg_value_start_id = -1;
     vocab->arg_value_end_id = -1;
-    vocab->dsml_id = DS4_CHAT_TEST_DSML;
+    vocab->dsml_id = LGN2_CHAT_TEST_DSML;
     return true;
 }
 
-static bool ds4_test_chat_tokens_decode(
-        ds4_engine       *engine,
-        const ds4_tokens *tokens,
+static bool lgn2_test_chat_tokens_decode(
+        lgn2_engine       *engine,
+        const lgn2_tokens *tokens,
         const char       *expected) {
     if (!engine || !tokens || !expected) return false;
-    ds4_buf decoded = {0};
+    lgn2_buf decoded = {0};
     for (int i = 0; i < tokens->len; i++) {
-        ds4_token_text_into(engine, tokens->v[i], &decoded);
+        lgn2_token_text_into(engine, tokens->v[i], &decoded);
     }
     const size_t expected_len = strlen(expected);
     const bool ok = decoded.len == expected_len &&
@@ -2249,159 +2249,159 @@ static bool ds4_test_chat_tokens_decode(
     return ok;
 }
 
-static bool ds4_test_chat_tokens_equal(
-        const ds4_tokens *a,
-        const ds4_tokens *b) {
+static bool lgn2_test_chat_tokens_equal(
+        const lgn2_tokens *a,
+        const lgn2_tokens *b) {
     return a && b && a->len == b->len &&
            (a->len == 0 || memcmp(a->v, b->v,
                                   (size_t)a->len * sizeof(a->v[0])) == 0);
 }
 
-bool ds4_test_laguna_chat(void) {
-    ds4_engine engine;
+bool lgn2_test_laguna_chat(void) {
+    lgn2_engine engine;
     memset(&engine, 0, sizeof(engine));
-    if (!ds4_test_chat_vocab_init(&engine.vocab)) return false;
+    if (!lgn2_test_chat_vocab_init(&engine.vocab)) return false;
 
     bool ok = true;
-    ds4_tokens prompt = {0};
-    ds4_tokens no_think = {0};
-    ds4_tokens merged = {0};
-    ds4_tokens unicode = {0};
-    ds4_tokens raw_bytes = {0};
-    ds4_tokens system = {0};
-    ds4_tokens developer = {0};
-    ds4_tokens user = {0};
-    ds4_tokens assistant = {0};
-    ds4_tokens assistant_think = {0};
-    ds4_tokens tool = {0};
-    ds4_tokens function = {0};
-    ds4_tokens markers = {0};
-    ds4_tokens prefix = {0};
-    ds4_tokens end = {0};
-    ds4_tokens max_prefix = {0};
+    lgn2_tokens prompt = {0};
+    lgn2_tokens no_think = {0};
+    lgn2_tokens merged = {0};
+    lgn2_tokens unicode = {0};
+    lgn2_tokens raw_bytes = {0};
+    lgn2_tokens system = {0};
+    lgn2_tokens developer = {0};
+    lgn2_tokens user = {0};
+    lgn2_tokens assistant = {0};
+    lgn2_tokens assistant_think = {0};
+    lgn2_tokens tool = {0};
+    lgn2_tokens function = {0};
+    lgn2_tokens markers = {0};
+    lgn2_tokens prefix = {0};
+    lgn2_tokens end = {0};
+    lgn2_tokens max_prefix = {0};
 
-    ds4_encode_chat_prompt(&engine, "You", "Hi", DS4_THINK_HIGH, &prompt);
+    lgn2_encode_chat_prompt(&engine, "You", "Hi", LGN2_THINK_HIGH, &prompt);
     ok = ok && prompt.len >= 3 &&
          prompt.v[0] == engine.vocab.bos_id &&
          prompt.v[prompt.len - 2] == engine.vocab.assistant_id &&
          prompt.v[prompt.len - 1] == engine.vocab.think_start_id &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_decode(
              &engine, &prompt,
              "<bos><system>You</system>\n<user>Hi</user>\n<assistant><think>");
 
-    ds4_encode_chat_prompt(&engine, NULL, "Hi", DS4_THINK_NONE, &no_think);
+    lgn2_encode_chat_prompt(&engine, NULL, "Hi", LGN2_THINK_NONE, &no_think);
     ok = ok && no_think.len >= 3 &&
          no_think.v[no_think.len - 1] == engine.vocab.think_end_id &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_decode(
              &engine, &no_think,
              "<bos><user>Hi</user>\n<assistant></think>");
 
-    ds4_tokenize_text(&engine, "ab", &merged);
+    lgn2_tokenize_text(&engine, "ab", &merged);
     static const char non_ascii[] = "caf\xC3\xA9";
     static const char raw_bytes_text[] = "\x80\xFF";
-    ds4_tokenize_text(&engine, non_ascii, &unicode);
-    ds4_tokenize_text(&engine, raw_bytes_text, &raw_bytes);
+    lgn2_tokenize_text(&engine, non_ascii, &unicode);
+    lgn2_tokenize_text(&engine, raw_bytes_text, &raw_bytes);
     ok = ok && merged.len == 1 &&
-         merged.v[0] == DS4_CHAT_TEST_MERGED_AB &&
-         ds4_test_chat_tokens_decode(&engine, &merged, "ab") &&
+         merged.v[0] == LGN2_CHAT_TEST_MERGED_AB &&
+         lgn2_test_chat_tokens_decode(&engine, &merged, "ab") &&
          unicode.len == 5 && unicode.v[3] == 0xC3 && unicode.v[4] == 0xA9 &&
-         ds4_test_chat_tokens_decode(&engine, &unicode, non_ascii) &&
+         lgn2_test_chat_tokens_decode(&engine, &unicode, non_ascii) &&
          raw_bytes.len == 2 && raw_bytes.v[0] == 0x80 &&
          raw_bytes.v[1] == 0xFF &&
-         ds4_test_chat_tokens_decode(&engine, &raw_bytes, raw_bytes_text);
+         lgn2_test_chat_tokens_decode(&engine, &raw_bytes, raw_bytes_text);
 
-    ds4_chat_append_message(&engine, &system, "system", "rules");
-    ds4_chat_append_message(&engine, &developer, "developer", "rules");
-    ds4_chat_append_message(&engine, &user, "user", "hello");
-    ds4_chat_append_message(&engine, &assistant, "assistant", "answer");
-    ds4_chat_append_message(&engine, &assistant_think,
+    lgn2_chat_append_message(&engine, &system, "system", "rules");
+    lgn2_chat_append_message(&engine, &developer, "developer", "rules");
+    lgn2_chat_append_message(&engine, &user, "user", "hello");
+    lgn2_chat_append_message(&engine, &assistant, "assistant", "answer");
+    lgn2_chat_append_message(&engine, &assistant_think,
                             "assistant", "<think>work");
-    ds4_chat_append_message(
+    lgn2_chat_append_message(
         &engine, &tool, "tool", "ok</tool_response>tail");
-    ds4_chat_append_message(
+    lgn2_chat_append_message(
         &engine, &function, "function", "ok</tool_response>tail");
-    ds4_tokenize_rendered_chat(
+    lgn2_tokenize_rendered_chat(
         &engine, "<tool_call>x</tool_call>｜DSML｜", &markers);
-    ok = ok && ds4_test_chat_tokens_decode(
+    ok = ok && lgn2_test_chat_tokens_decode(
                     &engine, &system, "<system>rules</system>\n") &&
-         ds4_test_chat_tokens_equal(&system, &developer) &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_equal(&system, &developer) &&
+         lgn2_test_chat_tokens_decode(
              &engine, &user, "<user>hello</user>\n") &&
          assistant.len >= 4 && assistant.v[0] == engine.vocab.assistant_id &&
          assistant.v[1] == engine.vocab.think_end_id &&
          assistant.v[assistant.len - 2] == engine.vocab.eot_id &&
          assistant.v[assistant.len - 1] == '\n' &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_decode(
              &engine, &assistant, "<assistant></think>answer</assistant>\n") &&
          assistant_think.len >= 3 &&
          assistant_think.v[0] == engine.vocab.assistant_id &&
          assistant_think.v[1] == engine.vocab.think_start_id &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_decode(
              &engine, &assistant_think, "<assistant><think>work</assistant>\n") &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_decode(
              &engine, &tool,
              "<tool_response>ok&lt;/tool_response>tail</tool_response>\n") &&
-         ds4_test_chat_tokens_equal(&tool, &function) &&
+         lgn2_test_chat_tokens_equal(&tool, &function) &&
          markers.len == 4 &&
          markers.v[0] == engine.vocab.tool_call_start_id &&
          markers.v[1] == 'x' &&
          markers.v[2] == engine.vocab.tool_call_end_id &&
          markers.v[3] == engine.vocab.dsml_id &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_decode(
              &engine, &markers, "<tool_call>x</tool_call>｜DSML｜");
 
-    ds4_chat_append_assistant_prefix(&engine, &prefix, DS4_THINK_HIGH);
-    ds4_chat_append_assistant_end(&engine, &end);
+    lgn2_chat_append_assistant_prefix(&engine, &prefix, LGN2_THINK_HIGH);
+    lgn2_chat_append_assistant_end(&engine, &end);
     ok = ok && prefix.len == 2 &&
          prefix.v[0] == engine.vocab.assistant_id &&
          prefix.v[1] == engine.vocab.think_start_id &&
-         ds4_test_chat_tokens_decode(
+         lgn2_test_chat_tokens_decode(
              &engine, &prefix, "<assistant><think>") &&
          end.len == 2 && end.v[0] == engine.vocab.eot_id &&
          end.v[1] == '\n' &&
-         ds4_test_chat_tokens_decode(&engine, &end, "</assistant>\n");
+         lgn2_test_chat_tokens_decode(&engine, &end, "</assistant>\n");
 
-    ds4_chat_append_max_effort_prefix(&engine, &max_prefix);
+    lgn2_chat_append_max_effort_prefix(&engine, &max_prefix);
     ok = ok && max_prefix.len > 0 &&
-         ds4_test_chat_tokens_decode(
-             &engine, &max_prefix, ds4_think_max_prefix());
+         lgn2_test_chat_tokens_decode(
+             &engine, &max_prefix, lgn2_think_max_prefix());
 
-    ok = ok && ds4_token_is_stop(&engine, engine.vocab.eos_id) &&
-         ds4_token_is_stop(&engine, engine.vocab.eot_id) &&
-         !ds4_token_is_stop(&engine, '\n') &&
-         ds4_token_is_stop_for_think_mode(
-             &engine, engine.vocab.eot_id, DS4_THINK_HIGH) &&
-         ds4_token_is_stop_for_think_mode(
-             &engine, engine.vocab.think_start_id, DS4_THINK_NONE) &&
-         ds4_token_is_stop_for_think_mode(
-             &engine, engine.vocab.think_end_id, DS4_THINK_NONE) &&
-         !ds4_token_is_stop_for_think_mode(
-             &engine, engine.vocab.think_start_id, DS4_THINK_HIGH) &&
-         !ds4_token_is_stop_for_think_mode(
-             &engine, engine.vocab.think_end_id, DS4_THINK_HIGH);
+    ok = ok && lgn2_token_is_stop(&engine, engine.vocab.eos_id) &&
+         lgn2_token_is_stop(&engine, engine.vocab.eot_id) &&
+         !lgn2_token_is_stop(&engine, '\n') &&
+         lgn2_token_is_stop_for_think_mode(
+             &engine, engine.vocab.eot_id, LGN2_THINK_HIGH) &&
+         lgn2_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_start_id, LGN2_THINK_NONE) &&
+         lgn2_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_end_id, LGN2_THINK_NONE) &&
+         !lgn2_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_start_id, LGN2_THINK_HIGH) &&
+         !lgn2_token_is_stop_for_think_mode(
+             &engine, engine.vocab.think_end_id, LGN2_THINK_HIGH);
 
-    ds4_tokens_free(&max_prefix);
-    ds4_tokens_free(&end);
-    ds4_tokens_free(&prefix);
-    ds4_tokens_free(&markers);
-    ds4_tokens_free(&function);
-    ds4_tokens_free(&tool);
-    ds4_tokens_free(&assistant_think);
-    ds4_tokens_free(&assistant);
-    ds4_tokens_free(&user);
-    ds4_tokens_free(&developer);
-    ds4_tokens_free(&system);
-    ds4_tokens_free(&raw_bytes);
-    ds4_tokens_free(&unicode);
-    ds4_tokens_free(&merged);
-    ds4_tokens_free(&no_think);
-    ds4_tokens_free(&prompt);
-    ds4_test_chat_vocab_free(&engine.vocab);
+    lgn2_tokens_free(&max_prefix);
+    lgn2_tokens_free(&end);
+    lgn2_tokens_free(&prefix);
+    lgn2_tokens_free(&markers);
+    lgn2_tokens_free(&function);
+    lgn2_tokens_free(&tool);
+    lgn2_tokens_free(&assistant_think);
+    lgn2_tokens_free(&assistant);
+    lgn2_tokens_free(&user);
+    lgn2_tokens_free(&developer);
+    lgn2_tokens_free(&system);
+    lgn2_tokens_free(&raw_bytes);
+    lgn2_tokens_free(&unicode);
+    lgn2_tokens_free(&merged);
+    lgn2_tokens_free(&no_think);
+    lgn2_tokens_free(&prompt);
+    lgn2_test_chat_vocab_free(&engine.vocab);
     return ok;
 }
-#endif /* DS4_TEST_HOOKS */
+#endif /* LGN2_TEST_HOOKS */
 
-static void dump_tokens_fp(FILE *fp, const ds4_vocab *vocab, const token_vec *tokens) {
+static void dump_tokens_fp(FILE *fp, const lgn2_vocab *vocab, const token_vec *tokens) {
     fprintf(fp, "[");
     for (int i = 0; i < tokens->len; i++) {
         if (i) fprintf(fp, ", ");
@@ -2417,7 +2417,7 @@ static void dump_tokens_fp(FILE *fp, const ds4_vocab *vocab, const token_vec *to
     }
 }
 
-static void dump_tokens(const ds4_vocab *vocab, const token_vec *tokens) {
+static void dump_tokens(const lgn2_vocab *vocab, const token_vec *tokens) {
     dump_tokens_fp(stdout, vocab, tokens);
 }
 
@@ -2467,7 +2467,7 @@ static int gpt2_codepoint_to_byte(uint32_t cp) {
     return -1;
 }
 
-static bool vocab_token_is_literal_special(ds4_str s) {
+static bool vocab_token_is_literal_special(lgn2_str s) {
     const unsigned char bar[] = {0xef, 0xbd, 0x9c}; /* U+FF5C fullwidth vertical bar. */
     if (s.len < sizeof(bar)) return false;
     for (uint64_t i = 0; i + sizeof(bar) <= s.len; i++) {
@@ -2476,7 +2476,7 @@ static bool vocab_token_is_literal_special(ds4_str s) {
     return false;
 }
 
-static bool vocab_token_is_named_special(const ds4_vocab *vocab, int token) {
+static bool vocab_token_is_named_special(const lgn2_vocab *vocab, int token) {
     const int ids[] = {
         vocab->bos_id,
         vocab->eos_id,
@@ -2504,8 +2504,8 @@ static bool vocab_token_is_named_special(const ds4_vocab *vocab, int token) {
     return false;
 }
 
-char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
-    ds4_vocab *vocab = &e->vocab;
+char *lgn2_token_text(lgn2_engine *e, int token, size_t *len) {
+    lgn2_vocab *vocab = &e->vocab;
     if (token < 0 || token >= vocab->n_vocab) {
         if (len) *len = 0;
         char *out = xmalloc(1);
@@ -2513,7 +2513,7 @@ char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
         return out;
     }
 
-    ds4_str s = vocab->token[token];
+    lgn2_str s = vocab->token[token];
     char *out = xmalloc((size_t)s.len + 1);
     if (vocab_token_is_named_special(vocab, token) ||
         vocab_token_is_literal_special(s)) {
@@ -2535,11 +2535,11 @@ char *ds4_token_text(ds4_engine *e, int token, size_t *len) {
     return out;
 }
 
-void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b) {
-    ds4_vocab *vocab = &e->vocab;
+void lgn2_token_text_into(lgn2_engine *e, int token, lgn2_buf *b) {
+    lgn2_vocab *vocab = &e->vocab;
     if (!b || token < 0 || token >= vocab->n_vocab) return;
 
-    ds4_str s = vocab->token[token];
+    lgn2_str s = vocab->token[token];
     /* Decoding emits at most one byte per source byte, so one reserve covers
      * both the raw copy and the GPT-2 byte-mapping loop below. */
     if (b->len + (size_t)s.len + 1 > b->cap) {
@@ -2566,21 +2566,21 @@ void ds4_token_text_into(ds4_engine *e, int token, ds4_buf *b) {
     b->ptr[b->len] = '\0';
 }
 
-static bool vocab_token_is_generation_stop(const ds4_vocab *vocab, int token) {
+static bool vocab_token_is_generation_stop(const lgn2_vocab *vocab, int token) {
     if (!vocab || token < 0) return false;
     if (token == vocab->eos_id) return true;
     return vocab->eot_id >= 0 && token == vocab->eot_id;
 }
 
-int ds4_token_eos(ds4_engine *e) {
+int lgn2_token_eos(lgn2_engine *e) {
     return e->vocab.eos_id;
 }
 
-bool ds4_token_is_stop(ds4_engine *e, int token) {
+bool lgn2_token_is_stop(lgn2_engine *e, int token) {
     return e ? vocab_token_is_generation_stop(&e->vocab, token) : false;
 }
 
-bool ds4_token_is_thinking_control(ds4_engine *e, int token) {
+bool lgn2_token_is_thinking_control(lgn2_engine *e, int token) {
     if (!e || token < 0) return false;
     return (e->vocab.think_start_id >= 0 &&
             token == e->vocab.think_start_id) ||
@@ -2588,26 +2588,26 @@ bool ds4_token_is_thinking_control(ds4_engine *e, int token) {
             token == e->vocab.think_end_id);
 }
 
-bool ds4_token_is_stop_for_think_mode(
-        ds4_engine      *e,
+bool lgn2_token_is_stop_for_think_mode(
+        lgn2_engine      *e,
         int              token,
-        ds4_think_mode   mode) {
-    if (ds4_token_is_stop(e, token)) return true;
+        lgn2_think_mode   mode) {
+    if (lgn2_token_is_stop(e, token)) return true;
     /* In no-thinking mode the prompt already supplied the protocol close tag.
      * If the model emits another thinking tag, do not print or feed it back:
      * it is a control marker, not assistant content. */
-    if (!ds4_think_mode_enabled(mode) &&
-        ds4_token_is_thinking_control(e, token)) {
+    if (!lgn2_think_mode_enabled(mode) &&
+        lgn2_token_is_thinking_control(e, token)) {
         return true;
     }
     return false;
 }
 
-int ds4_token_user(ds4_engine *e) {
+int lgn2_token_user(lgn2_engine *e) {
     return e->vocab.user_id;
 }
 
-int ds4_token_assistant(ds4_engine *e) {
+int lgn2_token_assistant(lgn2_engine *e) {
     return e->vocab.assistant_id;
 }
 
@@ -2643,22 +2643,22 @@ static inline void argmax_f32_unrolled8_range(
         i += 8u;
     }
 
-#define DS4_ARGMAX_MERGE_LANE(b, v) \
+#define LGN2_ARGMAX_MERGE_LANE(b, v) \
     do { \
         if ((v) > *best_v || ((v) == *best_v && (b) < *best)) { \
             *best_v = (v); \
             *best = (b); \
         } \
     } while (0)
-    DS4_ARGMAX_MERGE_LANE(b0, v0);
-    DS4_ARGMAX_MERGE_LANE(b1, v1);
-    DS4_ARGMAX_MERGE_LANE(b2, v2);
-    DS4_ARGMAX_MERGE_LANE(b3, v3);
-    DS4_ARGMAX_MERGE_LANE(b4, v4);
-    DS4_ARGMAX_MERGE_LANE(b5, v5);
-    DS4_ARGMAX_MERGE_LANE(b6, v6);
-    DS4_ARGMAX_MERGE_LANE(b7, v7);
-#undef DS4_ARGMAX_MERGE_LANE
+    LGN2_ARGMAX_MERGE_LANE(b0, v0);
+    LGN2_ARGMAX_MERGE_LANE(b1, v1);
+    LGN2_ARGMAX_MERGE_LANE(b2, v2);
+    LGN2_ARGMAX_MERGE_LANE(b3, v3);
+    LGN2_ARGMAX_MERGE_LANE(b4, v4);
+    LGN2_ARGMAX_MERGE_LANE(b5, v5);
+    LGN2_ARGMAX_MERGE_LANE(b6, v6);
+    LGN2_ARGMAX_MERGE_LANE(b7, v7);
+#undef LGN2_ARGMAX_MERGE_LANE
 
     for (; i < end; i++) {
         const float v = logits[i];
@@ -2671,7 +2671,7 @@ static inline void argmax_f32_unrolled8_range(
 
 static int sample_argmax_unrolled8(const float *logits, uint32_t n_vocab) {
     int best = 0;
-    float best_v = DS4_NEG_INF;
+    float best_v = LGN2_NEG_INF;
     argmax_f32_unrolled8_range(logits, 0, n_vocab, &best, &best_v);
     return best;
 }
@@ -2699,11 +2699,11 @@ static int argmax_f32_excluding_unrolled8(
 }
 
 static int sample_argmax(const float *logits, uint32_t n_vocab) {
-    if (getenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
+    if (getenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
         return sample_argmax_unrolled8(logits, n_vocab);
     }
     int best = 0;
-    float best_v = DS4_NEG_INF;
+    float best_v = LGN2_NEG_INF;
     for (uint32_t i = 0; i < n_vocab; i++) {
         const float v = logits[i];
         if (v > best_v) {
@@ -2752,8 +2752,8 @@ static sample_candidate *sample_arena_reserve(sample_arena *a, size_t n) {
     return a->v;
 }
 
-#ifdef DS4_TEST_HOOKS
-int ds4_test_sample_arena_lifecycle(void) {
+#ifdef LGN2_TEST_HOOKS
+int lgn2_test_sample_arena_lifecycle(void) {
     sample_arena arena = {0};
     sample_candidate *first = sample_arena_reserve(&arena, 17);
     const size_t first_cap = arena.cap;
@@ -2907,7 +2907,7 @@ static int sample_full_vocab(
         uint64_t    *rng,
         float       *prob_scratch,
         sample_arena *cands) {
-    float max_logit = DS4_NEG_INF;
+    float max_logit = LGN2_NEG_INF;
     int best = 0;
     uint32_t finite = 0;
     for (uint32_t i = 0; i < n_vocab; i++) {
@@ -2946,7 +2946,7 @@ static int sample_full_vocab(
          * boundary are guaranteed to fail min-p, avoiding an expf for the
          * overwhelming majority of a large vocabulary. Near-boundary values
          * still take the ordinary expf comparison. */
-        float reject_scaled = DS4_NEG_INF;
+        float reject_scaled = LGN2_NEG_INF;
         bool have_reject_scaled = false;
         if (min_rel > 0.0f && isfinite(min_rel)) {
             float cutoff = logf(min_rel);
@@ -3118,8 +3118,8 @@ static int sample_top_p_min_p(
     return ids[filtered - 1];
 }
 
-#ifdef DS4_TEST_HOOKS
-int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
+#ifdef LGN2_TEST_HOOKS
+int lgn2_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float temperature, int top_k,
                            float top_p, float min_p, uint64_t *rng,
                            float *prob_scratch) {
@@ -3132,14 +3132,14 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
     return token;
 }
 
-int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
+int lgn2_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
                                      int excluded_id) {
     if (!logits) return -1;
-    if (getenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
+    if (getenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
         return argmax_f32_excluding_unrolled8(logits, n_vocab, excluded_id);
     }
     int best = -1;
-    float best_v = DS4_NEG_INF;
+    float best_v = LGN2_NEG_INF;
     for (uint32_t i = 0; i < n_vocab; i++) {
         if ((int)i == excluded_id) continue;
         const float v = logits[i];
@@ -3152,11 +3152,11 @@ int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
 }
 #endif
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
 static void print_top_logits(
         FILE          * fp,
         const char    * label,
-        const ds4_vocab * vocab,
+        const lgn2_vocab * vocab,
         const float   * logits,
         uint32_t        n_vocab,
         int             k) {
@@ -3174,7 +3174,7 @@ static void print_top_logits(
         }
     }
 
-    fprintf(fp, "ds4: top logits %s:\n", label);
+    fprintf(fp, "lgn2: top logits %s:\n", label);
     for (int i = 0; i < k && best[i] >= 0; i++) {
         const int id = best[i];
         fprintf(fp, "  %2d %7d % .9g  ", i, id, logits[id]);
@@ -3186,45 +3186,45 @@ static void print_top_logits(
 }
 #endif
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
 
 /* Laguna has a conventional residual stream and KV cache, but alternates
  * full-attention and sliding-window layers with different query geometry. */
 typedef struct {
-    ds4_gpu_tensor *features;
+    lgn2_gpu_tensor *features;
     const uint32_t *target_layers;
     uint32_t n_aux;
     uint32_t src_row0;
     uint32_t dst_row0;
     uint32_t n_rows;
-} ds4_laguna_feature_capture;
+} lgn2_laguna_feature_capture;
 
 #ifdef __APPLE__
 static void laguna_graph_report_q8_lmhead_screen(
-        const ds4_laguna_gpu_graph *g);
+        const lgn2_laguna_gpu_graph *g);
 #endif
 
 /* The lgn_graph module owns only the base target storage.  Keep extension
  * teardown here: speculative verifier scratch, the optional Metal lm-head
  * screen, and diagnostic/selector state all have command/lifetime semantics
  * that must remain coupled to the session scheduler. */
-static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
+static void laguna_graph_free(lgn2_laguna_gpu_graph *g) {
     if (!g) return;
-#define DS4_LAGUNA_FREE(name) do { \
-        ds4_gpu_tensor_free(g->name); \
+#define LGN2_LAGUNA_FREE(name) do { \
+        lgn2_gpu_tensor_free(g->name); \
         g->name = NULL; \
     } while (0)
 #ifdef __APPLE__
-    ds4_gpu_laguna_q8_lmhead_screen_destroy(g->lmhead_screen);
+    lgn2_gpu_laguna_q8_lmhead_screen_destroy(g->lmhead_screen);
     g->lmhead_screen = NULL;
 #endif
-    DS4_LAGUNA_FREE(spec_output_norm);
-    DS4_LAGUNA_FREE(spec_logits);
-    DS4_LAGUNA_FREE(spec_argmax);
-#undef DS4_LAGUNA_FREE
-    for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) {
-        ds4_gpu_tensor_free(g->spec_key_backup[il]);
-        ds4_gpu_tensor_free(g->spec_value_backup[il]);
+    LGN2_LAGUNA_FREE(spec_output_norm);
+    LGN2_LAGUNA_FREE(spec_logits);
+    LGN2_LAGUNA_FREE(spec_argmax);
+#undef LGN2_LAGUNA_FREE
+    for (uint32_t il = 0; il < LGN2_MAX_LAYER; il++) {
+        lgn2_gpu_tensor_free(g->spec_key_backup[il]);
+        lgn2_gpu_tensor_free(g->spec_value_backup[il]);
         g->spec_key_backup[il] = NULL;
         g->spec_value_backup[il] = NULL;
     }
@@ -3232,9 +3232,9 @@ static void laguna_graph_free(ds4_laguna_gpu_graph *g) {
     memset(g, 0, sizeof(*g));
 }
 
-static bool laguna_graph_alloc(ds4_laguna_gpu_graph *g, uint32_t ctx_size) {
-    if (!g || ctx_size == 0 || ctx_size > DS4_CONTEXT_LENGTH ||
-        DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) {
+static bool laguna_graph_alloc(lgn2_laguna_gpu_graph *g, uint32_t ctx_size) {
+    if (!g || ctx_size == 0 || ctx_size > LGN2_CONTEXT_LENGTH ||
+        LGN2_MODEL_FAMILY != LGN2_MODEL_FAMILY_LAGUNA) {
         return false;
     }
 #ifdef __APPLE__
@@ -3243,50 +3243,50 @@ static bool laguna_graph_alloc(ds4_laguna_gpu_graph *g, uint32_t ctx_size) {
                                          NULL, 0)) return false;
 #endif
     memset(g, 0, sizeof(*g));
-    if (lgn_graph_alloc(g, ctx_size, &g_ds4_shape)) return true;
+    if (lgn_graph_alloc(g, ctx_size, &g_lgn2_shape)) return true;
 
-    fprintf(stderr, "ds4: failed to allocate Laguna GPU graph\n");
+    fprintf(stderr, "lgn2: failed to allocate Laguna GPU graph\n");
     laguna_graph_free(g);
     return false;
 }
 
-static bool laguna_graph_ensure_spec_scratch(ds4_laguna_gpu_graph *g) {
+static bool laguna_graph_ensure_spec_scratch(lgn2_laguna_gpu_graph *g) {
     if (!g) return false;
-    const uint64_t rows = DS4_DFLASH_BLOCK_SIZE;
+    const uint64_t rows = LGN2_DFLASH_BLOCK_SIZE;
     if (!g->spec_output_norm) {
-        g->spec_output_norm = ds4_gpu_tensor_alloc(
-            rows * DS4_N_EMBD * sizeof(float));
+        g->spec_output_norm = lgn2_gpu_tensor_alloc(
+            rows * LGN2_N_EMBD * sizeof(float));
     }
     if (!g->spec_logits) {
-        g->spec_logits = ds4_gpu_tensor_alloc(
-            rows * DS4_N_VOCAB * sizeof(float));
+        g->spec_logits = lgn2_gpu_tensor_alloc(
+            rows * LGN2_N_VOCAB * sizeof(float));
     }
     if (!g->spec_argmax) {
         g->spec_argmax =
-            ds4_gpu_tensor_alloc(rows * sizeof(int32_t));
+            lgn2_gpu_tensor_alloc(rows * sizeof(int32_t));
     }
     if (!g->spec_output_norm || !g->spec_logits || !g->spec_argmax) {
         fprintf(stderr,
-                "ds4: failed to allocate Laguna speculative verifier scratch\n");
+                "lgn2: failed to allocate Laguna speculative verifier scratch\n");
         return false;
     }
 
     const uint64_t row_bytes =
-        (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
+        (uint64_t)LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM * sizeof(uint16_t);
     const uint64_t backup_bytes = rows * row_bytes;
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        if (!ds4_laguna_layer_is_swa(il)) continue;
+    for (uint32_t il = 0; il < LGN2_N_LAYER; il++) {
+        if (!lgn2_laguna_layer_is_swa(il)) continue;
         if (!g->spec_key_backup[il]) {
             g->spec_key_backup[il] =
-                ds4_gpu_tensor_alloc(backup_bytes);
+                lgn2_gpu_tensor_alloc(backup_bytes);
         }
         if (!g->spec_value_backup[il]) {
             g->spec_value_backup[il] =
-                ds4_gpu_tensor_alloc(backup_bytes);
+                lgn2_gpu_tensor_alloc(backup_bytes);
         }
         if (!g->spec_key_backup[il] || !g->spec_value_backup[il]) {
             fprintf(stderr,
-                    "ds4: failed to allocate Laguna speculative KV backup\n");
+                    "lgn2: failed to allocate Laguna speculative KV backup\n");
             return false;
         }
     }
@@ -3294,8 +3294,8 @@ static bool laguna_graph_ensure_spec_scratch(ds4_laguna_gpu_graph *g) {
 }
 
 static bool laguna_graph_capture_feature(
-        const ds4_laguna_feature_capture *capture,
-        const ds4_gpu_tensor             *src,
+        const lgn2_laguna_feature_capture *capture,
+        const lgn2_gpu_tensor             *src,
         uint32_t                          target_layer) {
     if (!capture) return true;
     if (!capture->features || !capture->target_layers ||
@@ -3304,13 +3304,13 @@ static bool laguna_graph_capture_feature(
     }
     for (uint32_t aux = 0; aux < capture->n_aux; aux++) {
         if (capture->target_layers[aux] != target_layer) continue;
-        return ds4_gpu_dflash_capture_rows_tensor(
+        return lgn2_gpu_dflash_capture_rows_tensor(
                    capture->features,
                    src,
                    capture->src_row0,
                    capture->dst_row0,
                    capture->n_rows,
-                   DS4_N_EMBD,
+                   LGN2_N_EMBD,
                    capture->n_aux,
                    aux) != 0;
     }
@@ -3322,8 +3322,8 @@ static bool laguna_graph_capture_feature(
  * most once inside it, and the per-transfer cost dominates at 2 KiB a row:
  * doing this per row cost more than the draft pass it protects. */
 static bool laguna_graph_spec_ring_copy(
-        ds4_gpu_tensor *cache,
-        ds4_gpu_tensor *backup,
+        lgn2_gpu_tensor *cache,
+        lgn2_gpu_tensor *backup,
         uint32_t        pos0,
         uint32_t        first_row,
         uint32_t        n_rows,
@@ -3340,8 +3340,8 @@ static bool laguna_graph_spec_ring_copy(
         const uint64_t cache_off = (uint64_t)ring * row_bytes;
         const uint64_t backup_off = (uint64_t)row * row_bytes;
         const int ok = to_backup ?
-            ds4_gpu_tensor_copy(backup, backup_off, cache, cache_off, bytes) :
-            ds4_gpu_tensor_copy(cache, cache_off, backup, backup_off, bytes);
+            lgn2_gpu_tensor_copy(backup, backup_off, cache, cache_off, bytes) :
+            lgn2_gpu_tensor_copy(cache, cache_off, backup, backup_off, bytes);
         if (!ok) return false;
         row += run;
     }
@@ -3349,18 +3349,18 @@ static bool laguna_graph_spec_ring_copy(
 }
 
 static bool laguna_graph_spec_snapshot(
-        ds4_laguna_gpu_graph *g,
+        lgn2_laguna_gpu_graph *g,
         uint32_t              pos0,
         uint32_t              n_rows) {
-    if (!g || n_rows == 0u || n_rows > DS4_DFLASH_BLOCK_SIZE ||
+    if (!g || n_rows == 0u || n_rows > LGN2_DFLASH_BLOCK_SIZE ||
         !laguna_graph_ensure_spec_scratch(g)) {
         return false;
     }
     const uint64_t row_bytes =
-        (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
-    bool ok = ds4_gpu_begin_commands() != 0;
-    for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
-        if (!ds4_laguna_layer_is_swa(il)) continue;
+        (uint64_t)LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM * sizeof(uint16_t);
+    bool ok = lgn2_gpu_begin_commands() != 0;
+    for (uint32_t il = 0; ok && il < LGN2_N_LAYER; il++) {
+        if (!lgn2_laguna_layer_is_swa(il)) continue;
         ok = laguna_graph_spec_ring_copy(g->key_cache[il],
                                          g->spec_key_backup[il],
                                          pos0, 0, n_rows,
@@ -3375,8 +3375,8 @@ static bool laguna_graph_spec_snapshot(
     /* The caller must commit this snapshot before allowing any speculative
      * batch to be discarded.  Otherwise a later restore could read a backup
      * whose copy was discarded together with the speculative work. */
-    if (!ok && ds4_gpu_commands_active()) {
-        (void)ds4_gpu_discard_commands();
+    if (!ok && lgn2_gpu_commands_active()) {
+        (void)lgn2_gpu_discard_commands();
     }
     return ok;
 }
@@ -3385,19 +3385,19 @@ static bool laguna_graph_spec_snapshot(
  * that need a host-state certification must wait its submitted CB before
  * publishing state.  The DFlash product boundary below provides that proof. */
 static bool laguna_graph_spec_restore(
-        ds4_laguna_gpu_graph *g,
+        lgn2_laguna_gpu_graph *g,
         uint32_t              pos0,
         uint32_t              first_row,
         uint32_t              n_rows) {
-    if (!g || first_row > n_rows || n_rows > DS4_DFLASH_BLOCK_SIZE) {
+    if (!g || first_row > n_rows || n_rows > LGN2_DFLASH_BLOCK_SIZE) {
         return false;
     }
     if (first_row == n_rows) return true;
     const uint64_t row_bytes =
-        (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
-    bool ok = ds4_gpu_begin_commands() != 0;
-    for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
-        if (!ds4_laguna_layer_is_swa(il)) continue;
+        (uint64_t)LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM * sizeof(uint16_t);
+    bool ok = lgn2_gpu_begin_commands() != 0;
+    for (uint32_t il = 0; ok && il < LGN2_N_LAYER; il++) {
+        if (!lgn2_laguna_layer_is_swa(il)) continue;
         ok = laguna_graph_spec_ring_copy(g->key_cache[il],
                                          g->spec_key_backup[il],
                                          pos0, first_row, n_rows,
@@ -3409,14 +3409,14 @@ static bool laguna_graph_spec_restore(
                                          g->cache_cap[il],
                                          row_bytes, false);
     }
-    if (ds4_gpu_commands_active()) {
+    if (lgn2_gpu_commands_active()) {
         if (ok) {
 #if defined(__APPLE__)
-            if (ds4_gpu_submit_commands() == 0) ok = false;
+            if (lgn2_gpu_submit_commands() == 0) ok = false;
 #else
-            if (ds4_gpu_end_commands() == 0) ok = false;
+            if (lgn2_gpu_end_commands() == 0) ok = false;
 #endif
-        } else if (ds4_gpu_discard_commands() == 0) {
+        } else if (lgn2_gpu_discard_commands() == 0) {
             ok = false;
         }
     }
@@ -3424,29 +3424,29 @@ static bool laguna_graph_spec_restore(
 }
 
 static bool laguna_graph_read_spec_logits(
-        const ds4_laguna_gpu_graph *g,
+        const lgn2_laguna_gpu_graph *g,
         uint32_t                    row,
         float                      *logits_out) {
     if (!g || !g->spec_logits || !logits_out ||
-        row >= DS4_DFLASH_BLOCK_SIZE) {
+        row >= LGN2_DFLASH_BLOCK_SIZE) {
         return false;
     }
-    const uint64_t row_bytes = (uint64_t)DS4_N_VOCAB * sizeof(float);
-    return ds4_gpu_tensor_read(g->spec_logits,
+    const uint64_t row_bytes = (uint64_t)LGN2_N_VOCAB * sizeof(float);
+    return lgn2_gpu_tensor_read(g->spec_logits,
                                (uint64_t)row * row_bytes,
                                logits_out,
                                row_bytes) != 0;
 }
 
 static bool laguna_graph_matmul(
-        ds4_gpu_tensor       *out,
-        const ds4_model      *model,
-        const ds4_tensor     *weight,
-        const ds4_gpu_tensor *x,
+        lgn2_gpu_tensor       *out,
+        const lgn2_model      *model,
+        const lgn2_tensor     *weight,
+        const lgn2_gpu_tensor *x,
         uint64_t              n_tokens) {
     if (!out || !model || !weight || !x || weight->ndim < 2) return false;
-    if (weight->type == DS4_TENSOR_F16) {
-        return ds4_gpu_matmul_f16_tensor(out,
+    if (weight->type == LGN2_TENSOR_F16) {
+        return lgn2_gpu_matmul_f16_tensor(out,
                                          model->map,
                                          model->size,
                                          weight->abs_offset,
@@ -3455,8 +3455,8 @@ static bool laguna_graph_matmul(
                                          x,
                                          n_tokens) != 0;
     }
-    if (weight->type == DS4_TENSOR_Q6_K) {
-        return ds4_gpu_matmul_q6_K_tensor(out,
+    if (weight->type == LGN2_TENSOR_Q6_K) {
+        return lgn2_gpu_matmul_q6_K_tensor(out,
                                           model->map,
                                           model->size,
                                           weight->abs_offset,
@@ -3465,7 +3465,7 @@ static bool laguna_graph_matmul(
                                           x,
                                           n_tokens) != 0;
     }
-    return ds4_gpu_matmul_quant_tensor(out,
+    return lgn2_gpu_matmul_quant_tensor(out,
                                        model->map,
                                        model->size,
                                        weight->abs_offset,
@@ -3477,14 +3477,14 @@ static bool laguna_graph_matmul(
 }
 
 static bool laguna_graph_matmul_decode_rows(
-        ds4_gpu_tensor       *out,
-        const ds4_model      *model,
-        const ds4_tensor     *weight,
-        const ds4_gpu_tensor *x,
+        lgn2_gpu_tensor       *out,
+        const lgn2_model      *model,
+        const lgn2_tensor     *weight,
+        const lgn2_gpu_tensor *x,
         uint32_t              n_rows,
         bool                  exact_q8_rows) {
-    if (exact_q8_rows && weight && weight->type == DS4_TENSOR_Q8_0) {
-        return ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(
+    if (exact_q8_rows && weight && weight->type == LGN2_TENSOR_Q8_0) {
+        return lgn2_gpu_matmul_q8_0_decode_rows_exact_tensor(
                    out,
                    model->map,
                    model->size,
@@ -3508,39 +3508,39 @@ static bool laguna_graph_matmul_decode_rows(
  * only the literal "1" requests the fused route. Any other value is an
  * error and is rejected before a graph command or KV mutation is opened.
  */
-#define DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU \
-    "DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU"
-#define DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE \
-    "DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE"
+#define LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU \
+    "LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU"
+#define LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE \
+    "LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE"
 
 static int laguna_metal_dense_q8_gate_up_swiglu_mode(void) {
     const char *value =
-        getenv(DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
-    const int mode = ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(value);
+        getenv(LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+    const int mode = lgn2_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(value);
     if (mode >= 0) return mode;
     fprintf(stderr,
-            "ds4: invalid %s='%s'; expected unset, empty, 0, or literal 1\n",
-            DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
+            "lgn2: invalid %s='%s'; expected unset, empty, 0, or literal 1\n",
+            LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
             value ? value : "");
     return -1;
 }
 
 static bool laguna_dense_q8_gate_up_swiglu_weights_eligible(
-        const ds4_weights *weights) {
-    if (!weights || DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA ||
-        DS4_N_LEADING_DENSE == 0u) {
+        const lgn2_weights *weights) {
+    if (!weights || LGN2_MODEL_FAMILY != LGN2_MODEL_FAMILY_LAGUNA ||
+        LGN2_N_LEADING_DENSE == 0u) {
         return false;
     }
-    for (uint32_t il = 0; il < DS4_N_LEADING_DENSE; il++) {
-        const ds4_layer_weights *layer = &weights->layer[il];
+    for (uint32_t il = 0; il < LGN2_N_LEADING_DENSE; il++) {
+        const lgn2_layer_weights *layer = &weights->layer[il];
         if (!layer->ffn_gate || !layer->ffn_up ||
-            layer->ffn_gate->type != DS4_TENSOR_Q8_0 ||
-            layer->ffn_up->type != DS4_TENSOR_Q8_0 ||
+            layer->ffn_gate->type != LGN2_TENSOR_Q8_0 ||
+            layer->ffn_up->type != LGN2_TENSOR_Q8_0 ||
             layer->ffn_gate->ndim < 2 || layer->ffn_up->ndim < 2 ||
-            layer->ffn_gate->dim[0] != DS4_N_EMBD ||
-            layer->ffn_gate->dim[1] != DS4_N_FF_DENSE ||
-            layer->ffn_up->dim[0] != DS4_N_EMBD ||
-            layer->ffn_up->dim[1] != DS4_N_FF_DENSE ||
+            layer->ffn_gate->dim[0] != LGN2_N_EMBD ||
+            layer->ffn_gate->dim[1] != LGN2_N_FF_DENSE ||
+            layer->ffn_up->dim[0] != LGN2_N_EMBD ||
+            layer->ffn_up->dim[1] != LGN2_N_FF_DENSE ||
             layer->ffn_gate->dim[0] != 3072u ||
             layer->ffn_gate->dim[1] != 12288u ||
             layer->ffn_up->dim[0] != 3072u ||
@@ -3552,22 +3552,22 @@ static bool laguna_dense_q8_gate_up_swiglu_weights_eligible(
 }
 
 static bool laguna_dense_q8_gate_up_swiglu_model_ranges_valid(
-        const ds4_model   *model,
-        const ds4_weights *weights) {
+        const lgn2_model   *model,
+        const lgn2_weights *weights) {
     if (!model || !model->map || model->size == 0 || !weights) return false;
-    if ((DS4_N_EMBD % 32u) != 0u || DS4_N_FF_DENSE == 0u) return false;
+    if ((LGN2_N_EMBD % 32u) != 0u || LGN2_N_FF_DENSE == 0u) return false;
 
-    const uint64_t blocks = (uint64_t)DS4_N_EMBD / 32u;
+    const uint64_t blocks = (uint64_t)LGN2_N_EMBD / 32u;
     if (blocks > UINT64_MAX / 34u) return false;
     const uint64_t row_bytes = blocks * 34u;
-    if ((uint64_t)DS4_N_FF_DENSE > UINT64_MAX / row_bytes) return false;
-    const uint64_t weight_bytes = (uint64_t)DS4_N_FF_DENSE * row_bytes;
+    if ((uint64_t)LGN2_N_FF_DENSE > UINT64_MAX / row_bytes) return false;
+    const uint64_t weight_bytes = (uint64_t)LGN2_N_FF_DENSE * row_bytes;
 
-    for (uint32_t il = 0; il < DS4_N_LEADING_DENSE; il++) {
-        const ds4_layer_weights *layer = &weights->layer[il];
-        const ds4_tensor *tensors[] = {layer->ffn_gate, layer->ffn_up};
+    for (uint32_t il = 0; il < LGN2_N_LEADING_DENSE; il++) {
+        const lgn2_layer_weights *layer = &weights->layer[il];
+        const lgn2_tensor *tensors[] = {layer->ffn_gate, layer->ffn_up};
         for (size_t ti = 0; ti < sizeof(tensors) / sizeof(tensors[0]); ti++) {
-            const ds4_tensor *tensor = tensors[ti];
+            const lgn2_tensor *tensor = tensors[ti];
             if (!tensor || tensor->bytes != weight_bytes ||
                 tensor->abs_offset > model->size ||
                 weight_bytes > model->size - tensor->abs_offset) {
@@ -3587,7 +3587,7 @@ static bool laguna_dense_q8_gate_up_swiglu_trace_requested(void) {
     static bool enabled = false;
     if (!initialized) {
         const char *value = getenv(
-            DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE);
+            LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_TRACE);
         enabled = value && value[0] == '1' && value[1] == '\0';
         initialized = 1;
     }
@@ -3597,8 +3597,8 @@ static bool laguna_dense_q8_gate_up_swiglu_trace_requested(void) {
 static bool laguna_dense_q8_gate_up_swiglu_trace_enabled;
 
 static bool laguna_dense_q8_gate_up_swiglu_preflight(
-        const ds4_model   *model,
-        const ds4_weights *weights,
+        const lgn2_model   *model,
+        const lgn2_weights *weights,
         bool              *enabled_out) {
     if (enabled_out) *enabled_out = false;
     const int mode = laguna_metal_dense_q8_gate_up_swiglu_mode();
@@ -3618,29 +3618,29 @@ static bool laguna_dense_q8_gate_up_swiglu_preflight(
         laguna_dense_q8_gate_up_swiglu_weights_eligible(weights);
     if (!weights_eligible) {
         fprintf(stderr,
-                "ds4: %s requested but Laguna leading dense gate/up "
+                "lgn2: %s requested but Laguna leading dense gate/up "
                 "weights are not Q8_0 [3072,12288]; refusing stock fallback\n",
-                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+                LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
         return false;
     }
 #if defined(__APPLE__)
-    ds4_gpu_q8_decode_config q8_config;
+    lgn2_gpu_q8_decode_config q8_config;
     const int q8_config_valid =
-        ds4_gpu_q8_decode_config_snapshot(&q8_config);
+        lgn2_gpu_q8_decode_config_snapshot(&q8_config);
     const int q8_rows_mode = q8_config_valid < 0 ? -1 : q8_config.q8_mv_rows;
     const char *q8_rows_value = q8_config_valid < 0 ? "invalid snapshot" :
         (q8_rows_mode == 2 ? "2" : "4");
 #else
-    const char *q8_rows_value = getenv("DS4_METAL_Q8_MV_ROWS");
+    const char *q8_rows_value = getenv("LGN2_METAL_Q8_MV_ROWS");
     const int q8_rows_mode =
-        ds4_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(q8_rows_value);
+        lgn2_gpu_laguna_dense_q8_gate_up_swiglu_rows_env_mode(q8_rows_value);
 #endif
     if (q8_rows_mode != 2) {
         fprintf(stderr,
-                "ds4: %s requires DS4_METAL_Q8_MV_ROWS unset/2 for "
+                "lgn2: %s requires LGN2_METAL_Q8_MV_ROWS unset/2 for "
                 "the fused decode topology (got '%s'); refusing stock "
                 "fallback\n",
-                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
+                LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
                 q8_rows_value ? q8_rows_value : "");
         return false;
     }
@@ -3648,19 +3648,19 @@ static bool laguna_dense_q8_gate_up_swiglu_preflight(
         laguna_dense_q8_gate_up_swiglu_model_ranges_valid(model, weights);
     if (!ranges_valid) {
         fprintf(stderr,
-                "ds4: %s requested but a Laguna leading dense Q8_0 mapped "
+                "lgn2: %s requested but a Laguna leading dense Q8_0 mapped "
                 "range is missing or outside the model; refusing stock fallback\n",
-                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+                LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
         return false;
     }
 #ifdef __APPLE__
     const bool mid_ready =
-        ds4_gpu_shared_mid_swiglu_q8_0_available() != 0;
+        lgn2_gpu_shared_mid_swiglu_q8_0_available() != 0;
 #else
     const bool mid_ready = false;
 #endif
     const int decision =
-        ds4_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
+        lgn2_gpu_laguna_dense_q8_gate_up_swiglu_preflight_decision(
             mode,
             weights_eligible ? 1 : 0,
             ranges_valid ? 1 : 0,
@@ -3669,19 +3669,19 @@ static bool laguna_dense_q8_gate_up_swiglu_preflight(
 #ifdef __APPLE__
     if (decision != 1) {
         fprintf(stderr,
-                "ds4: %s requested but the Metal Q8 gate/up+SwiGLU "
+                "lgn2: %s requested but the Metal Q8 gate/up+SwiGLU "
                 "decode pipeline is unavailable (mid=%d); "
                 "refusing stock fallback\n",
-                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
+                LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU,
                 mid_ready ? 1 : 0);
         return false;
     }
 #else
     (void)decision;
     fprintf(stderr,
-            "ds4: %s requested but this build has no Metal fused "
+            "lgn2: %s requested but this build has no Metal fused "
             "gate/up+SwiGLU pipeline\n",
-            DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
+            LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU);
     return false;
 #endif
     if (enabled_out) *enabled_out = true;
@@ -3698,21 +3698,21 @@ static bool laguna_dense_q8_gate_up_swiglu_preflight(
  * requests it, exact verifier rows stay on the stock path, and an explicit
  * request that cannot be honored fails before any graph mutation.
  */
-#define DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH \
-    "DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH"
+#define LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH \
+    "LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH"
 
 static bool laguna_dense_q8_gate_up_swiglu_batch_preflight(
-        const ds4_model   *model,
-        const ds4_weights *weights,
+        const lgn2_model   *model,
+        const lgn2_weights *weights,
         bool              *enabled_out) {
     if (enabled_out) *enabled_out = false;
     const char *value =
-        getenv(DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
-    const int mode = ds4_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(value);
+        getenv(LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
+    const int mode = lgn2_gpu_laguna_dense_q8_gate_up_swiglu_env_mode(value);
     if (mode < 0) {
         fprintf(stderr,
-                "ds4: invalid %s='%s'; expected unset, empty, 0, or literal 1\n",
-                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH,
+                "lgn2: invalid %s='%s'; expected unset, empty, 0, or literal 1\n",
+                LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH,
                 value ? value : "");
         return false;
     }
@@ -3720,27 +3720,27 @@ static bool laguna_dense_q8_gate_up_swiglu_batch_preflight(
     if (!laguna_dense_q8_gate_up_swiglu_weights_eligible(weights) ||
         !laguna_dense_q8_gate_up_swiglu_model_ranges_valid(model, weights)) {
         fprintf(stderr,
-                "ds4: %s requested but Laguna leading dense gate/up "
+                "lgn2: %s requested but Laguna leading dense gate/up "
                 "weights are not mapped Q8_0 [3072,12288]; refusing stock "
                 "fallback\n",
-                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
+                LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
         return false;
     }
 #ifdef __APPLE__
-    if (ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_available() == 0) {
+    if (lgn2_gpu_laguna_dense_q8_gate_up_swiglu_batch_available() == 0) {
         fprintf(stderr,
-                "ds4: %s requested but the Metal batched Q8 gate/up+SwiGLU "
+                "lgn2: %s requested but the Metal batched Q8 gate/up+SwiGLU "
                 "pipeline is unavailable; refusing stock fallback\n",
-                DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
+                LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
         return false;
     }
     if (enabled_out) *enabled_out = true;
     return true;
 #else
     fprintf(stderr,
-            "ds4: %s requested but this build has no Metal batched fused "
+            "lgn2: %s requested but this build has no Metal batched fused "
             "gate/up+SwiGLU pipeline\n",
-            DS4_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
+            LGN2_METAL_LAGUNA_DENSE_Q8_GATE_UP_SWIGLU_BATCH);
     return false;
 #endif
 }
@@ -3752,7 +3752,7 @@ static laguna_dense_q8_gate_up_swiglu_counters
     laguna_dense_q8_gate_up_swiglu_reported;
 
 static void laguna_dense_q8_gate_up_swiglu_pending_clear(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!g || !laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
     if (g->dense_q8_pending.decode_mid_fused == 0u &&
         g->dense_q8_pending.ordinary_prefill_stock == 0u) {
@@ -3762,14 +3762,14 @@ static void laguna_dense_q8_gate_up_swiglu_pending_clear(
 }
 
 static void laguna_dense_q8_gate_up_swiglu_note_decode_mid(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
     if (!g) return;
     g->dense_q8_pending.decode_mid_fused++;
 }
 
 static void laguna_dense_q8_gate_up_swiglu_note_prefill_stock(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
     if (!g) return;
     g->dense_q8_pending.ordinary_prefill_stock++;
@@ -3779,7 +3779,7 @@ static void laguna_dense_q8_gate_up_swiglu_note_prefill_stock(
  * the caller may still have an active/pending Metal graph.  Only call this
  * after a waited graph boundary, and say so explicitly in the diagnostic. */
 static void laguna_dense_q8_gate_up_swiglu_report_waited(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!laguna_dense_q8_gate_up_swiglu_trace_enabled) return;
     if (!g) return;
     const laguna_dense_q8_gate_up_swiglu_counters pending =
@@ -3805,7 +3805,7 @@ static void laguna_dense_q8_gate_up_swiglu_report_waited(
         return;
     }
     fprintf(stderr,
-            "ds4: Laguna dense Q8 path counters "
+            "lgn2: Laguna dense Q8 path counters "
             "decode_mid_fused=%llu ordinary_prefill_stock=%llu route=%s "
             "completion=waited "
             "encoded=successful\n",
@@ -3816,9 +3816,9 @@ static void laguna_dense_q8_gate_up_swiglu_report_waited(
 }
 
 static bool laguna_graph_routed_moe_decode_rows(
-        ds4_laguna_gpu_graph   *g,
-        const ds4_model        *model,
-        const ds4_layer_weights *l,
+        lgn2_laguna_gpu_graph   *g,
+        const lgn2_model        *model,
+        const lgn2_layer_weights *l,
         uint32_t                layer,
         uint32_t                n_rows,
         uint64_t                gate_expert_bytes,
@@ -3829,20 +3829,20 @@ static bool laguna_graph_routed_moe_decode_rows(
         uint64_t                down_row_bytes) {
     if (!g || !model || !l || n_rows == 0u) return false;
     const uint64_t embd_bytes =
-        (uint64_t)DS4_N_EMBD * sizeof(float);
+        (uint64_t)LGN2_N_EMBD * sizeof(float);
     const uint64_t mid_elems =
-        (uint64_t)DS4_N_EXPERT_USED * DS4_N_FF_EXP;
+        (uint64_t)LGN2_N_EXPERT_USED * LGN2_N_FF_EXP;
     const uint64_t mid_bytes = mid_elems * sizeof(float);
     const uint64_t selected_bytes =
-        (uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t);
+        (uint64_t)LGN2_N_EXPERT_USED * sizeof(int32_t);
     const uint64_t weight_bytes =
-        (uint64_t)DS4_N_EXPERT_USED * sizeof(float);
+        (uint64_t)LGN2_N_EXPERT_USED * sizeof(float);
 
 #if defined(__APPLE__)
-    if (l->ffn_gate_exps->type == DS4_TENSOR_Q4_K &&
-        l->ffn_up_exps->type == DS4_TENSOR_Q4_K &&
-        l->ffn_down_exps->type == DS4_TENSOR_Q4_K) {
-        return ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
+    if (l->ffn_gate_exps->type == LGN2_TENSOR_Q4_K &&
+        l->ffn_up_exps->type == LGN2_TENSOR_Q4_K &&
+        l->ffn_down_exps->type == LGN2_TENSOR_Q4_K) {
+        return lgn2_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
                    g->ffn_out,
                    g->routed_mid,
                    model->map,
@@ -3859,29 +3859,29 @@ static bool laguna_graph_routed_moe_decode_rows(
                    up_row_bytes,
                    down_expert_bytes,
                    down_row_bytes,
-                   DS4_N_EMBD,
-                   DS4_N_FF_EXP,
-                   DS4_N_EMBD,
+                   LGN2_N_EMBD,
+                   LGN2_N_FF_EXP,
+                   LGN2_N_EMBD,
                    g->router_selected,
                    g->router_weights,
-                   DS4_N_EXPERT,
-                   DS4_N_EXPERT_USED,
+                   LGN2_N_EXPERT,
+                   LGN2_N_EXPERT_USED,
                    layer,
                    g->ffn_norm,
                    n_rows,
                    (uint32_t)mid_elems) != 0;
     }
-    if ((l->ffn_gate_exps->type == DS4_TENSOR_Q2_K ||
-         l->ffn_gate_exps->type == DS4_TENSOR_Q3_K) &&
+    if ((l->ffn_gate_exps->type == LGN2_TENSOR_Q2_K ||
+         l->ffn_gate_exps->type == LGN2_TENSOR_Q3_K) &&
         l->ffn_up_exps->type == l->ffn_gate_exps->type &&
         l->ffn_down_exps->type == l->ffn_gate_exps->type &&
-        n_rows <= DS4_DFLASH_BLOCK_SIZE) {
+        n_rows <= LGN2_DFLASH_BLOCK_SIZE) {
         /*
          * The Q2_K/Q3_K batch dispatch uses the same independent per-token
          * kernels as one-token decode. Encoding all verifier rows together
          * removes repeated encoder boundaries without changing reductions.
          */
-        return ds4_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
+        return lgn2_gpu_glm_routed_moe_batch_decode_exact_q2_q3_tensor(
                    g->ffn_out,
                    g->routed_mid,
                    model->map,
@@ -3898,13 +3898,13 @@ static bool laguna_graph_routed_moe_decode_rows(
                    up_row_bytes,
                    down_expert_bytes,
                    down_row_bytes,
-                   DS4_N_EMBD,
-                   DS4_N_FF_EXP,
-                   DS4_N_EMBD,
+                   LGN2_N_EMBD,
+                   LGN2_N_FF_EXP,
+                   LGN2_N_EMBD,
                    g->router_selected,
                    g->router_weights,
-                   DS4_N_EXPERT,
-                   DS4_N_EXPERT_USED,
+                   LGN2_N_EXPERT,
+                   LGN2_N_EXPERT_USED,
                    layer,
                    g->ffn_norm,
                    n_rows,
@@ -3912,23 +3912,23 @@ static bool laguna_graph_routed_moe_decode_rows(
     }
 #endif
     for (uint32_t row = 0; row < n_rows; row++) {
-        ds4_gpu_tensor *out = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *out = lgn2_gpu_tensor_view(
             g->ffn_out, (uint64_t)row * embd_bytes, embd_bytes);
-        ds4_gpu_tensor *mid = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *mid = lgn2_gpu_tensor_view(
             g->routed_mid, (uint64_t)row * mid_bytes, mid_bytes);
-        ds4_gpu_tensor *selected = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *selected = lgn2_gpu_tensor_view(
             g->router_selected,
             (uint64_t)row * selected_bytes,
             selected_bytes);
-        ds4_gpu_tensor *weights = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *weights = lgn2_gpu_tensor_view(
             g->router_weights,
             (uint64_t)row * weight_bytes,
             weight_bytes);
-        ds4_gpu_tensor *x = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *x = lgn2_gpu_tensor_view(
             g->ffn_norm, (uint64_t)row * embd_bytes, embd_bytes);
         const int ok =
             out && mid && selected && weights && x &&
-            ds4_gpu_glm_routed_moe_one_tensor(
+            lgn2_gpu_glm_routed_moe_one_tensor(
                 out,
                 mid,
                 model->map,
@@ -3945,42 +3945,42 @@ static bool laguna_graph_routed_moe_decode_rows(
                 up_row_bytes,
                 down_expert_bytes,
                 down_row_bytes,
-                DS4_N_EMBD,
-                DS4_N_FF_EXP,
-                DS4_N_EMBD,
+                LGN2_N_EMBD,
+                LGN2_N_FF_EXP,
+                LGN2_N_EMBD,
                 selected,
                 weights,
-                DS4_N_EXPERT,
-                DS4_N_EXPERT_USED,
+                LGN2_N_EXPERT,
+                LGN2_N_EXPERT_USED,
                 layer,
                 x,
                 true);
-        ds4_gpu_tensor_free(x);
-        ds4_gpu_tensor_free(weights);
-        ds4_gpu_tensor_free(selected);
-        ds4_gpu_tensor_free(mid);
-        ds4_gpu_tensor_free(out);
+        lgn2_gpu_tensor_free(x);
+        lgn2_gpu_tensor_free(weights);
+        lgn2_gpu_tensor_free(selected);
+        lgn2_gpu_tensor_free(mid);
+        lgn2_gpu_tensor_free(out);
         if (!ok) return false;
     }
     return true;
 }
 
 /* Opt-in fused decode router (logits matvec + SIMD top-k in one dispatch).
- * Literal-1 opt-in like the other DS4_METAL_LAGUNA_* routes; cached
+ * Literal-1 opt-in like the other LGN2_METAL_LAGUNA_* routes; cached
  * process-wide since the router runs once per layer per token.  Returns -1
  * on an invalid value. */
 static int laguna_metal_router_decode_fused_mode(void) {
     static int cache = -2;
     if (cache == -2) {
 #if defined(__APPLE__)
-        const char *value = getenv("DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED");
+        const char *value = getenv("LGN2_METAL_LAGUNA_ROUTER_DECODE_FUSED");
         if (!value || value[0] == '\0' || strcmp(value, "0") == 0) {
             cache = 0;
         } else if (strcmp(value, "1") == 0) {
             cache = 1;
         } else {
             fprintf(stderr,
-                    "ds4: invalid DS4_METAL_LAGUNA_ROUTER_DECODE_FUSED='%s'; "
+                    "lgn2: invalid LGN2_METAL_LAGUNA_ROUTER_DECODE_FUSED='%s'; "
                     "expected unset, empty, 0, or literal 1\n", value);
             cache = -1;
         }
@@ -3992,9 +3992,9 @@ static int laguna_metal_router_decode_fused_mode(void) {
 }
 
 static bool laguna_graph_router_decode_rows(
-        ds4_laguna_gpu_graph    *g,
-        const ds4_model         *model,
-        const ds4_layer_weights *l,
+        lgn2_laguna_gpu_graph    *g,
+        const lgn2_model         *model,
+        const lgn2_layer_weights *l,
         uint32_t                 n_rows,
         bool                     allow_fused) {
     if (!g || !model || !l || n_rows == 0u) return false;
@@ -4005,7 +4005,7 @@ static bool laguna_graph_router_decode_rows(
         const int fused_router = laguna_metal_router_decode_fused_mode();
         if (fused_router < 0) return false;
         if (fused_router > 0 && n_rows == 1u) {
-            return ds4_gpu_laguna_router_decode_fused_tensor(
+            return lgn2_gpu_laguna_router_decode_fused_tensor(
                        g->router_selected,
                        g->router_weights,
                        g->router_probs,
@@ -4015,24 +4015,24 @@ static bool laguna_graph_router_decode_rows(
                        l->ffn_gate_inp->abs_offset,
                        l->ffn_exp_probs_b->abs_offset,
                        g->ffn_norm,
-                       (uint32_t)DS4_N_EMBD,
-                       DS4_N_EXPERT,
-                       DS4_N_EXPERT_USED,
-                       DS4_EXPERT_WEIGHT_SCALE) != 0;
+                       (uint32_t)LGN2_N_EMBD,
+                       LGN2_N_EXPERT,
+                       LGN2_N_EXPERT_USED,
+                       LGN2_EXPERT_WEIGHT_SCALE) != 0;
         }
     }
 #endif
 #if defined(__APPLE__)
-    return ds4_gpu_matmul_f32_decode_rows_exact_tensor(
+    return lgn2_gpu_matmul_f32_decode_rows_exact_tensor(
                g->router_logits,
                model->map,
                model->size,
                l->ffn_gate_inp->abs_offset,
-               DS4_N_EMBD,
-               DS4_N_EXPERT,
+               LGN2_N_EMBD,
+               LGN2_N_EXPERT,
                g->ffn_norm,
                n_rows) != 0 &&
-           ds4_gpu_glm_router_select_batch_tensor(
+           lgn2_gpu_glm_router_select_batch_tensor(
                g->router_selected,
                g->router_weights,
                g->router_probs,
@@ -4040,51 +4040,51 @@ static bool laguna_graph_router_decode_rows(
                model->size,
                l->ffn_exp_probs_b->abs_offset,
                g->router_logits,
-               DS4_N_EXPERT,
-               DS4_N_EXPERT_USED,
-               DS4_EXPERT_WEIGHT_SCALE,
+               LGN2_N_EXPERT,
+               LGN2_N_EXPERT_USED,
+               LGN2_EXPERT_WEIGHT_SCALE,
                n_rows) != 0;
 #endif
     const uint64_t embd_bytes =
-        (uint64_t)DS4_N_EMBD * sizeof(float);
+        (uint64_t)LGN2_N_EMBD * sizeof(float);
     const uint64_t expert_f32_bytes =
-        (uint64_t)DS4_N_EXPERT * sizeof(float);
+        (uint64_t)LGN2_N_EXPERT * sizeof(float);
     const uint64_t selected_bytes =
-        (uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t);
+        (uint64_t)LGN2_N_EXPERT_USED * sizeof(int32_t);
     const uint64_t selected_weight_bytes =
-        (uint64_t)DS4_N_EXPERT_USED * sizeof(float);
+        (uint64_t)LGN2_N_EXPERT_USED * sizeof(float);
 
     for (uint32_t row = 0; row < n_rows; row++) {
-        ds4_gpu_tensor *logits = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *logits = lgn2_gpu_tensor_view(
             g->router_logits,
             (uint64_t)row * expert_f32_bytes,
             expert_f32_bytes);
-        ds4_gpu_tensor *probs = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *probs = lgn2_gpu_tensor_view(
             g->router_probs,
             (uint64_t)row * expert_f32_bytes,
             expert_f32_bytes);
-        ds4_gpu_tensor *selected = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *selected = lgn2_gpu_tensor_view(
             g->router_selected,
             (uint64_t)row * selected_bytes,
             selected_bytes);
-        ds4_gpu_tensor *weights = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *weights = lgn2_gpu_tensor_view(
             g->router_weights,
             (uint64_t)row * selected_weight_bytes,
             selected_weight_bytes);
-        ds4_gpu_tensor *x = ds4_gpu_tensor_view(
+        lgn2_gpu_tensor *x = lgn2_gpu_tensor_view(
             g->ffn_norm, (uint64_t)row * embd_bytes, embd_bytes);
         const int ok =
             logits && probs && selected && weights && x &&
-            ds4_gpu_matmul_f32_tensor(
+            lgn2_gpu_matmul_f32_tensor(
                 logits,
                 model->map,
                 model->size,
                 l->ffn_gate_inp->abs_offset,
-                DS4_N_EMBD,
-                DS4_N_EXPERT,
+                LGN2_N_EMBD,
+                LGN2_N_EXPERT,
                 x,
                 1u) &&
-            ds4_gpu_glm_router_select_tensor(
+            lgn2_gpu_glm_router_select_tensor(
                 selected,
                 weights,
                 probs,
@@ -4092,25 +4092,25 @@ static bool laguna_graph_router_decode_rows(
                 model->size,
                 l->ffn_exp_probs_b->abs_offset,
                 logits,
-                DS4_N_EXPERT,
-                DS4_N_EXPERT_USED,
-                DS4_EXPERT_WEIGHT_SCALE);
-        ds4_gpu_tensor_free(x);
-        ds4_gpu_tensor_free(weights);
-        ds4_gpu_tensor_free(selected);
-        ds4_gpu_tensor_free(probs);
-        ds4_gpu_tensor_free(logits);
+                LGN2_N_EXPERT,
+                LGN2_N_EXPERT_USED,
+                LGN2_EXPERT_WEIGHT_SCALE);
+        lgn2_gpu_tensor_free(x);
+        lgn2_gpu_tensor_free(weights);
+        lgn2_gpu_tensor_free(selected);
+        lgn2_gpu_tensor_free(probs);
+        lgn2_gpu_tensor_free(logits);
         if (!ok) return false;
     }
     return true;
 }
 
-static void dflash_graph_free(ds4_dflash_gpu_graph *g) {
+static void dflash_graph_free(lgn2_dflash_gpu_graph *g) {
     lgn_dflash_graph_free(g);
 }
 
-static bool dflash_graph_alloc(ds4_dflash_gpu_graph *g) {
-    if (!g || DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return false;
+static bool dflash_graph_alloc(lgn2_dflash_gpu_graph *g) {
+    if (!g || LGN2_MODEL_FAMILY != LGN2_MODEL_FAMILY_LAGUNA) return false;
 #ifdef __APPLE__
     if (!laguna_metal_swa_gqa9_preflight(NULL,
                                          "Laguna DFlash graph allocation",
@@ -4118,13 +4118,13 @@ static bool dflash_graph_alloc(ds4_dflash_gpu_graph *g) {
 #endif
     memset(g, 0, sizeof(*g));
     if (lgn_dflash_graph_alloc(g)) return true;
-    fprintf(stderr, "ds4: failed to allocate DFlash GPU graph\n");
+    fprintf(stderr, "lgn2: failed to allocate DFlash GPU graph\n");
     dflash_graph_free(g);
     return false;
 }
 
 static lgn_dflash_exec_context dflash_graph_exec_context(
-        const ds4_engine *e) {
+        const lgn2_engine *e) {
     lgn_dflash_exec_context ctx;
     memset(&ctx, 0, sizeof(ctx));
     if (!e) return ctx;
@@ -4137,11 +4137,11 @@ static lgn_dflash_exec_context dflash_graph_exec_context(
     return ctx;
 }
 
-/* ds4.c owns admission and the terminal command boundary; the execution
+/* lgn2_engine.c owns admission and the terminal command boundary; the execution
  * module only records support work into the active transaction. */
 static bool dflash_graph_encode_inject(
-        ds4_dflash_gpu_graph *g,
-        const ds4_engine     *e,
+        lgn2_dflash_gpu_graph *g,
+        const lgn2_engine     *e,
         uint32_t              pos0,
         uint32_t              n_rows) {
     if (!g || !e || !e->dflash_ready || n_rows == 0u ||
@@ -4151,17 +4151,17 @@ static bool dflash_graph_encode_inject(
     const lgn_dflash_exec_context ctx = dflash_graph_exec_context(e);
     if (!lgn_dflash_exec_context_valid(&ctx)) return false;
 
-    bool ok = ds4_gpu_commands_active() != 0;
-    if (!ok) ok = ds4_gpu_begin_commands() != 0;
+    bool ok = lgn2_gpu_commands_active() != 0;
+    if (!ok) ok = lgn2_gpu_begin_commands() != 0;
     if (ok) {
         ok = lgn_dflash_exec_encode_record(g, &ctx, pos0, n_rows);
     }
     /* The wrapper retains the former admission/terminal behavior.  The
      * record-only module never closes or discards this caller-owned batch. */
-    if (ds4_gpu_commands_active()) {
+    if (lgn2_gpu_commands_active()) {
         if (ok) {
-            if (ds4_gpu_end_commands() == 0) ok = false;
-        } else if (ds4_gpu_discard_commands() == 0) {
+            if (lgn2_gpu_end_commands() == 0) ok = false;
+        } else if (lgn2_gpu_discard_commands() == 0) {
             ok = false;
         }
     }
@@ -4176,32 +4176,32 @@ static void laguna_metal_qk_norm_rope_simd32_trace_route(
         bool        capture,
         bool        verifier);
 static void laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
-        ds4_laguna_gpu_graph *g);
+        lgn2_laguna_gpu_graph *g);
 static bool laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
-        ds4_laguna_gpu_graph *g);
+        lgn2_laguna_gpu_graph *g);
 #endif
 
 static bool dflash_graph_commands_active(void) {
-    return ds4_gpu_commands_active() != 0;
+    return lgn2_gpu_commands_active() != 0;
 }
 
 static void dflash_graph_restore_cursors(
-        ds4_dflash_gpu_graph *g,
-        ds4_gpu_tensor       *saved_cur,
-        ds4_gpu_tensor       *saved_next) {
+        lgn2_dflash_gpu_graph *g,
+        lgn2_gpu_tensor       *saved_cur,
+        lgn2_gpu_tensor       *saved_next) {
     if (!g) return;
     g->cur = saved_cur;
     g->next = saved_next;
 }
 
 static bool dflash_graph_draft_block(
-        ds4_dflash_gpu_graph *g,
-        const ds4_engine     *e,
+        lgn2_dflash_gpu_graph *g,
+        const lgn2_engine     *e,
         int                   first_token,
         uint32_t              pos0,
         uint32_t              n_draft) {
     if (!g || !e || !e->dflash_ready ||
-        first_token < 0 || first_token >= (int)DS4_N_VOCAB ||
+        first_token < 0 || first_token >= (int)LGN2_N_VOCAB ||
         n_draft == 0u || n_draft + 1u > g->block_cap) {
         return false;
     }
@@ -4211,29 +4211,29 @@ static bool dflash_graph_draft_block(
     if (!dflash_graph_commands_active()) return false;
     const lgn_dflash_exec_context exec_ctx = dflash_graph_exec_context(e);
     if (!lgn_dflash_exec_context_valid(&exec_ctx)) return false;
-    ds4_gpu_tensor *saved_cur = g->cur;
-    ds4_gpu_tensor *saved_next = g->next;
+    lgn2_gpu_tensor *saved_cur = g->cur;
+    lgn2_gpu_tensor *saved_next = g->next;
     const uint32_t n_rows = n_draft + 1u;
-    uint32_t token_ids[DS4_DFLASH_BLOCK_SIZE];
+    uint32_t token_ids[LGN2_DFLASH_BLOCK_SIZE];
     token_ids[0] = (uint32_t)first_token;
     for (uint32_t row = 1; row < n_rows; row++) {
         token_ids[row] = e->dflash_weights.mask_token_id;
     }
-    if (!ds4_gpu_tensor_write(g->tokens,
+    if (!lgn2_gpu_tensor_write(g->tokens,
                               0,
                               token_ids,
                               (uint64_t)n_rows * sizeof(token_ids[0]))) {
         return false;
     }
 
-    const ds4_dflash_weights *w = exec_ctx.support_weights;
-    const uint32_t embd = DS4_SHAPE_LAGUNA_S21.n_embd;
-    const uint32_t n_head = DS4_SHAPE_LAGUNA_S21.n_head;
-    const uint32_t n_head_kv = DS4_SHAPE_LAGUNA_S21.n_head_kv;
-    const uint32_t head_dim = DS4_SHAPE_LAGUNA_S21.n_head_dim;
+    const lgn2_dflash_weights *w = exec_ctx.support_weights;
+    const uint32_t embd = LGN2_SHAPE_LAGUNA_S21.n_embd;
+    const uint32_t n_head = LGN2_SHAPE_LAGUNA_S21.n_head;
+    const uint32_t n_head_kv = LGN2_SHAPE_LAGUNA_S21.n_head_kv;
+    const uint32_t head_dim = LGN2_SHAPE_LAGUNA_S21.n_head_dim;
     const uint32_t q_dim = n_head * head_dim;
     const uint32_t kv_dim = n_head_kv * head_dim;
-    const uint32_t ff = DS4_SHAPE_LAGUNA_S21.n_ff_dense;
+    const uint32_t ff = LGN2_SHAPE_LAGUNA_S21.n_ff_dense;
     const void *weight_map = exec_ctx.f16_map ?
         exec_ctx.f16_map : exec_ctx.support_map;
     const uint64_t weight_map_size = exec_ctx.f16_map ?
@@ -4241,20 +4241,20 @@ static bool dflash_graph_draft_block(
 
     bool ok = true;
     if (ok) {
-        ok = ds4_gpu_embed_tokens_quant_tensor(
+        ok = lgn2_gpu_embed_tokens_quant_tensor(
                  g->cur,
                  g->tokens,
                  e->model.map,
                  e->model.size,
                  e->weights.token_embd->abs_offset,
                  e->weights.token_embd->type,
-                 DS4_N_VOCAB,
+                 LGN2_N_VOCAB,
                  n_rows,
                  embd) != 0;
     }
-    for (uint32_t il = 0; ok && il < DS4_DFLASH_N_LAYER; il++) {
-        const ds4_dflash_layer_weights *l = &w->layer[il];
-        ok = ds4_gpu_rms_norm_weight_rows_tensor(
+    for (uint32_t il = 0; ok && il < LGN2_DFLASH_N_LAYER; il++) {
+        const lgn2_dflash_layer_weights *l = &w->layer[il];
+        ok = lgn2_gpu_rms_norm_weight_rows_tensor(
                  g->norm,
                  g->cur,
                  weight_map,
@@ -4262,7 +4262,7 @@ static bool dflash_graph_draft_block(
                  l->attn_norm->abs_offset,
                  embd,
                  n_rows,
-                 DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
+                 LGN2_SHAPE_LAGUNA_S21.rms_eps) != 0;
         if (ok) {
             ok = lgn_dflash_exec_matmul(g->q, &exec_ctx, l->attn_q,
                                         g->norm, n_rows) &&
@@ -4274,7 +4274,7 @@ static bool dflash_graph_draft_block(
                                         g->norm, n_rows);
         }
         if (ok) {
-            ok = ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+            ok = lgn2_gpu_laguna_qk_head_rms_norm_rope_tensor(
                      g->q,
                      g->k,
                      weight_map,
@@ -4285,19 +4285,19 @@ static bool dflash_graph_draft_block(
                      n_head,
                      n_head_kv,
                      head_dim,
-                     DS4_SHAPE_LAGUNA_S21.n_rot_swa,
+                     LGN2_SHAPE_LAGUNA_S21.n_rot_swa,
                      pos0,
-                     DS4_CONTEXT_LENGTH,
+                     LGN2_CONTEXT_LENGTH,
                      500000.0f,
                      1.0f,
                      0.0f,
                      1.0f,
                      0.0f,
                      0.0f,
-                     DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
+                     LGN2_SHAPE_LAGUNA_S21.rms_eps) != 0;
         }
         if (ok) {
-            ok = ds4_gpu_laguna_attention_prefill_tensor(
+            ok = lgn2_gpu_laguna_attention_prefill_tensor(
                      g->heads,
                      g->key_cache[il],
                      g->value_cache[il],
@@ -4320,7 +4320,7 @@ static bool dflash_graph_draft_block(
             ok = lgn_dflash_exec_matmul(g->attn_out, &exec_ctx,
                                         l->attn_output, g->heads,
                                         n_rows) &&
-                 ds4_gpu_add_rms_norm_weight_rows_tensor(
+                 lgn2_gpu_add_rms_norm_weight_rows_tensor(
                      g->ffn_norm,
                      g->after_attn,
                      g->cur,
@@ -4330,7 +4330,7 @@ static bool dflash_graph_draft_block(
                      l->ffn_norm->abs_offset,
                      embd,
                      n_rows,
-                     DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
+                     LGN2_SHAPE_LAGUNA_S21.rms_eps) != 0;
         }
         if (ok) {
             ok = lgn_dflash_exec_matmul(g->ffn_gate, &exec_ctx,
@@ -4341,7 +4341,7 @@ static bool dflash_graph_draft_block(
                                         n_rows);
         }
         if (ok) {
-            ok = ds4_gpu_swiglu_tensor(g->ffn_mid,
+            ok = lgn2_gpu_swiglu_tensor(g->ffn_mid,
                                         g->ffn_gate,
                                         g->ffn_up,
                                         (uint64_t)n_rows * ff,
@@ -4352,19 +4352,19 @@ static bool dflash_graph_draft_block(
             ok = lgn_dflash_exec_matmul(g->ffn_out, &exec_ctx,
                                         l->ffn_down, g->ffn_mid,
                                         n_rows) &&
-                 ds4_gpu_add_tensor(g->next,
+                 lgn2_gpu_add_tensor(g->next,
                                     g->after_attn,
                                     g->ffn_out,
                                     (uint64_t)n_rows * embd) != 0;
         }
         if (ok) {
-            ds4_gpu_tensor *tmp = g->cur;
+            lgn2_gpu_tensor *tmp = g->cur;
             g->cur = g->next;
             g->next = tmp;
         }
     }
     if (ok) {
-        ok = ds4_gpu_rms_norm_weight_rows_tensor(
+        ok = lgn2_gpu_rms_norm_weight_rows_tensor(
                  g->output_norm,
                  g->cur,
                  weight_map,
@@ -4372,12 +4372,12 @@ static bool dflash_graph_draft_block(
                  w->output_norm->abs_offset,
                  embd,
                  n_rows,
-                 DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
+                 LGN2_SHAPE_LAGUNA_S21.rms_eps) != 0;
     }
     if (ok) {
 #ifdef __APPLE__
-        if (e->weights.output->type == DS4_TENSOR_Q8_0) {
-            ok = ds4_gpu_matmul_q8_0_dflash_tensor(
+        if (e->weights.output->type == LGN2_TENSOR_Q8_0) {
+            ok = lgn2_gpu_matmul_q8_0_dflash_tensor(
                      g->logits,
                      e->model.map,
                      e->model.size,
@@ -4397,19 +4397,19 @@ static bool dflash_graph_draft_block(
         }
     }
     if (ok) {
-        ok = ds4_gpu_indexer_topk_tensor(g->argmax,
+        ok = lgn2_gpu_indexer_topk_tensor(g->argmax,
                                           g->logits,
-                                          DS4_N_VOCAB,
+                                          LGN2_N_VOCAB,
                                           n_rows,
                                           1) != 0;
     }
     if (ok && e->dflash_p_min > 0.0f) {
-        ok = ds4_gpu_dflash_probabilities_tensor(
+        ok = lgn2_gpu_dflash_probabilities_tensor(
                  g->probabilities,
                  g->logits,
                  g->argmax,
                  n_rows,
-                 DS4_N_VOCAB) != 0;
+                 LGN2_N_VOCAB) != 0;
     }
     if (!ok) {
         /* The caller will discard the active batch.  Restore the host-side
@@ -4428,29 +4428,29 @@ static bool dflash_graph_draft_block(
  * mutation. The Laguna S 2.1 model alternates 48- and 72-query-head layers,
  * with 8 KV heads and 64/128 rotary dimensions for global/SWA layers. */
 static bool laguna_metal_qk_norm_rope_simd32_preflight(void) {
-    int mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+    int mode = lgn2_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
     if (mode == -2) {
-        mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
-                48u, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, 64u);
-        mode = ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+        mode = lgn2_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                48u, LGN2_N_HEAD_KV, LGN2_N_HEAD_DIM, 64u);
+        mode = lgn2_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
     }
-    int atlas_mode = ds4_gpu_laguna_rope_atlas_plan_mode_cached();
+    int atlas_mode = lgn2_gpu_laguna_rope_atlas_plan_mode_cached();
     if (atlas_mode == -2) {
         /* Select and allocate the immutable atlas graph plan once.  The
          * backend owns strict environment parsing; later layer calls consume
          * this cached result instead of reparsing getenv. */
-        if (ds4_gpu_laguna_rope_atlas_preflight(
-                    48u, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, 64u) < 0) {
+        if (lgn2_gpu_laguna_rope_atlas_preflight(
+                    48u, LGN2_N_HEAD_KV, LGN2_N_HEAD_DIM, 64u) < 0) {
             return false;
         }
-        atlas_mode = ds4_gpu_laguna_rope_atlas_plan_mode_cached();
+        atlas_mode = lgn2_gpu_laguna_rope_atlas_plan_mode_cached();
     }
     if (mode < 0) return false;
     if (atlas_mode < 0) return false;
     if (mode == 0 && atlas_mode == 0) return true;
-    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) {
+    if (LGN2_MODEL_FAMILY != LGN2_MODEL_FAMILY_LAGUNA) {
         fprintf(stderr,
-                "ds4: Laguna Q/K norm/RoPE experiment requested outside the "
+                "lgn2: Laguna Q/K norm/RoPE experiment requested outside the "
                 "Laguna S 2.1 graph\n");
         return false;
     }
@@ -4459,14 +4459,14 @@ static bool laguna_metal_qk_norm_rope_simd32_preflight(void) {
     for (size_t hi = 0; hi < sizeof(q_heads) / sizeof(q_heads[0]); hi++) {
         for (size_t ri = 0; ri < sizeof(n_rots) / sizeof(n_rots[0]); ri++) {
             if (mode > 0 &&
-                ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
-                    q_heads[hi], DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
+                lgn2_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+                    q_heads[hi], LGN2_N_HEAD_KV, LGN2_N_HEAD_DIM,
                     n_rots[ri]) != 1) {
                 return false;
             }
             if (atlas_mode > 0 &&
-                ds4_gpu_laguna_rope_atlas_preflight(
-                    q_heads[hi], DS4_N_HEAD_KV, DS4_N_HEAD_DIM,
+                lgn2_gpu_laguna_rope_atlas_preflight(
+                    q_heads[hi], LGN2_N_HEAD_KV, LGN2_N_HEAD_DIM,
                     n_rots[ri]) != 1) {
                 return false;
             }
@@ -4480,9 +4480,9 @@ static void laguna_metal_qk_norm_rope_simd32_trace_route(
         uint32_t    n_tokens,
         bool        capture,
         bool        verifier) {
-    if (!ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) return;
+    if (!lgn2_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) return;
     fprintf(stderr,
-            "ds4: Laguna Q/K norm/RoPE SIMD32 route=%s tokens=%u "
+            "lgn2: Laguna Q/K norm/RoPE SIMD32 route=%s tokens=%u "
             "capture=%d verifier=%d\n",
             route ? route : "unknown", n_tokens, capture ? 1 : 0,
             verifier ? 1 : 0);
@@ -4503,11 +4503,11 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence(
         bool        command_waited) {
     if (!command_waited) return false;
     const uint64_t encoded_after =
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count();
     const uint64_t encoded_delta = encoded_after >= encoded_before ?
         encoded_after - encoded_before : UINT64_MAX;
     const uint64_t completed_after =
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count();
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count();
     const uint64_t completed_delta = completed_after >= completed_before ?
         completed_after - completed_before : UINT64_MAX;
     /* The global completion counter is diagnostic only here: a DFlash
@@ -4516,9 +4516,9 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence(
      * immediately before this graph's target, while command_waited proves the
      * owning command completed successfully. */
     const bool exact = encoded_delta == 48u;
-    if (ds4_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) {
+    if (lgn2_gpu_laguna_qk_head_norm_rope_simd32_trace_enabled()) {
         fprintf(stderr,
-                "ds4: Laguna Q/K norm/RoPE SIMD32 target_evidence "
+                "lgn2: Laguna Q/K norm/RoPE SIMD32 target_evidence "
                 "route=%s tokens=%u capture=%d verifier=%d "
                 "expected_target_dispatches=48 encoded=%llu completed=%llu "
                 "completion=waited status=%s\n",
@@ -4533,12 +4533,12 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence(
     if (!exact) {
         if (encoded_delta == UINT64_MAX) {
             fprintf(stderr,
-                    "ds4: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
+                    "lgn2: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
                     "encoded counter moved backwards after waited %s\n",
                     route ? route : "target");
         } else {
             fprintf(stderr,
-                    "ds4: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
+                    "lgn2: Laguna Q/K norm/RoPE SIMD32 target proof failed: "
                     "expected 48 encoded layer dispatches after waited %s, "
                     "actual=%llu (global completed delta=%llu)\n",
                     route ? route : "target",
@@ -4550,7 +4550,7 @@ static bool laguna_metal_qk_norm_rope_simd32_target_evidence(
 }
 
 static void laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!g) return;
     g->qk_simd32_target_encoded_before = 0;
     g->qk_simd32_target_completed_before = 0;
@@ -4561,7 +4561,7 @@ static void laguna_metal_qk_norm_rope_simd32_target_evidence_discard(
 }
 
 static bool laguna_metal_qk_norm_rope_simd32_target_evidence_complete(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!g || !g->qk_simd32_target_evidence_pending) return true;
     const bool ok = laguna_metal_qk_norm_rope_simd32_target_evidence(
         g->qk_simd32_target_encoded_before,
@@ -4593,13 +4593,13 @@ static bool laguna_metal_rope_atlas_target_evidence(
         const char *route,
         bool command_waited) {
     const uint64_t generated_after =
-        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count();
     const uint64_t consumed_after =
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
     const uint64_t family0_after =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u);
     const uint64_t family1_after =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u);
     const uint64_t generated_delta = generated_after >= generated_before ?
         generated_after - generated_before : UINT64_MAX;
     const uint64_t consumed_delta = consumed_after >= consumed_before ?
@@ -4610,9 +4610,9 @@ static bool laguna_metal_rope_atlas_target_evidence(
         family1_after - family1_before : UINT64_MAX;
     const bool exact = command_waited && generated_delta == expected_generated &&
         consumed_delta == 48u && family0_delta == 12u && family1_delta == 36u;
-    if (exact && ds4_gpu_laguna_rope_atlas_trace_enabled()) {
+    if (exact && lgn2_gpu_laguna_rope_atlas_trace_enabled()) {
         fprintf(stderr,
-                "ds4: Laguna RoPE atlas waited_target route=%s tokens=%u "
+                "lgn2: Laguna RoPE atlas waited_target route=%s tokens=%u "
                 "capture=%d verifier=%d generation_expected=%llu "
                 "generation_completed=%llu consumers_completed=%llu "
                 "family0_completed=%llu family1_completed=%llu "
@@ -4631,7 +4631,7 @@ static bool laguna_metal_rope_atlas_target_evidence(
     }
     if (!exact) {
         fprintf(stderr,
-                "ds4: Laguna RoPE atlas target proof failed: expected "
+                "lgn2: Laguna RoPE atlas target proof failed: expected "
                 "completed generation=%llu consumers=48 family0=12 family1=36 "
                 "after waited %s (actual generation=%llu consumers=%llu "
                 "family0=%llu family1=%llu)\n",
@@ -4646,7 +4646,7 @@ static bool laguna_metal_rope_atlas_target_evidence(
 }
 
 static void laguna_metal_rope_atlas_target_evidence_discard(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!g) return;
     g->rope_atlas_target_generated_before = 0;
     g->rope_atlas_target_consumed_before = 0;
@@ -4660,7 +4660,7 @@ static void laguna_metal_rope_atlas_target_evidence_discard(
 }
 
 static void laguna_metal_rope_atlas_target_evidence_store(
-        ds4_laguna_gpu_graph *g,
+        lgn2_laguna_gpu_graph *g,
         uint64_t generated_before,
         uint64_t expected_generated,
         uint64_t consumed_before,
@@ -4682,7 +4682,7 @@ static void laguna_metal_rope_atlas_target_evidence_store(
 }
 
 static bool laguna_metal_rope_atlas_target_evidence_complete(
-        ds4_laguna_gpu_graph *g) {
+        lgn2_laguna_gpu_graph *g) {
     if (!g || !g->rope_atlas_target_evidence_pending) return true;
     const bool ok = laguna_metal_rope_atlas_target_evidence(
         g->rope_atlas_target_generated_before,
@@ -4699,13 +4699,13 @@ static bool laguna_metal_rope_atlas_target_evidence_complete(
     return ok;
 }
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 /* Test-only owner for the same deferred snapshot/complete state used by a
  * speculative graph.  It is compiled into the focused test object only. */
-static ds4_laguna_gpu_graph g_laguna_test_rope_atlas_evidence;
+static lgn2_laguna_gpu_graph g_laguna_test_rope_atlas_evidence;
 static bool g_laguna_test_rope_atlas_evidence_live;
 
-int ds4_laguna_test_rope_atlas_deferred_snapshot(
+int lgn2_laguna_test_rope_atlas_deferred_snapshot(
         uint64_t generated_before,
         uint64_t expected_generated,
         uint64_t consumed_before,
@@ -4713,7 +4713,7 @@ int ds4_laguna_test_rope_atlas_deferred_snapshot(
         uint64_t family1_before,
         uint32_t n_tokens) {
     if (g_laguna_test_rope_atlas_evidence_live ||
-        !ds4_gpu_commands_active()) {
+        !lgn2_gpu_commands_active()) {
         return 0;
     }
     memset(&g_laguna_test_rope_atlas_evidence, 0,
@@ -4732,9 +4732,9 @@ int ds4_laguna_test_rope_atlas_deferred_snapshot(
     return 1;
 }
 
-int ds4_laguna_test_rope_atlas_deferred_complete(void) {
+int lgn2_laguna_test_rope_atlas_deferred_complete(void) {
     if (!g_laguna_test_rope_atlas_evidence_live ||
-        ds4_gpu_commands_active()) {
+        lgn2_gpu_commands_active()) {
         return 0;
     }
     const bool ok = laguna_metal_rope_atlas_target_evidence_complete(
@@ -4746,7 +4746,7 @@ int ds4_laguna_test_rope_atlas_deferred_complete(void) {
 }
 #endif
 
-static void laguna_metal_target_evidence_discard(ds4_laguna_gpu_graph *g) {
+static void laguna_metal_target_evidence_discard(lgn2_laguna_gpu_graph *g) {
     laguna_metal_qk_norm_rope_simd32_target_evidence_discard(g);
     laguna_metal_rope_atlas_target_evidence_discard(g);
 }
@@ -4754,17 +4754,17 @@ static void laguna_metal_target_evidence_discard(ds4_laguna_gpu_graph *g) {
 static int laguna_metal_decode_residual_norm_mode(void);
 static bool laguna_metal_decode_residual_norm_preflight(void);
 static bool laguna_metal_router_decode_fused_preflight(
-        const ds4_model   *model,
-        const ds4_weights *weights);
+        const lgn2_model   *model,
+        const lgn2_weights *weights);
 #endif
 
 static bool laguna_graph_forward_token(
-        ds4_laguna_gpu_graph *g,
-        const ds4_model      *model,
-        const ds4_weights    *weights,
+        lgn2_laguna_gpu_graph *g,
+        const lgn2_model      *model,
+        const lgn2_weights    *weights,
         int                   token,
         uint32_t              pos,
-        const ds4_laguna_feature_capture *capture,
+        const lgn2_laguna_feature_capture *capture,
         float                *logits_out) {
 #ifdef __APPLE__
     if (!laguna_metal_swa_gqa9_preflight(
@@ -4773,7 +4773,7 @@ static bool laguna_graph_forward_token(
             NULL, "Laguna decode", NULL, 0)) return false;
 #endif
     if (!g || !model || !weights || token < 0 ||
-        token >= (int)DS4_N_VOCAB || pos >= g->ctx_size) {
+        token >= (int)LGN2_N_VOCAB || pos >= g->ctx_size) {
         return false;
     }
 #ifdef __APPLE__
@@ -4810,35 +4810,35 @@ static bool laguna_graph_forward_token(
     }
 #endif
     const int dense_q8_route =
-        ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+        lgn2_gpu_laguna_dense_q8_gate_up_swiglu_route(
             dense_q8_gate_up_fusion ? 1 : 0, 1, 0);
 #ifdef __APPLE__
     if (!laguna_metal_qk_norm_rope_simd32_preflight()) return false;
     const bool qk_simd32_target_evidence =
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached() > 0;
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached() > 0;
     const uint64_t qk_simd32_target_encoded_before =
         qk_simd32_target_evidence ?
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
     const uint64_t qk_simd32_target_completed_before =
         qk_simd32_target_evidence ?
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count() : 0;
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count() : 0;
     const bool rope_atlas_target_evidence =
-        ds4_gpu_laguna_rope_atlas_plan_mode_cached() > 0;
+        lgn2_gpu_laguna_rope_atlas_plan_mode_cached() > 0;
     const uint64_t rope_atlas_target_generation_expected =
         rope_atlas_target_evidence &&
-        !ds4_gpu_laguna_rope_atlas_target_reuse_ready(1u, pos) ? 1u : 0u;
+        !lgn2_gpu_laguna_rope_atlas_target_reuse_ready(1u, pos) ? 1u : 0u;
     const uint64_t rope_atlas_target_generated_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_generated_count() : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count() : 0;
     const uint64_t rope_atlas_target_consumed_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() : 0;
     const uint64_t rope_atlas_target_family0_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u) : 0;
     const uint64_t rope_atlas_target_family1_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u) : 0;
     if (qk_simd32_target_evidence) {
         laguna_metal_qk_norm_rope_simd32_trace_route(
             "decode", 1u, capture != NULL, false);
@@ -4856,9 +4856,9 @@ static bool laguna_graph_forward_token(
     if (decode_residual_norm_mode < 0) return false;
     const bool decode_residual_fusion = decode_residual_norm_mode != 0;
     if (decode_residual_fusion &&
-        !ds4_gpu_laguna_decode_residual_norm_available()) {
+        !lgn2_gpu_laguna_decode_residual_norm_available()) {
         fprintf(stderr,
-                "ds4: Laguna decode residual fusion requested but "
+                "lgn2: Laguna decode residual fusion requested but "
                 "kernel_add3_rms_norm_mul_f32_4 is unavailable\n");
         return false;
     }
@@ -4869,16 +4869,16 @@ static bool laguna_graph_forward_token(
     uint32_t fused_add2_count = 0;
     uint32_t fused_add3_count = 0;
     const char *decode_ladder_value =
-        getenv("DS4_METAL_LAGUNA_DECODE_LADDER");
+        getenv("LGN2_METAL_LAGUNA_DECODE_LADDER");
     if (!lgn_decode_ladder_parse(decode_ladder_value,
-                                 (uint32_t)DS4_N_LAYER,
+                                 (uint32_t)LGN2_N_LAYER,
                                  &decode_ladder_mask)) {
         fprintf(stderr,
-                "ds4: invalid DS4_METAL_LAGUNA_DECODE_LADDER='%s'; "
+                "lgn2: invalid LGN2_METAL_LAGUNA_DECODE_LADDER='%s'; "
                 "expected a strictly increasing comma-separated list of "
                 "layer indices in [0,%u]\n",
                 decode_ladder_value ? decode_ladder_value : "",
-                (unsigned)(DS4_N_LAYER ? DS4_N_LAYER - 1u : 0u));
+                (unsigned)(LGN2_N_LAYER ? LGN2_N_LAYER - 1u : 0u));
         return false;
     }
 #endif /* __APPLE__ decode ladder parsing */
@@ -4904,37 +4904,37 @@ static bool laguna_graph_forward_token(
     bool decode_output_norm_ready = false;
 #endif
 
-    bool ok = ds4_gpu_begin_commands() != 0;
+    bool ok = lgn2_gpu_begin_commands() != 0;
     if (ok) {
-        ok = ds4_gpu_embed_token_quant_tensor(g->cur,
+        ok = lgn2_gpu_embed_token_quant_tensor(g->cur,
                                               model->map,
                                               model->size,
                                               weights->token_embd->abs_offset,
                                               weights->token_embd->type,
-                                              DS4_N_VOCAB,
+                                              LGN2_N_VOCAB,
                                               (uint32_t)token,
-                                              DS4_N_EMBD) != 0;
+                                              LGN2_N_EMBD) != 0;
     }
 
-    for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
-        const ds4_layer_weights *l = &weights->layer[il];
-        const uint32_t n_head = ds4_layer_head_count(il);
-        const uint32_t q_dim = n_head * DS4_N_HEAD_DIM;
-        const bool is_swa = ds4_laguna_layer_is_swa(il);
-        const uint32_t n_rot = is_swa ? DS4_N_ROT_SWA : DS4_N_ROT;
-        const float freq_base = is_swa ? DS4_ROPE_FREQ_BASE_SWA : DS4_ROPE_FREQ_BASE;
-        const float freq_scale = is_swa ? 1.0f : 1.0f / DS4_ROPE_SCALE_FACTOR;
+    for (uint32_t il = 0; ok && il < LGN2_N_LAYER; il++) {
+        const lgn2_layer_weights *l = &weights->layer[il];
+        const uint32_t n_head = lgn2_layer_head_count(il);
+        const uint32_t q_dim = n_head * LGN2_N_HEAD_DIM;
+        const bool is_swa = lgn2_laguna_layer_is_swa(il);
+        const uint32_t n_rot = is_swa ? LGN2_N_ROT_SWA : LGN2_N_ROT;
+        const float freq_base = is_swa ? LGN2_ROPE_FREQ_BASE_SWA : LGN2_ROPE_FREQ_BASE;
+        const float freq_scale = is_swa ? 1.0f : 1.0f / LGN2_ROPE_SCALE_FACTOR;
         const float ext_factor = is_swa ? 0.0f : 1.0f;
         /* rope_yarn applies the YaRN magnitude multiplier internally.  The
          * reference runtime passes the configured attention factor here; its
          * context-level adjustment first constructs, then cancels, that same
          * internal multiplier.  Dividing once more suppresses YaRN mscale. */
         const float attn_factor = is_swa ? 1.0f :
-            DS4_ROPE_YARN_ATTN_FACTOR;
-        const float beta_fast = is_swa ? 0.0f : DS4_ROPE_YARN_BETA_FAST;
-        const float beta_slow = is_swa ? 0.0f : DS4_ROPE_YARN_BETA_SLOW;
+            LGN2_ROPE_YARN_ATTN_FACTOR;
+        const float beta_fast = is_swa ? 0.0f : LGN2_ROPE_YARN_BETA_FAST;
+        const float beta_slow = is_swa ? 0.0f : LGN2_ROPE_YARN_BETA_SLOW;
         const uint32_t rope_ctx = is_swa ?
-            (uint32_t)DS4_CONTEXT_LENGTH : (uint32_t)DS4_ROPE_ORIG_CTX;
+            (uint32_t)LGN2_CONTEXT_LENGTH : (uint32_t)LGN2_ROPE_ORIG_CTX;
         bool ffn_norm_ready = false;
 
         ok = laguna_graph_capture_feature(capture, g->cur, il);
@@ -4945,17 +4945,17 @@ static bool laguna_graph_forward_token(
         } else
 #endif
         {
-            ok = ds4_gpu_rms_norm_weight_tensor(g->attn_norm,
+            ok = lgn2_gpu_rms_norm_weight_tensor(g->attn_norm,
                                                  g->cur,
                                                  model->map,
                                                  model->size,
                                                  l->attn_norm->abs_offset,
-                                                 DS4_N_EMBD,
-                                                 DS4_RMS_EPS) != 0;
+                                                 LGN2_N_EMBD,
+                                                 LGN2_RMS_EPS) != 0;
         }
         if (ok) {
-            if (l->attn_q->type == DS4_TENSOR_F16) {
-                ok = ds4_gpu_laguna_qkvg_f16_tensor(
+            if (l->attn_q->type == LGN2_TENSOR_F16) {
+                ok = lgn2_gpu_laguna_qkvg_f16_tensor(
                         g->q,
                         g->k,
                         g->v,
@@ -4966,40 +4966,40 @@ static bool laguna_graph_forward_token(
                         l->attn_k->abs_offset,
                         l->attn_v->abs_offset,
                         l->attn_gate->abs_offset,
-                        DS4_N_EMBD,
+                        LGN2_N_EMBD,
                         q_dim,
-                        DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
+                        LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM,
                         n_head,
                         g->attn_norm) != 0;
             } else {
-                ok = ds4_gpu_matmul_q8_0_pair_tensor(
+                ok = lgn2_gpu_matmul_q8_0_pair_tensor(
                         g->q,
                         g->k,
                         model->map,
                         model->size,
                         l->attn_q->abs_offset,
                         l->attn_k->abs_offset,
-                        DS4_N_EMBD,
+                        LGN2_N_EMBD,
                         q_dim,
-                        DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
+                        LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM,
                         g->attn_norm,
                         1) != 0 &&
-                     ds4_gpu_matmul_q8_0_pair_tensor(
+                     lgn2_gpu_matmul_q8_0_pair_tensor(
                         g->v,
                         g->gate,
                         model->map,
                         model->size,
                         l->attn_v->abs_offset,
                         l->attn_gate->abs_offset,
-                        DS4_N_EMBD,
-                        DS4_N_HEAD_KV * DS4_N_HEAD_DIM,
+                        LGN2_N_EMBD,
+                        LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM,
                         n_head,
                         g->attn_norm,
                         1) != 0;
             }
         }
         if (ok) {
-            ok = ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+            ok = lgn2_gpu_laguna_qk_head_rms_norm_rope_tensor(
                     g->q,
                     g->k,
                     model->map,
@@ -5008,8 +5008,8 @@ static bool laguna_graph_forward_token(
                     l->attn_k_norm->abs_offset,
                     1,
                     n_head,
-                    DS4_N_HEAD_KV,
-                    DS4_N_HEAD_DIM,
+                    LGN2_N_HEAD_KV,
+                    LGN2_N_HEAD_DIM,
                     n_rot,
                     pos,
                     rope_ctx,
@@ -5019,13 +5019,13 @@ static bool laguna_graph_forward_token(
                     attn_factor,
                     beta_fast,
                     beta_slow,
-                    DS4_RMS_EPS) != 0;
+                    LGN2_RMS_EPS) != 0;
         }
         uint32_t key_count = pos + 1u;
         if (key_count > g->cache_cap[il]) key_count = g->cache_cap[il];
         const uint32_t key_start = pos + 1u - key_count;
         if (ok) {
-            ok = ds4_gpu_laguna_store_attention_tensor(
+            ok = lgn2_gpu_laguna_store_attention_tensor(
                     g->heads,
                     g->key_cache[il],
                     g->value_cache[il],
@@ -5038,19 +5038,19 @@ static bool laguna_graph_forward_token(
                     key_start,
                     key_count,
                     n_head,
-                    DS4_N_HEAD_KV,
-                    DS4_N_HEAD_DIM,
-                    1.0f / sqrtf((float)DS4_N_HEAD_DIM)) != 0;
+                    LGN2_N_HEAD_KV,
+                    LGN2_N_HEAD_DIM,
+                    1.0f / sqrtf((float)LGN2_N_HEAD_DIM)) != 0;
         }
         if (ok) {
-            if (l->attn_output->type == DS4_TENSOR_F16) {
-                ok = ds4_gpu_laguna_attn_output_residual_f16_tensor(
+            if (l->attn_output->type == LGN2_TENSOR_F16) {
+                ok = lgn2_gpu_laguna_attn_output_residual_f16_tensor(
                         g->after_attn,
                         model->map,
                         model->size,
                         l->attn_output->abs_offset,
                         q_dim,
-                        DS4_N_EMBD,
+                        LGN2_N_EMBD,
                         g->heads,
                         g->cur) != 0;
             } else {
@@ -5059,7 +5059,7 @@ static bool laguna_graph_forward_token(
                                          l->attn_output,
                                          g->heads,
                                          1) &&
-                     ds4_gpu_add_rms_norm_weight_rows_tensor(
+                     lgn2_gpu_add_rms_norm_weight_rows_tensor(
                              g->ffn_norm,
                              g->after_attn,
                              g->cur,
@@ -5067,39 +5067,39 @@ static bool laguna_graph_forward_token(
                              model->map,
                              model->size,
                              l->ffn_norm->abs_offset,
-                             DS4_N_EMBD,
+                             LGN2_N_EMBD,
                              1,
-                             DS4_RMS_EPS) != 0;
+                             LGN2_RMS_EPS) != 0;
                 ffn_norm_ready = ok;
             }
         }
         if (ok && !ffn_norm_ready) {
-            ok = ds4_gpu_rms_norm_weight_tensor(g->ffn_norm,
+            ok = lgn2_gpu_rms_norm_weight_tensor(g->ffn_norm,
                                                  g->after_attn,
                                                  model->map,
                                                  model->size,
                                                  l->ffn_norm->abs_offset,
-                                                 DS4_N_EMBD,
-                                                 DS4_RMS_EPS) != 0;
+                                                 LGN2_N_EMBD,
+                                                 LGN2_RMS_EPS) != 0;
         }
-        if (ok && il < DS4_N_LEADING_DENSE) {
+        if (ok && il < LGN2_N_LEADING_DENSE) {
             if (dense_q8_route ==
-                    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID) {
+                    LGN2_GPU_LAGUNA_DENSE_Q8_ROUTE_DECODE_MID) {
 #ifdef __APPLE__
-                ok = ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                ok = lgn2_gpu_shared_mid_swiglu_q8_0_tensor(
                          g->ffn_mid,
                          model->map,
                          model->size,
                          l->ffn_gate->abs_offset,
                          l->ffn_up->abs_offset,
-                         DS4_N_EMBD,
-                         DS4_N_FF_DENSE,
+                         LGN2_N_EMBD,
+                         LGN2_N_FF_DENSE,
                          g->ffn_norm,
                          0.0f) != 0;
                 if (ok) laguna_dense_q8_gate_up_swiglu_note_decode_mid(g);
                 if (!ok) {
                     fprintf(stderr,
-                            "ds4: Laguna dense Q8 gate/up+SwiGLU fused "
+                            "lgn2: Laguna dense Q8 gate/up+SwiGLU fused "
                             "dispatch failed; stock fallback is disabled\n");
                 }
 #else
@@ -5117,10 +5117,10 @@ static bool laguna_graph_forward_token(
                                          g->ffn_norm,
                                          1);
                 if (ok) {
-                    ok = ds4_gpu_swiglu_tensor(g->ffn_mid,
+                    ok = lgn2_gpu_swiglu_tensor(g->ffn_mid,
                                                 g->ffn_gate,
                                                 g->ffn_up,
-                                                DS4_N_FF_DENSE,
+                                                LGN2_N_FF_DENSE,
                                                 0.0f,
                                                 1.0f) != 0;
                 }
@@ -5136,15 +5136,15 @@ static bool laguna_graph_forward_token(
 #ifdef __APPLE__
                 const bool fuse_residual_norm =
                     decode_residual_fusion &&
-                    (il + 1u < (uint32_t)DS4_N_LAYER ||
+                    (il + 1u < (uint32_t)LGN2_N_LAYER ||
                      logits_out != NULL || g->gpu_argmax_enabled);
                 if (fuse_residual_norm) {
-                    ds4_gpu_tensor *norm_out = il + 1u < (uint32_t)DS4_N_LAYER ?
+                    lgn2_gpu_tensor *norm_out = il + 1u < (uint32_t)LGN2_N_LAYER ?
                         g->attn_norm : g->output_norm;
-                    const uint64_t norm_offset = il + 1u < (uint32_t)DS4_N_LAYER ?
+                    const uint64_t norm_offset = il + 1u < (uint32_t)LGN2_N_LAYER ?
                         weights->layer[il + 1u].attn_norm->abs_offset :
                         weights->output_norm->abs_offset;
-                    ok = ds4_gpu_add_rms_norm_weight_rows_tensor(
+                    ok = lgn2_gpu_add_rms_norm_weight_rows_tensor(
                              norm_out,
                              g->next,
                              g->after_attn,
@@ -5152,11 +5152,11 @@ static bool laguna_graph_forward_token(
                              model->map,
                              model->size,
                              norm_offset,
-                             DS4_N_EMBD,
+                             LGN2_N_EMBD,
                              1,
-                             DS4_RMS_EPS) != 0;
+                             LGN2_RMS_EPS) != 0;
                     if (ok) {
-                        if (il + 1u < (uint32_t)DS4_N_LAYER) {
+                        if (il + 1u < (uint32_t)LGN2_N_LAYER) {
                             decode_attn_norm_ready = true;
                         } else {
                             decode_output_norm_ready = true;
@@ -5166,10 +5166,10 @@ static bool laguna_graph_forward_token(
                 } else
 #endif
                 {
-                    ok = ds4_gpu_add_tensor(g->next,
+                    ok = lgn2_gpu_add_tensor(g->next,
                                             g->after_attn,
                                             g->ffn_out,
-                                            DS4_N_EMBD) != 0;
+                                            LGN2_N_EMBD) != 0;
                 }
             }
         } else if (ok) {
@@ -5178,7 +5178,7 @@ static bool laguna_graph_forward_token(
                 /* This is the normal one-token Laguna decode hot path.  The
                  * fused helper owns both router projection and top-k; stock
                  * projection/selection remains the opt-out default. */
-                ok = ds4_gpu_laguna_router_decode_fused_tensor(
+                ok = lgn2_gpu_laguna_router_decode_fused_tensor(
                         g->router_selected,
                         g->router_weights,
                         g->router_probs,
@@ -5188,23 +5188,23 @@ static bool laguna_graph_forward_token(
                         l->ffn_gate_inp->abs_offset,
                         l->ffn_exp_probs_b->abs_offset,
                         g->ffn_norm,
-                        (uint32_t)DS4_N_EMBD,
-                        DS4_N_EXPERT,
-                        DS4_N_EXPERT_USED,
-                        DS4_EXPERT_WEIGHT_SCALE) != 0;
+                        (uint32_t)LGN2_N_EMBD,
+                        LGN2_N_EXPERT,
+                        LGN2_N_EXPERT_USED,
+                        LGN2_EXPERT_WEIGHT_SCALE) != 0;
             } else
 #endif
             {
-                ok = ds4_gpu_matmul_f32_tensor(g->router_logits,
+                ok = lgn2_gpu_matmul_f32_tensor(g->router_logits,
                                                 model->map,
                                                 model->size,
                                                 l->ffn_gate_inp->abs_offset,
-                                                DS4_N_EMBD,
-                                                DS4_N_EXPERT,
+                                                LGN2_N_EMBD,
+                                                LGN2_N_EXPERT,
                                                 g->ffn_norm,
                                                 1) != 0;
                 if (ok) {
-                    ok = ds4_gpu_glm_router_select_tensor(
+                    ok = lgn2_gpu_glm_router_select_tensor(
                             g->router_selected,
                             g->router_weights,
                             g->router_probs,
@@ -5212,9 +5212,9 @@ static bool laguna_graph_forward_token(
                             model->size,
                             l->ffn_exp_probs_b->abs_offset,
                             g->router_logits,
-                            DS4_N_EXPERT,
-                            DS4_N_EXPERT_USED,
-                            DS4_EXPERT_WEIGHT_SCALE) != 0;
+                            LGN2_N_EXPERT,
+                            LGN2_N_EXPERT_USED,
+                            LGN2_EXPERT_WEIGHT_SCALE) != 0;
                 }
             }
 
@@ -5236,7 +5236,7 @@ static bool laguna_graph_forward_token(
                 routed_expert_row_bytes(l->ffn_up_shexp);
             const uint64_t shared_down_row_bytes =
                 routed_expert_row_bytes(l->ffn_down_shexp);
-            const ds4_gpu_laguna_moe_desc routed_moe = {
+            const lgn2_gpu_laguna_moe_desc routed_moe = {
                 .gate_offset = l->ffn_gate_exps->abs_offset,
                 .up_offset = l->ffn_up_exps->abs_offset,
                 .down_offset = l->ffn_down_exps->abs_offset,
@@ -5250,7 +5250,7 @@ static bool laguna_graph_forward_token(
                 .down_expert_bytes = down_expert_bytes,
                 .down_row_bytes = down_row_bytes,
             };
-            const ds4_gpu_laguna_moe_desc shared_moe = {
+            const lgn2_gpu_laguna_moe_desc shared_moe = {
                 .gate_offset = l->ffn_gate_shexp->abs_offset,
                 .up_offset = l->ffn_up_shexp->abs_offset,
                 .down_offset = l->ffn_down_shexp->abs_offset,
@@ -5270,8 +5270,8 @@ static bool laguna_graph_forward_token(
             /* The legacy recipe can co-dispatch routed and shared Q4 work.
              * Revised layouts keep one routed quantization but make the
              * shared expert Q8, so each uses its native fast kernel family. */
-            if (ok && l->ffn_gate_shexp->type == DS4_TENSOR_Q4_K) {
-                ok = ds4_gpu_laguna_routed_shared_moe_one_tensor(
+            if (ok && l->ffn_gate_shexp->type == LGN2_TENSOR_Q4_K) {
+                ok = lgn2_gpu_laguna_routed_shared_moe_one_tensor(
                         g->ffn_out,
                         g->routed_mid,
                         g->shared_out,
@@ -5280,18 +5280,18 @@ static bool laguna_graph_forward_token(
                         model->size,
                         &routed_moe,
                         &shared_moe,
-                        DS4_N_EMBD,
-                        DS4_N_FF_EXP,
-                        DS4_N_EMBD,
+                        LGN2_N_EMBD,
+                        LGN2_N_FF_EXP,
+                        LGN2_N_EMBD,
                         g->router_selected,
                         g->router_weights,
-                        DS4_N_EXPERT,
-                        DS4_N_EXPERT_USED,
+                        LGN2_N_EXPERT,
+                        LGN2_N_EXPERT_USED,
                         g->shared_selected,
                         g->shared_weight,
                         g->ffn_norm) != 0;
             } else if (ok) {
-                ok = ds4_gpu_glm_routed_moe_one_tensor(
+                ok = lgn2_gpu_glm_routed_moe_one_tensor(
                         g->ffn_out,
                         g->routed_mid,
                         model->map,
@@ -5308,25 +5308,25 @@ static bool laguna_graph_forward_token(
                         up_row_bytes,
                         down_expert_bytes,
                         down_row_bytes,
-                        DS4_N_EMBD,
-                        DS4_N_FF_EXP,
-                        DS4_N_EMBD,
+                        LGN2_N_EMBD,
+                        LGN2_N_FF_EXP,
+                        LGN2_N_EMBD,
                         g->router_selected,
                         g->router_weights,
-                        DS4_N_EXPERT,
-                        DS4_N_EXPERT_USED,
+                        LGN2_N_EXPERT,
+                        LGN2_N_EXPERT_USED,
                         il,
                         g->ffn_norm,
                         true) != 0;
                 if (ok) {
-                    ok = ds4_gpu_shared_mid_swiglu_q8_0_tensor(
+                    ok = lgn2_gpu_shared_mid_swiglu_q8_0_tensor(
                             g->ffn_mid,
                             model->map,
                             model->size,
                             l->ffn_gate_shexp->abs_offset,
                             l->ffn_up_shexp->abs_offset,
-                            DS4_N_EMBD,
-                            DS4_N_FF_SHARED,
+                            LGN2_N_EMBD,
+                            LGN2_N_FF_SHARED,
                             g->ffn_norm,
                             0.0f) != 0;
                 }
@@ -5342,15 +5342,15 @@ static bool laguna_graph_forward_token(
 #ifdef __APPLE__
                 const bool fuse_residual_norm =
                     decode_residual_fusion &&
-                    (il + 1u < (uint32_t)DS4_N_LAYER ||
+                    (il + 1u < (uint32_t)LGN2_N_LAYER ||
                      logits_out != NULL || g->gpu_argmax_enabled);
                 if (fuse_residual_norm) {
-                    ds4_gpu_tensor *norm_out = il + 1u < (uint32_t)DS4_N_LAYER ?
+                    lgn2_gpu_tensor *norm_out = il + 1u < (uint32_t)LGN2_N_LAYER ?
                         g->attn_norm : g->output_norm;
-                    const uint64_t norm_offset = il + 1u < (uint32_t)DS4_N_LAYER ?
+                    const uint64_t norm_offset = il + 1u < (uint32_t)LGN2_N_LAYER ?
                         weights->layer[il + 1u].attn_norm->abs_offset :
                         weights->output_norm->abs_offset;
-                    ok = ds4_gpu_add3_rms_norm_weight_rows_tensor(
+                    ok = lgn2_gpu_add3_rms_norm_weight_rows_tensor(
                              norm_out,
                              g->next,
                              g->after_attn,
@@ -5359,11 +5359,11 @@ static bool laguna_graph_forward_token(
                              model->map,
                              model->size,
                              norm_offset,
-                             DS4_N_EMBD,
+                             LGN2_N_EMBD,
                              1,
-                             DS4_RMS_EPS) != 0;
+                             LGN2_RMS_EPS) != 0;
                     if (ok) {
-                        if (il + 1u < (uint32_t)DS4_N_LAYER) {
+                        if (il + 1u < (uint32_t)LGN2_N_LAYER) {
                             decode_attn_norm_ready = true;
                         } else {
                             decode_output_norm_ready = true;
@@ -5373,24 +5373,24 @@ static bool laguna_graph_forward_token(
                 } else
 #endif
                 {
-                    ok = ds4_gpu_add3_tensor(g->next,
+                    ok = lgn2_gpu_add3_tensor(g->next,
                                              g->after_attn,
                                              g->ffn_out,
                                              g->shared_out,
-                                             DS4_N_EMBD) != 0;
+                                             LGN2_N_EMBD) != 0;
                 }
             }
         }
 
         if (ok) {
-            ds4_gpu_tensor *tmp = g->cur;
+            lgn2_gpu_tensor *tmp = g->cur;
             g->cur = g->next;
             g->next = tmp;
         }
 #ifdef __APPLE__
         if (ok && decode_ladder_mask != 0 && il < 64u &&
             (decode_ladder_mask & (UINT64_C(1) << il)) != 0) {
-            if (ds4_gpu_flush_commands() == 0) {
+            if (lgn2_gpu_flush_commands() == 0) {
                 ok = false;
             } else {
                 decode_ladder_flushes++;
@@ -5400,7 +5400,7 @@ static bool laguna_graph_forward_token(
     }
 
     if (ok) {
-        ok = laguna_graph_capture_feature(capture, g->cur, DS4_N_LAYER);
+        ok = laguna_graph_capture_feature(capture, g->cur, LGN2_N_LAYER);
     }
     if (ok && (logits_out || g->gpu_argmax_enabled)) {
 #ifdef __APPLE__
@@ -5409,18 +5409,18 @@ static bool laguna_graph_forward_token(
         } else
 #endif
         {
-        ok = ds4_gpu_rms_norm_weight_tensor(g->output_norm,
+        ok = lgn2_gpu_rms_norm_weight_tensor(g->output_norm,
                                              g->cur,
                                              model->map,
                                              model->size,
                                              weights->output_norm->abs_offset,
-                                             DS4_N_EMBD,
-                                             DS4_RMS_EPS) != 0;
+                                             LGN2_N_EMBD,
+                                             LGN2_RMS_EPS) != 0;
         }
         if (ok) {
             if (q8_lmhead_screen) {
 #ifdef __APPLE__
-                ok = ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                ok = lgn2_gpu_laguna_q8_lmhead_screen_tensor(
                     g->lmhead_screen,
                     g->argmax,
                     NULL,
@@ -5441,15 +5441,15 @@ static bool laguna_graph_forward_token(
     }
 #ifdef __APPLE__
     if (ok && g->gpu_argmax_enabled && !q8_lmhead_screen) {
-        ok = ds4_gpu_laguna_argmax_tensor(g->argmax,
+        ok = lgn2_gpu_laguna_argmax_tensor(g->argmax,
                                           g->logits,
-                                          DS4_N_VOCAB) != 0;
+                                          LGN2_N_VOCAB) != 0;
     }
 #endif
 #ifdef __APPLE__
-    if (ds4_gpu_commands_active()) {
+    if (lgn2_gpu_commands_active()) {
         if (ok) {
-            if (ds4_gpu_end_commands() == 0) {
+            if (lgn2_gpu_end_commands() == 0) {
                 ok = false;
             } else {
                 decode_residual_norm_completion_waited = true;
@@ -5462,7 +5462,7 @@ static bool laguna_graph_forward_token(
              * stage failed.  A failed command batch is a transaction: drop
              * it so the cache remains unchanged and route evidence cannot
              * promote. */
-            if (ds4_gpu_discard_commands() == 0) ok = false;
+            if (lgn2_gpu_discard_commands() == 0) ok = false;
             laguna_dense_q8_gate_up_swiglu_pending_clear(g);
         }
     }
@@ -5495,7 +5495,7 @@ static bool laguna_graph_forward_token(
         (logits_out != NULL || g->gpu_argmax_enabled) &&
         (fused_add2_count != 0 || fused_add3_count != 0)) {
         fprintf(stderr,
-                "ds4: Laguna decode residual+RMS fusion enabled "
+                "lgn2: Laguna decode residual+RMS fusion enabled "
                 "(add2=%u add3=%u completion=waited)\n",
                 fused_add2_count,
                 fused_add3_count);
@@ -5504,11 +5504,11 @@ static bool laguna_graph_forward_token(
     if (ok && decode_ladder_flushes != 0 && !decode_ladder_reported) {
         char canonical[256];
         if (lgn_decode_ladder_format(decode_ladder_mask,
-                                     (uint32_t)DS4_N_LAYER,
+                                     (uint32_t)LGN2_N_LAYER,
                                      canonical,
                                      sizeof(canonical))) {
             fprintf(stderr,
-                    "ds4: Laguna decode command-buffer ladder enabled "
+                    "lgn2: Laguna decode command-buffer ladder enabled "
                     "(layers=%s; flushes=%u; completion=waited)\n",
                     canonical,
                     decode_ladder_flushes);
@@ -5516,23 +5516,23 @@ static bool laguna_graph_forward_token(
             /* The fixed 64-bit mask always fits in the local buffer; keep a
              * diagnostic if that invariant is ever changed. */
             fprintf(stderr,
-                    "ds4: Laguna decode command-buffer ladder enabled "
+                    "lgn2: Laguna decode command-buffer ladder enabled "
                     "(flushes=%u; completion=waited)\n",
                     decode_ladder_flushes);
         }
         decode_ladder_reported = true;
     }
 #else
-    if (ds4_gpu_commands_active()) {
+    if (lgn2_gpu_commands_active()) {
         if (ok) {
-            if (ds4_gpu_end_commands() == 0) ok = false;
-        } else if (ds4_gpu_discard_commands() == 0) {
+            if (lgn2_gpu_end_commands() == 0) ok = false;
+        } else if (lgn2_gpu_discard_commands() == 0) {
             ok = false;
         }
     }
 #endif
     if (ok && g->gpu_argmax_enabled) {
-        ok = ds4_gpu_tensor_read(g->argmax,
+        ok = lgn2_gpu_tensor_read(g->argmax,
                                  0,
                                  &g->gpu_argmax_result,
                                  sizeof(g->gpu_argmax_result)) != 0;
@@ -5543,10 +5543,10 @@ static bool laguna_graph_forward_token(
     }
 #endif
     if (ok && logits_out) {
-        ok = ds4_gpu_tensor_read(g->logits,
+        ok = lgn2_gpu_tensor_read(g->logits,
                                  0,
                                  logits_out,
-                                 (uint64_t)DS4_N_VOCAB * sizeof(float)) != 0;
+                                 (uint64_t)LGN2_N_VOCAB * sizeof(float)) != 0;
     }
 #ifdef __APPLE__
     if (router_simd_topk_trace) {
@@ -5558,7 +5558,7 @@ static bool laguna_graph_forward_token(
 }
 
 static void laguna_graph_report_prefill_display_progress(
-        ds4_session_progress_fn display_progress,
+        lgn2_session_progress_fn display_progress,
         void                   *display_progress_ud,
         uint32_t                pos0,
         uint32_t                n_tokens,
@@ -5566,13 +5566,13 @@ static void laguna_graph_report_prefill_display_progress(
         int                     total,
         bool                    allow_complete) {
     if (!display_progress || n_tokens == 0) return;
-    if (layer_done > (uint32_t)DS4_N_LAYER) {
-        layer_done = (uint32_t)DS4_N_LAYER;
+    if (layer_done > (uint32_t)LGN2_N_LAYER) {
+        layer_done = (uint32_t)LGN2_N_LAYER;
     }
 
     uint64_t done = (uint64_t)n_tokens * layer_done /
-                    (uint32_t)DS4_N_LAYER;
-    if (layer_done == (uint32_t)DS4_N_LAYER) done = n_tokens;
+                    (uint32_t)LGN2_N_LAYER;
+    if (layer_done == (uint32_t)LGN2_N_LAYER) done = n_tokens;
     if (!allow_complete && done >= n_tokens) done = n_tokens - 1u;
     display_progress(display_progress_ud,
                      "prefill_display",
@@ -5581,11 +5581,11 @@ static void laguna_graph_report_prefill_display_progress(
 }
 
 static bool laguna_graph_capture_final_feature(
-        ds4_laguna_gpu_graph             *g,
-        const ds4_model                  *model,
-        const ds4_layer_weights          *layer,
+        lgn2_laguna_gpu_graph             *g,
+        const lgn2_model                  *model,
+        const lgn2_layer_weights          *layer,
         uint32_t                          n_tokens,
-        const ds4_laguna_feature_capture *capture) {
+        const lgn2_laguna_feature_capture *capture) {
     if (!capture) return true;
     if (!g || !model || !layer ||
         capture->src_row0 > n_tokens ||
@@ -5603,34 +5603,34 @@ static bool laguna_graph_capture_final_feature(
      * target logits.
      */
     if (n_tokens <= 16u ||
-        layer->ffn_down_shexp->type != DS4_TENSOR_Q8_0) {
+        layer->ffn_down_shexp->type != LGN2_TENSOR_Q8_0) {
         return laguna_graph_capture_feature(capture,
                                             g->cur,
-                                            DS4_N_LAYER);
+                                            LGN2_N_LAYER);
     }
 
     const uint64_t rows = capture->n_rows;
-    const uint64_t embd_bytes = rows * DS4_N_EMBD * sizeof(float);
+    const uint64_t embd_bytes = rows * LGN2_N_EMBD * sizeof(float);
     const uint64_t shared_bytes =
-        rows * DS4_N_FF_SHARED * sizeof(float);
+        rows * LGN2_N_FF_SHARED * sizeof(float);
     const uint64_t src_embd_off =
-        (uint64_t)capture->src_row0 * DS4_N_EMBD * sizeof(float);
+        (uint64_t)capture->src_row0 * LGN2_N_EMBD * sizeof(float);
     const uint64_t src_shared_off =
-        (uint64_t)capture->src_row0 * DS4_N_FF_SHARED * sizeof(float);
+        (uint64_t)capture->src_row0 * LGN2_N_FF_SHARED * sizeof(float);
 
-    ds4_gpu_tensor *mid = ds4_gpu_tensor_view(g->ffn_mid,
+    lgn2_gpu_tensor *mid = lgn2_gpu_tensor_view(g->ffn_mid,
                                                src_shared_off,
                                                shared_bytes);
-    ds4_gpu_tensor *after_attn = ds4_gpu_tensor_view(g->after_attn,
+    lgn2_gpu_tensor *after_attn = lgn2_gpu_tensor_view(g->after_attn,
                                                      src_embd_off,
                                                      embd_bytes);
-    ds4_gpu_tensor *routed = ds4_gpu_tensor_view(g->ffn_out,
+    lgn2_gpu_tensor *routed = lgn2_gpu_tensor_view(g->ffn_out,
                                                  src_embd_off,
                                                  embd_bytes);
-    ds4_gpu_tensor *shared = ds4_gpu_tensor_view(g->attn_out,
+    lgn2_gpu_tensor *shared = lgn2_gpu_tensor_view(g->attn_out,
                                                  0,
                                                  embd_bytes);
-    ds4_gpu_tensor *final = ds4_gpu_tensor_view(g->q,
+    lgn2_gpu_tensor *final = lgn2_gpu_tensor_view(g->q,
                                                 0,
                                                 embd_bytes);
     bool ok = mid && after_attn && routed && shared && final;
@@ -5644,24 +5644,24 @@ static bool laguna_graph_capture_final_feature(
                  true);
     }
     if (ok) {
-        ok = ds4_gpu_add3_tensor(final,
+        ok = lgn2_gpu_add3_tensor(final,
                                  after_attn,
                                  routed,
                                  shared,
-                                 rows * DS4_N_EMBD) != 0;
+                                 rows * LGN2_N_EMBD) != 0;
     }
     if (ok) {
-        ds4_laguna_feature_capture adjusted = *capture;
+        lgn2_laguna_feature_capture adjusted = *capture;
         adjusted.src_row0 = 0;
         ok = laguna_graph_capture_feature(&adjusted,
                                           final,
-                                          DS4_N_LAYER);
+                                          LGN2_N_LAYER);
     }
-    ds4_gpu_tensor_free(final);
-    ds4_gpu_tensor_free(shared);
-    ds4_gpu_tensor_free(routed);
-    ds4_gpu_tensor_free(after_attn);
-    ds4_gpu_tensor_free(mid);
+    lgn2_gpu_tensor_free(final);
+    lgn2_gpu_tensor_free(shared);
+    lgn2_gpu_tensor_free(routed);
+    lgn2_gpu_tensor_free(after_attn);
+    lgn2_gpu_tensor_free(mid);
     return ok;
 }
 
@@ -5670,11 +5670,11 @@ static bool laguna_graph_capture_final_feature(
  * batch shape; otherwise only the explicit literal selector enables paired
  * ordinary prefill. */
 static bool laguna_graph_prefill_qk_norm_rope_paired_requested(void) {
-    const char *env = getenv("DS4_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED");
+    const char *env = getenv("LGN2_LAGUNA_PREFILL_QK_NORM_ROPE_PAIRED");
     return env && strcmp(env, "1") == 0;
 }
 
-int ds4_laguna_graph_prefill_qk_norm_rope_paired_route(
+int lgn2_laguna_graph_prefill_qk_norm_rope_paired_route(
         int simd32_plan_mode,
         int atlas_plan_mode,
         int exact_q8_rows,
@@ -5687,17 +5687,17 @@ int ds4_laguna_graph_prefill_qk_norm_rope_paired_route(
 }
 
 static bool laguna_graph_forward_batch(
-        ds4_laguna_gpu_graph *g,
-        const ds4_model      *model,
-        const ds4_weights    *weights,
+        lgn2_laguna_gpu_graph *g,
+        const lgn2_model      *model,
+        const lgn2_weights    *weights,
         const int            *tokens,
-        const ds4_gpu_tensor *gpu_draft_tokens,
+        const lgn2_gpu_tensor *gpu_draft_tokens,
         uint32_t              n_tokens,
         uint32_t              pos0,
         float                *logits_out,
         int                  *row_argmax_out,
-        const ds4_laguna_feature_capture *capture,
-        ds4_session_progress_fn display_progress,
+        const lgn2_laguna_feature_capture *capture,
+        lgn2_session_progress_fn display_progress,
         void                 *display_progress_ud,
         int                   display_total) {
 #ifdef __APPLE__
@@ -5756,33 +5756,33 @@ static bool laguna_graph_forward_batch(
     laguna_metal_router_simd_topk_trace_reset();
     if (!laguna_metal_qk_norm_rope_simd32_preflight()) return false;
     const bool qk_simd32_target_evidence =
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached() > 0;
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached() > 0;
     const uint64_t qk_simd32_target_encoded_before =
         qk_simd32_target_evidence ?
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_encoded_dispatch_count() : 0;
     const uint64_t qk_simd32_target_completed_before =
         qk_simd32_target_evidence ?
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count() : 0;
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_completed_dispatch_count() : 0;
     const bool rope_atlas_target_evidence =
-        ds4_gpu_laguna_rope_atlas_plan_mode_cached() > 0;
+        lgn2_gpu_laguna_rope_atlas_plan_mode_cached() > 0;
     const uint64_t rope_atlas_target_generation_expected =
         rope_atlas_target_evidence &&
-        !ds4_gpu_laguna_rope_atlas_target_reuse_ready(n_tokens, pos0) ? 1u : 0u;
+        !lgn2_gpu_laguna_rope_atlas_target_reuse_ready(n_tokens, pos0) ? 1u : 0u;
     const uint64_t rope_atlas_target_generated_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_generated_count() : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count() : 0;
     const uint64_t rope_atlas_target_consumed_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() : 0;
     const uint64_t rope_atlas_target_family0_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u) : 0;
     const uint64_t rope_atlas_target_family1_before =
         rope_atlas_target_evidence ?
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) : 0;
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u) : 0;
 #endif
     if (row_argmax_out &&
-        (n_tokens > DS4_DFLASH_BLOCK_SIZE ||
+        (n_tokens > LGN2_DFLASH_BLOCK_SIZE ||
          !laguna_graph_ensure_spec_scratch(g))) {
         return false;
     }
@@ -5790,24 +5790,24 @@ static bool laguna_graph_forward_batch(
     bool ok = true;
     bool dense_q8_completion_waited = false;
     const bool gpu_draft_pipeline_ready =
-        ds4_gpu_commands_active() != 0;
+        lgn2_gpu_commands_active() != 0;
     if (gpu_draft_tokens) {
         /* Copy proposals on-GPU so drafting does not add an intermediate
          * completion and CPU readback. Metal keeps both graphs in one command
          * buffer, so the existing command boundary provides the ordering. */
         if (!gpu_draft_pipeline_ready ||
-            tokens[0] < 0 || tokens[0] >= (int)DS4_N_VOCAB ||
-            ds4_gpu_tensor_bytes(gpu_draft_tokens) <
+            tokens[0] < 0 || tokens[0] >= (int)LGN2_N_VOCAB ||
+            lgn2_gpu_tensor_bytes(gpu_draft_tokens) <
                 (uint64_t)n_tokens * sizeof(uint32_t)) {
             return false;
         }
         const uint32_t first_token = (uint32_t)tokens[0];
-        ok = ds4_gpu_tensor_write(g->tokens,
+        ok = lgn2_gpu_tensor_write(g->tokens,
                                   0,
                                   &first_token,
                                   sizeof(first_token)) != 0;
         if (ok && n_tokens > 1u) {
-            ok = ds4_gpu_tensor_copy(
+            ok = lgn2_gpu_tensor_copy(
                      g->tokens,
                      sizeof(uint32_t),
                      gpu_draft_tokens,
@@ -5818,13 +5818,13 @@ static bool laguna_graph_forward_batch(
         uint32_t *token_ids =
             xmalloc((size_t)n_tokens * sizeof(*token_ids));
         for (uint32_t i = 0; i < n_tokens; i++) {
-            if (tokens[i] < 0 || tokens[i] >= (int)DS4_N_VOCAB) {
+            if (tokens[i] < 0 || tokens[i] >= (int)LGN2_N_VOCAB) {
                 free(token_ids);
                 return false;
             }
             token_ids[i] = (uint32_t)tokens[i];
         }
-        ok = ds4_gpu_tensor_write(
+        ok = lgn2_gpu_tensor_write(
                  g->tokens,
                  0,
                  token_ids,
@@ -5845,7 +5845,7 @@ static bool laguna_graph_forward_batch(
      * Laguna prefill to change sliding-attention routes after a few hundred
      * tokens. The legacy batched kernels are both stable against the Poolside
      * reference and slightly faster on these shapes. */
-    ds4_gpu_set_tensor_matmul_suppressed(true);
+    lgn2_gpu_set_tensor_matmul_suppressed(true);
     /* A long Laguna prefill otherwise lives in one command buffer and cannot
      * report real progress until the whole chunk completes.  When a frontend
      * asks for display progress, finish one layer at a time so each callback
@@ -5858,35 +5858,35 @@ static bool laguna_graph_forward_batch(
     bool rope_atlas_target_command_waited = false;
 #endif
     const int dense_q8_route =
-        ds4_gpu_laguna_dense_q8_gate_up_swiglu_route(
+        lgn2_gpu_laguna_dense_q8_gate_up_swiglu_route(
             dense_q8_gate_up_fusion ? 1 : 0,
             0,
             exact_q8_rows ? 1 : 0);
 #ifdef __APPLE__
     const int dense_q8_prefill_route =
-        ds4_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
+        lgn2_gpu_laguna_dense_q8_gate_up_swiglu_prefill_route(
             dense_q8_gate_up_batch ? 1 : 0,
             exact_q8_rows ? 1 : 0,
             n_tokens,
-            ds4_gpu_laguna_q8_mv_ext_max_tokens());
+            lgn2_gpu_laguna_q8_mv_ext_max_tokens());
 #else
     const int dense_q8_prefill_route =
-        DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK;
+        LGN2_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK;
 #endif
     /* DFlash feature capture and GPU draft-token verification have their own
      * cache/injection sequencing, but an enabled frozen SIMD32/atlas plan
      * still forces the paired route so all production shapes are certified. */
 #ifdef __APPLE__
     const int simd32_plan_mode =
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_plan_mode_cached();
     const int rope_atlas_plan_mode =
-        ds4_gpu_laguna_rope_atlas_plan_mode_cached();
+        lgn2_gpu_laguna_rope_atlas_plan_mode_cached();
 #else
     const int simd32_plan_mode = 0;
     const int rope_atlas_plan_mode = 0;
 #endif
     const bool paired_qk_norm_rope =
-        ds4_laguna_graph_prefill_qk_norm_rope_paired_route(
+        lgn2_laguna_graph_prefill_qk_norm_rope_paired_route(
             simd32_plan_mode,
             rope_atlas_plan_mode,
             exact_q8_rows ? 1 : 0,
@@ -5903,37 +5903,37 @@ static bool laguna_graph_forward_batch(
     if (gpu_draft_tokens) {
         ok = gpu_draft_pipeline_ready;
     } else {
-        ok = ds4_gpu_begin_commands() != 0;
+        ok = lgn2_gpu_begin_commands() != 0;
     }
     if (ok) {
-        ok = ds4_gpu_embed_tokens_quant_tensor(g->cur,
+        ok = lgn2_gpu_embed_tokens_quant_tensor(g->cur,
                                                 g->tokens,
                                                 model->map,
                                                 model->size,
                                                 weights->token_embd->abs_offset,
                                                 weights->token_embd->type,
-                                                DS4_N_VOCAB,
+                                                LGN2_N_VOCAB,
                                                 n_tokens,
-                                                DS4_N_EMBD) != 0;
+                                                LGN2_N_EMBD) != 0;
     }
 
     uint32_t completed_layers = 0;
     const char *failed_stage = "embedding";
-    for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
-        const ds4_layer_weights *l = &weights->layer[il];
-        const uint32_t n_head = ds4_layer_head_count(il);
-        const bool is_swa = ds4_laguna_layer_is_swa(il);
-        const uint32_t n_rot = is_swa ? DS4_N_ROT_SWA : DS4_N_ROT;
+    for (uint32_t il = 0; ok && il < LGN2_N_LAYER; il++) {
+        const lgn2_layer_weights *l = &weights->layer[il];
+        const uint32_t n_head = lgn2_layer_head_count(il);
+        const bool is_swa = lgn2_laguna_layer_is_swa(il);
+        const uint32_t n_rot = is_swa ? LGN2_N_ROT_SWA : LGN2_N_ROT;
         const float freq_base = is_swa ?
-            DS4_ROPE_FREQ_BASE_SWA : DS4_ROPE_FREQ_BASE;
+            LGN2_ROPE_FREQ_BASE_SWA : LGN2_ROPE_FREQ_BASE;
         const float freq_scale = is_swa ?
-            1.0f : 1.0f / DS4_ROPE_SCALE_FACTOR;
+            1.0f : 1.0f / LGN2_ROPE_SCALE_FACTOR;
         const float ext_factor = is_swa ? 0.0f : 1.0f;
-        const float attn_factor = is_swa ? 1.0f : DS4_ROPE_YARN_ATTN_FACTOR;
-        const float beta_fast = is_swa ? 0.0f : DS4_ROPE_YARN_BETA_FAST;
-        const float beta_slow = is_swa ? 0.0f : DS4_ROPE_YARN_BETA_SLOW;
+        const float attn_factor = is_swa ? 1.0f : LGN2_ROPE_YARN_ATTN_FACTOR;
+        const float beta_fast = is_swa ? 0.0f : LGN2_ROPE_YARN_BETA_FAST;
+        const float beta_slow = is_swa ? 0.0f : LGN2_ROPE_YARN_BETA_SLOW;
         const uint32_t rope_ctx = is_swa ?
-            (uint32_t)DS4_CONTEXT_LENGTH : (uint32_t)DS4_ROPE_ORIG_CTX;
+            (uint32_t)LGN2_CONTEXT_LENGTH : (uint32_t)LGN2_ROPE_ORIG_CTX;
 
         failed_stage = "attention norm";
         ok = laguna_graph_capture_feature(capture, g->cur, il);
@@ -5941,15 +5941,15 @@ static bool laguna_graph_forward_batch(
             failed_stage = "DFlash feature capture";
             break;
         }
-        ok = ds4_gpu_rms_norm_weight_rows_tensor(
+        ok = lgn2_gpu_rms_norm_weight_rows_tensor(
                 g->attn_norm,
                 g->cur,
                 model->map,
                 model->size,
                 l->attn_norm->abs_offset,
-                DS4_N_EMBD,
+                LGN2_N_EMBD,
                 n_tokens,
-                DS4_RMS_EPS) != 0;
+                LGN2_RMS_EPS) != 0;
         if (ok) {
             failed_stage = "Q/K projection";
             ok = laguna_graph_matmul_decode_rows(g->q,
@@ -5982,7 +5982,7 @@ static bool laguna_graph_forward_batch(
         }
         if (ok && (exact_q8_rows || paired_qk_norm_rope)) {
             failed_stage = "Q/K norm/RoPE";
-            ok = ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+            ok = lgn2_gpu_laguna_qk_head_rms_norm_rope_tensor(
                     g->q,
                     g->k,
                     model->map,
@@ -5991,8 +5991,8 @@ static bool laguna_graph_forward_batch(
                     l->attn_k_norm->abs_offset,
                     n_tokens,
                     n_head,
-                    DS4_N_HEAD_KV,
-                    DS4_N_HEAD_DIM,
+                    LGN2_N_HEAD_KV,
+                    LGN2_N_HEAD_DIM,
                     n_rot,
                     pos0,
                     rope_ctx,
@@ -6002,18 +6002,18 @@ static bool laguna_graph_forward_batch(
                     attn_factor,
                     beta_fast,
                     beta_slow,
-                    DS4_RMS_EPS) != 0;
+                    LGN2_RMS_EPS) != 0;
         } else {
             if (ok) {
                 failed_stage = "Q norm/RoPE";
-                ok = ds4_gpu_laguna_head_rms_norm_rope_tensor(
+                ok = lgn2_gpu_laguna_head_rms_norm_rope_tensor(
                         g->q,
                         model->map,
                         model->size,
                         l->attn_q_norm->abs_offset,
                         n_tokens,
                         n_head,
-                        DS4_N_HEAD_DIM,
+                        LGN2_N_HEAD_DIM,
                         n_rot,
                         pos0,
                         rope_ctx,
@@ -6023,18 +6023,18 @@ static bool laguna_graph_forward_batch(
                         attn_factor,
                         beta_fast,
                         beta_slow,
-                        DS4_RMS_EPS) != 0;
+                        LGN2_RMS_EPS) != 0;
             }
             if (ok) {
                 failed_stage = "K norm/RoPE";
-                ok = ds4_gpu_laguna_head_rms_norm_rope_tensor(
+                ok = lgn2_gpu_laguna_head_rms_norm_rope_tensor(
                         g->k,
                         model->map,
                         model->size,
                         l->attn_k_norm->abs_offset,
                         n_tokens,
-                        DS4_N_HEAD_KV,
-                        DS4_N_HEAD_DIM,
+                        LGN2_N_HEAD_KV,
+                        LGN2_N_HEAD_DIM,
                         n_rot,
                         pos0,
                         rope_ctx,
@@ -6044,7 +6044,7 @@ static bool laguna_graph_forward_batch(
                         attn_factor,
                         beta_fast,
                         beta_slow,
-                        DS4_RMS_EPS) != 0;
+                        LGN2_RMS_EPS) != 0;
             }
         }
         if (ok) {
@@ -6054,7 +6054,7 @@ static bool laguna_graph_forward_batch(
             const int split_decode_rows = row_argmax_out != NULL &&
                 (uint64_t)pos0 + n_tokens > 256u &&
                 true;
-            ok = ds4_gpu_laguna_attention_prefill_tensor(
+            ok = lgn2_gpu_laguna_attention_prefill_tensor(
                     g->heads,
                     g->key_cache[il],
                     g->value_cache[il],
@@ -6068,9 +6068,9 @@ static bool laguna_graph_forward_batch(
                     n_tokens,
                     g->cache_cap[il],
                     n_head,
-                    DS4_N_HEAD_KV,
-                    DS4_N_HEAD_DIM,
-                    1.0f / sqrtf((float)DS4_N_HEAD_DIM),
+                    LGN2_N_HEAD_KV,
+                    LGN2_N_HEAD_DIM,
+                    1.0f / sqrtf((float)LGN2_N_HEAD_DIM),
                     split_decode_rows) != 0;
         }
         if (ok) {
@@ -6084,7 +6084,7 @@ static bool laguna_graph_forward_batch(
         }
         if (ok) {
             failed_stage = "attention residual + FFN norm";
-            ok = ds4_gpu_add_rms_norm_weight_rows_tensor(
+            ok = lgn2_gpu_add_rms_norm_weight_rows_tensor(
                     g->ffn_norm,
                     g->after_attn,
                     g->cur,
@@ -6092,27 +6092,27 @@ static bool laguna_graph_forward_batch(
                     model->map,
                     model->size,
                     l->ffn_norm->abs_offset,
-                    DS4_N_EMBD,
+                    LGN2_N_EMBD,
                     n_tokens,
-                    DS4_RMS_EPS) != 0;
+                    LGN2_RMS_EPS) != 0;
         }
-        if (ok && il < DS4_N_LEADING_DENSE) {
+        if (ok && il < LGN2_N_LEADING_DENSE) {
             /* Exact verifier rows stay on the stock row-wise matmuls.  The
              * fused decode route stays one-token; ordinary prefill may opt
              * into the batched fused gate/up+SwiGLU pass, which reads the
              * normed rows once and never materializes gate/up. */
             if (dense_q8_prefill_route ==
-                    DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED) {
+                    LGN2_GPU_LAGUNA_DENSE_Q8_ROUTE_BATCH_FUSED) {
 #ifdef __APPLE__
                 failed_stage = "dense FFN batched gate/up+SwiGLU";
-                ok = ds4_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
+                ok = lgn2_gpu_laguna_dense_q8_gate_up_swiglu_batch_tensor(
                         g->ffn_mid,
                         model->map,
                         model->size,
                         l->ffn_gate->abs_offset,
                         l->ffn_up->abs_offset,
-                        DS4_N_EMBD,
-                        DS4_N_FF_DENSE,
+                        LGN2_N_EMBD,
+                        LGN2_N_FF_DENSE,
                         g->ffn_norm,
                         n_tokens) != 0;
 #else
@@ -6136,16 +6136,16 @@ static bool laguna_graph_forward_batch(
                                                      exact_q8_rows);
                 if (ok) {
                     failed_stage = "dense FFN SwiGLU";
-                    ok = ds4_gpu_swiglu_tensor(
+                    ok = lgn2_gpu_swiglu_tensor(
                             g->ffn_mid,
                             g->ffn_gate,
                             g->ffn_up,
-                            (uint64_t)n_tokens * DS4_N_FF_DENSE,
+                            (uint64_t)n_tokens * LGN2_N_FF_DENSE,
                             0.0f,
                             1.0f) != 0;
                 }
                 if (ok && dense_q8_route ==
-                               DS4_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK) {
+                               LGN2_GPU_LAGUNA_DENSE_Q8_ROUTE_ORDINARY_PREFILL_STOCK) {
                     laguna_dense_q8_gate_up_swiglu_note_prefill_stock(g);
                 }
             }
@@ -6160,10 +6160,10 @@ static bool laguna_graph_forward_batch(
             }
             if (ok) {
                 failed_stage = "dense FFN residual";
-                ok = ds4_gpu_add_tensor(g->next,
+                ok = lgn2_gpu_add_tensor(g->next,
                                         g->after_attn,
                                         g->ffn_out,
-                                        (uint64_t)n_tokens * DS4_N_EMBD) != 0;
+                                        (uint64_t)n_tokens * LGN2_N_EMBD) != 0;
             }
         } else if (ok) {
             if (exact_q8_rows) {
@@ -6175,7 +6175,7 @@ static bool laguna_graph_forward_batch(
                  * dispatch as laguna_graph_forward_token.  Exact verifier
                  * batches deliberately stay on their row-replay path above. */
                 failed_stage = "fused router";
-                ok = ds4_gpu_laguna_router_decode_fused_tensor(
+                ok = lgn2_gpu_laguna_router_decode_fused_tensor(
                          g->router_selected,
                          g->router_weights,
                          g->router_probs,
@@ -6185,25 +6185,25 @@ static bool laguna_graph_forward_batch(
                          l->ffn_gate_inp->abs_offset,
                          l->ffn_exp_probs_b->abs_offset,
                          g->ffn_norm,
-                         (uint32_t)DS4_N_EMBD,
-                         DS4_N_EXPERT,
-                         DS4_N_EXPERT_USED,
-                         DS4_EXPERT_WEIGHT_SCALE) != 0;
+                         (uint32_t)LGN2_N_EMBD,
+                         LGN2_N_EXPERT,
+                         LGN2_N_EXPERT_USED,
+                         LGN2_EXPERT_WEIGHT_SCALE) != 0;
             } else {
                 failed_stage = "router projection";
-                ok = ds4_gpu_matmul_f32_tensor(
+                ok = lgn2_gpu_matmul_f32_tensor(
                         g->router_logits,
                         model->map,
                         model->size,
                         l->ffn_gate_inp->abs_offset,
-                        DS4_N_EMBD,
-                        DS4_N_EXPERT,
+                        LGN2_N_EMBD,
+                        LGN2_N_EXPERT,
                         g->ffn_norm,
                         n_tokens) != 0;
             }
             if (ok && !exact_q8_rows && !fused_router_batch) {
                 failed_stage = "router selection";
-                ok = ds4_gpu_glm_router_select_batch_tensor(
+                ok = lgn2_gpu_glm_router_select_batch_tensor(
                         g->router_selected,
                         g->router_weights,
                         g->router_probs,
@@ -6211,9 +6211,9 @@ static bool laguna_graph_forward_batch(
                         model->size,
                         l->ffn_exp_probs_b->abs_offset,
                         g->router_logits,
-                        DS4_N_EXPERT,
-                        DS4_N_EXPERT_USED,
-                        DS4_EXPERT_WEIGHT_SCALE,
+                        LGN2_N_EXPERT,
+                        LGN2_N_EXPERT_USED,
+                        LGN2_EXPERT_WEIGHT_SCALE,
                         n_tokens) != 0;
             }
 
@@ -6245,7 +6245,7 @@ static bool laguna_graph_forward_batch(
                             down_expert_bytes,
                             down_row_bytes);
                 } else {
-                    ok = ds4_gpu_glm_routed_moe_batch_tensor(
+                    ok = lgn2_gpu_glm_routed_moe_batch_tensor(
                             g->ffn_out,
                             g->routed_mid,
                             model->map,
@@ -6262,17 +6262,17 @@ static bool laguna_graph_forward_batch(
                             up_row_bytes,
                             down_expert_bytes,
                             down_row_bytes,
-                            DS4_N_EMBD,
-                            DS4_N_FF_EXP,
-                            DS4_N_EMBD,
+                            LGN2_N_EMBD,
+                            LGN2_N_FF_EXP,
+                            LGN2_N_EMBD,
                             g->router_selected,
                             g->router_weights,
-                            DS4_N_EXPERT,
-                            DS4_N_EXPERT_USED,
+                            LGN2_N_EXPERT,
+                            LGN2_N_EXPERT_USED,
                             il,
                             g->ffn_norm,
                             n_tokens,
-                            DS4_N_EXPERT_USED * DS4_N_FF_EXP,
+                            LGN2_N_EXPERT_USED * LGN2_N_FF_EXP,
                             true) != 0;
                 }
             }
@@ -6294,11 +6294,11 @@ static bool laguna_graph_forward_batch(
                          exact_q8_rows);
                 if (ok) {
                     failed_stage = "shared expert SwiGLU";
-                    ok = ds4_gpu_swiglu_tensor(
+                    ok = lgn2_gpu_swiglu_tensor(
                             g->ffn_mid,
                             g->ffn_gate,
                             g->ffn_up,
-                            (uint64_t)n_tokens * DS4_N_FF_SHARED,
+                            (uint64_t)n_tokens * LGN2_N_FF_SHARED,
                             0.0f,
                             1.0f) != 0;
                 }
@@ -6315,23 +6315,23 @@ static bool laguna_graph_forward_batch(
             }
             if (ok) {
                 failed_stage = "MoE residual";
-                ok = ds4_gpu_add3_tensor(
+                ok = lgn2_gpu_add3_tensor(
                         g->next,
                         g->after_attn,
                         g->ffn_out,
                         g->shared_out,
-                        (uint64_t)n_tokens * DS4_N_EMBD) != 0;
+                        (uint64_t)n_tokens * LGN2_N_EMBD) != 0;
             }
         }
 
         if (ok) {
-            ds4_gpu_tensor *tmp = g->cur;
+            lgn2_gpu_tensor *tmp = g->cur;
             g->cur = g->next;
             g->next = tmp;
             completed_layers = il + 1u;
         }
         if (ok && live_progress && !caller_owned_draft_batch) {
-            ok = ds4_gpu_end_commands() != 0;
+            ok = lgn2_gpu_end_commands() != 0;
 #ifdef __APPLE__
             if (ok) {
                 qk_simd32_target_command_waited = true;
@@ -6340,7 +6340,7 @@ static bool laguna_graph_forward_batch(
 #endif
             if (ok) {
                 const bool layer_is_all_work =
-                    completed_layers == (uint32_t)DS4_N_LAYER &&
+                    completed_layers == (uint32_t)LGN2_N_LAYER &&
                     logits_out == NULL &&
                     !g->gpu_argmax_enabled;
                 laguna_graph_report_prefill_display_progress(
@@ -6352,26 +6352,26 @@ static bool laguna_graph_forward_batch(
                         display_total,
                         layer_is_all_work);
             }
-            if (ok && (completed_layers < (uint32_t)DS4_N_LAYER ||
+            if (ok && (completed_layers < (uint32_t)LGN2_N_LAYER ||
                        logits_out != NULL || g->gpu_argmax_enabled)) {
-                ok = ds4_gpu_begin_commands() != 0;
+                ok = lgn2_gpu_begin_commands() != 0;
             }
         }
     }
 
     if (!ok) {
         fprintf(stderr,
-                "ds4: Laguna batch prefill failed in %s after %u/%u layers\n",
+                "lgn2: Laguna batch prefill failed in %s after %u/%u layers\n",
                 failed_stage,
                 completed_layers,
-                (unsigned)DS4_N_LAYER);
+                (unsigned)LGN2_N_LAYER);
     }
 
     if (ok) {
         ok = laguna_graph_capture_final_feature(
                 g,
                 model,
-                &weights->layer[DS4_N_LAYER - 1u],
+                &weights->layer[LGN2_N_LAYER - 1u],
                 n_tokens,
                 capture);
         if (!ok) failed_stage = "DFlash final feature capture";
@@ -6379,15 +6379,15 @@ static bool laguna_graph_forward_batch(
 
     if (ok && row_argmax_out) {
         failed_stage = "speculative output norm";
-        ok = ds4_gpu_rms_norm_weight_rows_tensor(
+        ok = lgn2_gpu_rms_norm_weight_rows_tensor(
                 g->spec_output_norm,
                 g->cur,
                 model->map,
                 model->size,
                 weights->output_norm->abs_offset,
-                DS4_N_EMBD,
+                LGN2_N_EMBD,
                 n_tokens,
-                DS4_RMS_EPS) != 0;
+                LGN2_RMS_EPS) != 0;
         if (ok) {
             failed_stage = "speculative output projection";
             ok = laguna_graph_matmul_decode_rows(g->spec_logits,
@@ -6399,15 +6399,15 @@ static bool laguna_graph_forward_batch(
         }
         if (ok) {
             failed_stage = "speculative row argmax";
-            ok = ds4_gpu_indexer_topk_tensor(g->spec_argmax,
+            ok = lgn2_gpu_indexer_topk_tensor(g->spec_argmax,
                                               g->spec_logits,
-                                              DS4_N_VOCAB,
+                                              LGN2_N_VOCAB,
                                               n_tokens,
                                               1) != 0;
         }
     }
 
-    ds4_gpu_tensor *last = NULL;
+    lgn2_gpu_tensor *last = NULL;
 #ifdef __APPLE__
     const bool q8_lmhead_screen =
         g->lmhead_screen != NULL && logits_out == NULL;
@@ -6416,26 +6416,26 @@ static bool laguna_graph_forward_batch(
     const bool q8_lmhead_screen = false;
 #endif
     if (ok && (logits_out || g->gpu_argmax_enabled)) {
-        last = ds4_gpu_tensor_view(
+        last = lgn2_gpu_tensor_view(
                 g->cur,
-                (uint64_t)(n_tokens - 1u) * DS4_N_EMBD * sizeof(float),
-                (uint64_t)DS4_N_EMBD * sizeof(float));
+                (uint64_t)(n_tokens - 1u) * LGN2_N_EMBD * sizeof(float),
+                (uint64_t)LGN2_N_EMBD * sizeof(float));
         ok = last != NULL;
         if (ok) {
-            ok = ds4_gpu_rms_norm_weight_tensor(
+            ok = lgn2_gpu_rms_norm_weight_tensor(
                     g->output_norm,
                     last,
                     model->map,
                     model->size,
                     weights->output_norm->abs_offset,
-                    DS4_N_EMBD,
-                    DS4_RMS_EPS) != 0;
+                    LGN2_N_EMBD,
+                    LGN2_RMS_EPS) != 0;
         }
         if (ok) {
             if (q8_lmhead_screen) {
 #ifdef __APPLE__
                 failed_stage = "Q8 lm-head screen";
-                ok = ds4_gpu_laguna_q8_lmhead_screen_tensor(
+                ok = lgn2_gpu_laguna_q8_lmhead_screen_tensor(
                     g->lmhead_screen,
                     g->argmax,
                     NULL,
@@ -6457,17 +6457,17 @@ static bool laguna_graph_forward_batch(
 #ifdef __APPLE__
     if (ok && g->gpu_argmax_enabled && !q8_lmhead_screen) {
         failed_stage = "GPU argmax";
-        ok = ds4_gpu_laguna_argmax_tensor(g->argmax,
+        ok = lgn2_gpu_laguna_argmax_tensor(g->argmax,
                                           g->logits,
-                                          DS4_N_VOCAB) != 0;
+                                          LGN2_N_VOCAB) != 0;
     }
 #endif
     /* A speculative cycle appends support-cache injection before completing
      * the shared snapshot/draft/verify command stream. */
     const bool defer_completion = ok && caller_owned_draft_batch;
-    if (!caller_owned_draft_batch && ds4_gpu_commands_active()) {
+    if (!caller_owned_draft_batch && lgn2_gpu_commands_active()) {
         if (ok) {
-            if (ds4_gpu_end_commands() == 0) {
+            if (lgn2_gpu_end_commands() == 0) {
                 ok = false;
             } else {
                 dense_q8_completion_waited = true;
@@ -6477,7 +6477,7 @@ static bool laguna_graph_forward_batch(
         } else {
             /* Never commit KV/attention work recorded before a later graph
              * stage failed.  Drop the shared batch transaction instead. */
-            if (ds4_gpu_discard_commands() == 0) ok = false;
+            if (lgn2_gpu_discard_commands() == 0) ok = false;
         }
     }
     if (ok && dense_q8_completion_waited) {
@@ -6531,9 +6531,9 @@ static bool laguna_graph_forward_batch(
     }
     if (!ok) laguna_metal_target_evidence_discard(g);
 #endif
-    ds4_gpu_tensor_free(last);
+    lgn2_gpu_tensor_free(last);
     if (ok && g->gpu_argmax_enabled && !defer_completion) {
-        ok = ds4_gpu_tensor_read(g->argmax,
+        ok = lgn2_gpu_tensor_read(g->argmax,
                                  0,
                                  &g->gpu_argmax_result,
                                  sizeof(g->gpu_argmax_result)) != 0;
@@ -6544,17 +6544,17 @@ static bool laguna_graph_forward_batch(
     }
 #endif
     if (ok && row_argmax_out && !defer_completion) {
-        ok = ds4_gpu_tensor_read(g->spec_argmax,
+        ok = lgn2_gpu_tensor_read(g->spec_argmax,
                                  0,
                                  row_argmax_out,
                                  (uint64_t)n_tokens *
                                      sizeof(row_argmax_out[0])) != 0;
     }
     if (ok && logits_out) {
-        ok = ds4_gpu_tensor_read(g->logits,
+        ok = lgn2_gpu_tensor_read(g->logits,
                                  0,
                                  logits_out,
-                                 (uint64_t)DS4_N_VOCAB * sizeof(float)) != 0;
+                                 (uint64_t)LGN2_N_VOCAB * sizeof(float)) != 0;
     }
     if (ok && (!live_progress || logits_out != NULL ||
                (g->gpu_argmax_enabled && !defer_completion))) {
@@ -6562,11 +6562,11 @@ static bool laguna_graph_forward_batch(
                                                       display_progress_ud,
                                                       pos0,
                                                       n_tokens,
-                                                      DS4_N_LAYER,
+                                                      LGN2_N_LAYER,
                                                       display_total,
                                                       true);
     }
-    ds4_gpu_set_tensor_matmul_suppressed(false);
+    lgn2_gpu_set_tensor_matmul_suppressed(false);
 #ifdef __APPLE__
     if (router_simd_topk_trace && !defer_completion) {
         laguna_metal_router_simd_topk_trace_report(
@@ -6579,31 +6579,31 @@ static bool laguna_graph_forward_batch(
 
 #if defined(__APPLE__)
 static bool laguna_metal_gpu_argmax_requested(void) {
-    const char *env = getenv("DS4_METAL_LAGUNA_GPU_ARGMAX");
+    const char *env = getenv("LGN2_METAL_LAGUNA_GPU_ARGMAX");
     return env && strcmp(env, "1") == 0;
 }
 
 static bool laguna_metal_gpu_argmax_debug_forces_full_logits(void) {
     /* These diagnostics inspect or dump the complete row, so retaining the
      * host logits buffer is part of their contract. Presence matches the
-     * existing DS4_TRACE_TOP behavior; dump paths require a non-empty value. */
+     * existing LGN2_TRACE_TOP behavior; dump paths require a non-empty value. */
     static const char *const presence[] = {
-        "DS4_TRACE_TOP",
-        "DS4_METAL_GRAPH_DUMP_PREFIX",
-        "DS4_METAL_GRAPH_DUMP_NAME",
-        "DS4_METAL_GRAPH_DUMP_LAYER",
-        "DS4_METAL_GRAPH_DUMP_POS",
-        "DS4_METAL_GRAPH_DUMP_TRACE",
-        "DS4_METAL_GRAPH_TRACE_CACHE",
-        "DS4_METAL_GRAPH_TRACE_COMP",
-        "DS4_METAL_GRAPH_TRACE_LAYERS",
-        "DS4_METAL_GRAPH_TRACE_STAGE_LAYER",
+        "LGN2_TRACE_TOP",
+        "LGN2_METAL_GRAPH_DUMP_PREFIX",
+        "LGN2_METAL_GRAPH_DUMP_NAME",
+        "LGN2_METAL_GRAPH_DUMP_LAYER",
+        "LGN2_METAL_GRAPH_DUMP_POS",
+        "LGN2_METAL_GRAPH_DUMP_TRACE",
+        "LGN2_METAL_GRAPH_TRACE_CACHE",
+        "LGN2_METAL_GRAPH_TRACE_COMP",
+        "LGN2_METAL_GRAPH_TRACE_LAYERS",
+        "LGN2_METAL_GRAPH_TRACE_STAGE_LAYER",
     };
     static const char *const dumps[] = {
-        "DS4_METAL_DUMP_PREFILL_LOGITS",
-        "DS4_METAL_GRAPH_DUMP_LOGITS",
-        "DS4_CPU_DUMP_LOGITS",
-        "DS4_CPU_DUMP_PREFILL_LOGITS",
+        "LGN2_METAL_DUMP_PREFILL_LOGITS",
+        "LGN2_METAL_GRAPH_DUMP_LOGITS",
+        "LGN2_CPU_DUMP_LOGITS",
+        "LGN2_CPU_DUMP_PREFILL_LOGITS",
     };
     for (size_t i = 0; i < sizeof(presence) / sizeof(presence[0]); i++) {
         if (getenv(presence[i]) != NULL) return true;
@@ -6616,14 +6616,14 @@ static bool laguna_metal_gpu_argmax_debug_forces_full_logits(void) {
 }
 
 static int laguna_metal_q8_lmhead_screen_v2_mode(void) {
-    const char *v2 = getenv("DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2");
+    const char *v2 = getenv("LGN2_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2");
     /* v2 is deliberately a strict selector: it can opt in the screen on its
      * own, while malformed values fail before graph/KV state is touched. */
     if (!v2 || v2[0] == '\0' || strcmp(v2, "0") == 0) return 0;
     if (strcmp(v2, "1") == 0) return 1;
     {
         fprintf(stderr,
-                "ds4: invalid DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2='%s'; "
+                "lgn2: invalid LGN2_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2='%s'; "
                 "expected unset, empty, 0, or literal 1\n",
                 v2);
         return -1;
@@ -6643,7 +6643,7 @@ static bool laguna_metal_q8_lmhead_screen_requested(void) {
     const int v2_mode = laguna_metal_q8_lmhead_screen_v2_mode();
     if (v2_mode < 0) return false;
     return laguna_graph_env_flag(
-               "DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN", false) ||
+               "LGN2_METAL_LAGUNA_Q8_LMHEAD_SCREEN", false) ||
            v2_mode > 0;
 }
 
@@ -6652,24 +6652,24 @@ static bool laguna_metal_q8_lmhead_screen_requested(void) {
  * reject it alongside the other generation preflights before allocating the
  * raw Laguna graph. */
 static bool laguna_metal_q8_lmhead_screen_dispatch_env_preflight(void) {
-    ds4_gpu_q8_decode_config q8_config;
+    lgn2_gpu_q8_decode_config q8_config;
     const int q8_config_valid =
-        ds4_gpu_q8_decode_config_snapshot(&q8_config);
+        lgn2_gpu_q8_decode_config_snapshot(&q8_config);
     const int rows_mode = q8_config_valid < 0 ? -1 : q8_config.q8_mv_rows;
     const char *rows_value = q8_config_valid < 0 ?
         "invalid snapshot" : (rows_mode == 2 ? "2" : "4");
     if (rows_mode != 2) {
         fprintf(stderr,
-                "ds4: Laguna Q8 lm-head screen requires "
-                "DS4_METAL_Q8_MV_ROWS unset/empty or literal 2 "
+                "lgn2: Laguna Q8 lm-head screen requires "
+                "LGN2_METAL_Q8_MV_ROWS unset/empty or literal 2 "
                 "(got '%s'); refusing graph allocation\n",
                 rows_value ? rows_value : "");
         return false;
     }
-    if (getenv("DS4_METAL_Q8_DECODE_MPP") != NULL ||
-        getenv("DS4_METAL_ENABLE_OUTPUT_Q8_NR4") != NULL) {
+    if (getenv("LGN2_METAL_Q8_DECODE_MPP") != NULL ||
+        getenv("LGN2_METAL_ENABLE_OUTPUT_Q8_NR4") != NULL) {
         fprintf(stderr,
-                "ds4: Laguna Q8 lm-head screen has an incompatible "
+                "lgn2: Laguna Q8 lm-head screen has an incompatible "
                 "Q8 dispatch environment; refusing graph allocation\n");
         return false;
     }
@@ -6681,11 +6681,11 @@ static bool laguna_metal_q8_lmhead_screen_dispatch_env_preflight(void) {
  * enables it.  Returning -1 lets every caller reject malformed values before
  * opening a command batch or touching a Laguna graph/KV cache. */
 static int laguna_metal_decode_residual_norm_mode(void) {
-    const char *env = getenv("DS4_METAL_LAGUNA_DECODE_RESIDUAL_NORM");
-    const int mode = ds4_gpu_laguna_decode_residual_norm_env_mode(env);
+    const char *env = getenv("LGN2_METAL_LAGUNA_DECODE_RESIDUAL_NORM");
+    const int mode = lgn2_gpu_laguna_decode_residual_norm_env_mode(env);
     if (mode >= 0) return mode;
     fprintf(stderr,
-            "ds4: invalid DS4_METAL_LAGUNA_DECODE_RESIDUAL_NORM='%s'; "
+            "lgn2: invalid LGN2_METAL_LAGUNA_DECODE_RESIDUAL_NORM='%s'; "
             "expected unset, empty, 0, or literal 1\n",
             env ? env : "");
     return mode;
@@ -6695,9 +6695,9 @@ static bool laguna_metal_decode_residual_norm_preflight(void) {
     const int mode = laguna_metal_decode_residual_norm_mode();
     if (mode < 0) return false;
     if (mode == 0) return true;
-    if (!ds4_gpu_laguna_decode_residual_norm_available()) {
+    if (!lgn2_gpu_laguna_decode_residual_norm_available()) {
         fprintf(stderr,
-                "ds4: Laguna decode residual fusion requested but "
+                "lgn2: Laguna decode residual fusion requested but "
                 "kernel_add3_rms_norm_mul_f32_4 is unavailable\n");
         return false;
     }
@@ -6708,17 +6708,17 @@ static bool laguna_metal_decode_residual_norm_preflight(void) {
  * scratch, opening a command batch, or changing session/cache state.  The
  * Metal entry point repeats the same probe defensively for raw callers. */
 static bool laguna_metal_swa_gqa9_preflight(
-        const ds4_engine *engine,
+        const lgn2_engine *engine,
         const char       *operation,
         char             *err,
         size_t            errlen) {
-    if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_LAGUNA) return true;
-    const int mode = ds4_gpu_laguna_swa_gqa9_preflight(
-        DS4_SHAPE_LAGUNA_S21.n_swa,
-        DS4_SHAPE_LAGUNA_S21.n_swa,
-        DS4_SHAPE_LAGUNA_S21.n_head,
-        DS4_SHAPE_LAGUNA_S21.n_head_kv,
-        DS4_SHAPE_LAGUNA_S21.n_head_dim);
+    if (LGN2_MODEL_FAMILY != LGN2_MODEL_FAMILY_LAGUNA) return true;
+    const int mode = lgn2_gpu_laguna_swa_gqa9_preflight(
+        LGN2_SHAPE_LAGUNA_S21.n_swa,
+        LGN2_SHAPE_LAGUNA_S21.n_swa,
+        LGN2_SHAPE_LAGUNA_S21.n_head,
+        LGN2_SHAPE_LAGUNA_S21.n_head_kv,
+        LGN2_SHAPE_LAGUNA_S21.n_head_dim);
     if (mode < 0) {
         if (err && errlen) {
             snprintf(err, errlen,
@@ -6729,7 +6729,7 @@ static bool laguna_metal_swa_gqa9_preflight(
     }
     if (mode > 0 && engine && !engine->metal_ready) {
         fprintf(stderr,
-                "ds4: Laguna SWA GQA9 requires a ready Metal runtime; "
+                "lgn2: Laguna SWA GQA9 requires a ready Metal runtime; "
                 "refusing explicit opt-in fallback\n");
         if (err && errlen) {
             snprintf(err, errlen,
@@ -6746,14 +6746,14 @@ static bool laguna_metal_swa_gqa9_preflight(
  * or session timeline mutation can happen.  The low-level router entry points
  * repeat the check defensively because diagnostics can call them directly. */
 static bool laguna_metal_router_simd_topk_preflight(
-        const ds4_engine *engine,
+        const lgn2_engine *engine,
         const char       *operation,
         char             *err,
         size_t            errlen) {
-    const int mode = ds4_gpu_laguna_router_simd_topk_preflight(
-        DS4_N_EXPERT,
-        DS4_N_EXPERT_USED,
-        DS4_EXPERT_WEIGHT_SCALE);
+    const int mode = lgn2_gpu_laguna_router_simd_topk_preflight(
+        LGN2_N_EXPERT,
+        LGN2_N_EXPERT_USED,
+        LGN2_EXPERT_WEIGHT_SCALE);
     if (mode < 0) {
         if (err && errlen) {
             snprintf(err, errlen,
@@ -6764,7 +6764,7 @@ static bool laguna_metal_router_simd_topk_preflight(
     }
     if (mode > 0 && engine && !engine->metal_ready) {
         fprintf(stderr,
-                "ds4: Laguna router SIMD top-k requires a ready Metal runtime; "
+                "lgn2: Laguna router SIMD top-k requires a ready Metal runtime; "
                 "refusing explicit opt-in fallback\n");
         if (err && errlen) {
             snprintf(err, errlen,
@@ -6783,62 +6783,62 @@ static bool laguna_metal_router_simd_topk_preflight(
  * This function intentionally runs before command/KV/capture mutation at each
  * public graph boundary. */
 static bool laguna_metal_router_decode_fused_preflight(
-        const ds4_model   *model,
-        const ds4_weights *weights) {
+        const lgn2_model   *model,
+        const lgn2_weights *weights) {
     const int mode = laguna_metal_router_decode_fused_mode();
     if (mode < 0) return false;
     if (mode == 0) return true;
     if (!model || !model->map || !weights) {
         fprintf(stderr,
-                "ds4: Laguna fused router requested without a mapped model "
+                "lgn2: Laguna fused router requested without a mapped model "
                 "and bound weights\n");
         return false;
     }
 
     const uint64_t gate_bytes =
-        (uint64_t)DS4_N_EMBD * (uint64_t)DS4_N_EXPERT * sizeof(float);
-    const uint64_t bias_bytes = (uint64_t)DS4_N_EXPERT * sizeof(float);
-    for (uint32_t il = DS4_N_LEADING_DENSE;
-         il < (uint32_t)DS4_N_LAYER;
+        (uint64_t)LGN2_N_EMBD * (uint64_t)LGN2_N_EXPERT * sizeof(float);
+    const uint64_t bias_bytes = (uint64_t)LGN2_N_EXPERT * sizeof(float);
+    for (uint32_t il = LGN2_N_LEADING_DENSE;
+         il < (uint32_t)LGN2_N_LAYER;
          il++) {
-        const ds4_layer_weights *l = &weights->layer[il];
-        const ds4_tensor *gate = l->ffn_gate_inp;
-        const ds4_tensor *bias = l->ffn_exp_probs_b;
-        if (!gate || !bias || gate->type != DS4_TENSOR_F32 ||
-            gate->ndim < 2u || gate->dim[0] != DS4_N_EMBD ||
-            gate->dim[1] != DS4_N_EXPERT ||
-            bias->type != DS4_TENSOR_F32 || bias->ndim < 1u ||
-            bias->dim[0] != DS4_N_EXPERT ||
+        const lgn2_layer_weights *l = &weights->layer[il];
+        const lgn2_tensor *gate = l->ffn_gate_inp;
+        const lgn2_tensor *bias = l->ffn_exp_probs_b;
+        if (!gate || !bias || gate->type != LGN2_TENSOR_F32 ||
+            gate->ndim < 2u || gate->dim[0] != LGN2_N_EMBD ||
+            gate->dim[1] != LGN2_N_EXPERT ||
+            bias->type != LGN2_TENSOR_F32 || bias->ndim < 1u ||
+            bias->dim[0] != LGN2_N_EXPERT ||
             gate->bytes < gate_bytes || bias->bytes < bias_bytes ||
             gate->abs_offset > model->size ||
             gate->bytes > model->size - gate->abs_offset ||
             bias->abs_offset > model->size ||
             bias->bytes > model->size - bias->abs_offset) {
             fprintf(stderr,
-                    "ds4: Laguna fused router requested but sparse layer "
+                    "lgn2: Laguna fused router requested but sparse layer "
                     "%u has unavailable or incompatible F32 router weights\n",
                     il);
             return false;
         }
     }
-    return ds4_gpu_laguna_router_decode_fused_preflight(
-               (uint32_t)DS4_N_EMBD,
-               DS4_N_EXPERT,
-               DS4_N_EXPERT_USED,
-               DS4_EXPERT_WEIGHT_SCALE) != 0;
+    return lgn2_gpu_laguna_router_decode_fused_preflight(
+               (uint32_t)LGN2_N_EMBD,
+               LGN2_N_EXPERT,
+               LGN2_N_EXPERT_USED,
+               LGN2_EXPERT_WEIGHT_SCALE) != 0;
 }
 
 /* The router trace is intentionally opt-in and is kept out of timed runs.
  * The Metal kernel only enables its atomic row counters for the same literal
  * value, so a trace-off run pays neither the atomic updates nor these waits. */
 static bool laguna_metal_router_simd_topk_trace_enabled(void) {
-    const char *value = getenv("DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE");
+    const char *value = getenv("LGN2_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE");
     return value && strcmp(value, "1") == 0;
 }
 
 static void laguna_metal_router_simd_topk_trace_reset(void) {
     if (laguna_metal_router_simd_topk_trace_enabled()) {
-        ds4_gpu_laguna_router_simd_topk_stats_reset();
+        lgn2_gpu_laguna_router_simd_topk_stats_reset();
     }
 }
 
@@ -6849,18 +6849,18 @@ static void laguna_metal_router_simd_topk_trace_report(const char *operation) {
     uint32_t fallback_rows = 0;
     uint64_t encoded_rows = 0;
     uint64_t encoded_dispatches = 0;
-    if (!ds4_gpu_laguna_router_simd_topk_stats_after_wait(
+    if (!lgn2_gpu_laguna_router_simd_topk_stats_after_wait(
             &optimized_rows,
             &fallback_rows,
             &encoded_rows,
             &encoded_dispatches)) {
         fprintf(stderr,
-                "ds4: %s Laguna router SIMD top-k trace read failed\n",
+                "lgn2: %s Laguna router SIMD top-k trace read failed\n",
                 operation ? operation : "graph operation");
         return;
     }
     fprintf(stderr,
-            "ds4: %s Laguna router SIMD top-k trace "
+            "lgn2: %s Laguna router SIMD top-k trace "
             "optimized=%u fallback=%u encoded_rows=%llu "
             "encoded_dispatches=%llu\n",
             operation ? operation : "graph operation",
@@ -6872,9 +6872,9 @@ static void laguna_metal_router_simd_topk_trace_report(const char *operation) {
 
 #endif
 
-static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
+static bool laguna_graph_enable_gpu_argmax(lgn2_laguna_gpu_graph *g) {
     if (!g || g->gpu_argmax_enabled) return g != NULL;
-    g->argmax = ds4_gpu_tensor_alloc(sizeof(int32_t));
+    g->argmax = lgn2_gpu_tensor_alloc(sizeof(int32_t));
     if (!g->argmax) return false;
     g->scratch_bytes += sizeof(int32_t);
     g->gpu_argmax_enabled = true;
@@ -6883,7 +6883,7 @@ static bool laguna_graph_enable_gpu_argmax(ds4_laguna_gpu_graph *g) {
 
 #ifdef __APPLE__
 static void laguna_graph_report_q8_lmhead_screen(
-        const ds4_laguna_gpu_graph *g) {
+        const lgn2_laguna_gpu_graph *g) {
     if (!g || !g->lmhead_screen) {
         return;
     }
@@ -6898,7 +6898,7 @@ static void laguna_graph_report_q8_lmhead_screen(
     uint32_t exact_dispatch_groups = 0;
     int32_t winner_index = -1;
     float winner_value = 0.0f;
-    if (ds4_gpu_laguna_q8_lmhead_screen_stats(
+    if (lgn2_gpu_laguna_q8_lmhead_screen_stats(
             g->lmhead_screen,
             &candidate_rows,
             &candidate_row_blocks,
@@ -6909,10 +6909,10 @@ static void laguna_graph_report_q8_lmhead_screen(
             &exact_row_blocks,
             &winner_index,
             &winner_value)) {
-        const int v2 = ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(
+        const int v2 = lgn2_gpu_laguna_q8_lmhead_screen_v2_enabled(
             g->lmhead_screen);
         if (v2) {
-            (void)ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
+            (void)lgn2_gpu_laguna_q8_lmhead_screen_stats_v2(
                 g->lmhead_screen,
                 &compact_pair_count,
                 &exact_dispatch_groups);
@@ -6920,7 +6920,7 @@ static void laguna_graph_report_q8_lmhead_screen(
         uint32_t winner_bits = 0;
         memcpy(&winner_bits, &winner_value, sizeof(winner_bits));
         fprintf(stderr,
-                "ds4: Laguna Q8 lm-head screen stats screen_calls=%llu "
+                "lgn2: Laguna Q8 lm-head screen stats screen_calls=%llu "
                 "candidates=%u row_blocks=%u exact_row_blocks=%u "
                 "nonfinite=%u packed_bytes=%llu sidecopy_init_ms=%.3f "
                 "winner=%d value=%g winner_bits=0x%08x",
@@ -6945,19 +6945,19 @@ static void laguna_graph_report_q8_lmhead_screen(
 #endif
 
 static int generate_laguna_metal_argmax(
-        const ds4_model   *model,
-        const ds4_vocab   *vocab,
-        const ds4_weights *weights,
+        const lgn2_model   *model,
+        const lgn2_vocab   *vocab,
+        const lgn2_weights *weights,
         const token_vec   *prompt,
         int                n_predict,
         int                ctx_size,
-        ds4_token_emit_fn  emit,
-        ds4_generation_done_fn done,
+        lgn2_token_emit_fn  emit,
+        lgn2_generation_done_fn done,
         void              *emit_ud,
-        ds4_session_progress_fn progress,
+        lgn2_session_progress_fn progress,
         void              *progress_ud) {
     if (!prompt || prompt->len <= 0 || prompt->len >= ctx_size) {
-        fprintf(stderr, "ds4: Laguna prompt is empty or leaves no context room\n");
+        fprintf(stderr, "lgn2: Laguna prompt is empty or leaves no context room\n");
         return 1;
     }
     if (!laguna_dense_q8_gate_up_swiglu_preflight(model, weights, NULL)) return 1;
@@ -6977,8 +6977,8 @@ static int generate_laguna_metal_argmax(
         !laguna_metal_q8_lmhead_screen_dispatch_env_preflight()) return 1;
     if (lmhead_screen_requested && !gpu_argmax_requested) {
         fprintf(stderr,
-                "ds4: Laguna Q8 lm-head screen requires "
-                "DS4_METAL_LAGUNA_GPU_ARGMAX=1\n");
+                "lgn2: Laguna Q8 lm-head screen requires "
+                "LGN2_METAL_LAGUNA_GPU_ARGMAX=1\n");
         return 1;
     }
     const bool debug_forces_full_logits =
@@ -6987,44 +6987,44 @@ static int generate_laguna_metal_argmax(
         gpu_argmax_requested && !debug_forces_full_logits;
     if (lmhead_screen_requested && gpu_argmax &&
         (!weights || !weights->output ||
-         weights->output->type != DS4_TENSOR_Q8_0 ||
+         weights->output->type != LGN2_TENSOR_Q8_0 ||
          weights->output->ndim < 2 ||
          weights->output->dim[0] != 3072u ||
          weights->output->dim[1] != 100352u)) {
         fprintf(stderr,
-                "ds4: Laguna Q8 lm-head screen requires untied Q8_0 "
+                "lgn2: Laguna Q8 lm-head screen requires untied Q8_0 "
                 "output[100352,3072]\n");
         return 1;
     }
     if (lmhead_screen_requested && !gpu_argmax &&
         debug_forces_full_logits) {
         fprintf(stderr,
-                "ds4: Laguna Q8 lm-head screen suppressed because full-logit "
+                "lgn2: Laguna Q8 lm-head screen suppressed because full-logit "
                 "debug precedence is active\n");
     }
-    if (gpu_argmax && !ds4_gpu_laguna_argmax_available()) {
+    if (gpu_argmax && !lgn2_gpu_laguna_argmax_available()) {
         /* This check runs before the first graph dispatch/KV mutation. A
          * missing prerequisite is an explicit failure; later kernel failures
          * are propagated and never retried through the old path. */
         fprintf(stderr,
-                "ds4: Laguna GPU argmax requested but its Metal pipeline is unavailable\n");
+                "lgn2: Laguna GPU argmax requested but its Metal pipeline is unavailable\n");
         return 1;
     }
 #else
     const bool gpu_argmax = false;
 #endif
-    ds4_laguna_gpu_graph g = {0};
+    lgn2_laguna_gpu_graph g = {0};
     if (!laguna_graph_alloc(&g, (uint32_t)ctx_size)) return 1;
     if (gpu_argmax) {
         if (!laguna_graph_enable_gpu_argmax(&g)) {
-            fprintf(stderr, "ds4: failed to allocate Laguna GPU argmax output\n");
+            fprintf(stderr, "lgn2: failed to allocate Laguna GPU argmax output\n");
             laguna_graph_free(&g);
             return 1;
         }
-        fprintf(stderr, "ds4: Laguna GPU argmax enabled (single-dispatch)\n");
+        fprintf(stderr, "lgn2: Laguna GPU argmax enabled (single-dispatch)\n");
 #ifdef __APPLE__
         if (lmhead_screen_requested) {
-            g.lmhead_screen = ds4_gpu_laguna_q8_lmhead_screen_create(
+            g.lmhead_screen = lgn2_gpu_laguna_q8_lmhead_screen_create(
                 model->map,
                 model->size,
                 weights->output->abs_offset,
@@ -7032,17 +7032,17 @@ static int generate_laguna_metal_argmax(
                 weights->output->dim[1]);
             if (!g.lmhead_screen) {
                 fprintf(stderr,
-                        "ds4: Laguna Q8 lm-head screen requested but could not be prepared\n");
+                        "lgn2: Laguna Q8 lm-head screen requested but could not be prepared\n");
                 laguna_graph_free(&g);
                 return 1;
             }
             fprintf(stderr,
-                    "ds4: Laguna Q8 lm-head screen enabled (exact top-1 only)\n");
+                    "lgn2: Laguna Q8 lm-head screen enabled (exact top-1 only)\n");
         }
 #endif
     }
     float *logits = gpu_argmax ? NULL :
-        xmalloc((size_t)DS4_N_VOCAB * sizeof(float));
+        xmalloc((size_t)LGN2_N_VOCAB * sizeof(float));
     bool ok = true;
     const double prefill_t0 = now_sec();
     for (int i = 0; ok && i < prompt->len;) {
@@ -7073,22 +7073,22 @@ static int generate_laguna_metal_argmax(
 
     int generated = 0;
     int successful_decode_evals = 0;
-    const char *bench_stats_env = getenv("DS4_LAGUNA_BENCH_STATS");
+    const char *bench_stats_env = getenv("LGN2_LAGUNA_BENCH_STATS");
     const bool bench_stats = bench_stats_env && !strcmp(bench_stats_env, "1");
     uint32_t pos = (uint32_t)prompt->len;
     const double decode_t0 = now_sec();
     for (int i = 0; ok && i < n_predict && pos < (uint32_t)ctx_size; i++) {
-        if (!gpu_argmax && getenv("DS4_TRACE_TOP") != NULL) {
+        if (!gpu_argmax && getenv("LGN2_TRACE_TOP") != NULL) {
             char label[64];
             snprintf(label, sizeof(label), "Laguna step %d", i);
-            print_top_logits(stderr, label, vocab, logits, DS4_N_VOCAB, 10);
+            print_top_logits(stderr, label, vocab, logits, LGN2_N_VOCAB, 10);
         }
         const int token = gpu_argmax ? (int)g.gpu_argmax_result :
-            sample_argmax(logits, DS4_N_VOCAB);
+            sample_argmax(logits, LGN2_N_VOCAB);
         if (gpu_argmax &&
-            (token < 0 || token >= (int)DS4_N_VOCAB)) {
+            (token < 0 || token >= (int)LGN2_N_VOCAB)) {
             fprintf(stderr,
-                    "ds4: Laguna GPU argmax returned invalid token %d\n",
+                    "lgn2: Laguna GPU argmax returned invalid token %d\n",
                     token);
             ok = false;
             break;
@@ -7105,16 +7105,16 @@ static int generate_laguna_metal_argmax(
     }
     const double decode_t1 = now_sec();
     if (done) done(emit_ud);
-    ds4_log(stderr,
-            DS4_LOG_TIMING,
-            "ds4: Laguna prefill: %.2f t/s, generation: %.2f t/s\n",
+    lgn2_log(stderr,
+            LGN2_LOG_TIMING,
+            "lgn2: Laguna prefill: %.2f t/s, generation: %.2f t/s\n",
             prefill_t1 > prefill_t0 ?
                 (double)prompt->len / (prefill_t1 - prefill_t0) : 0.0,
             decode_t1 > decode_t0 ?
                 (double)generated / (decode_t1 - decode_t0) : 0.0);
     if (bench_stats) {
         fprintf(stderr,
-                "ds4: Laguna decode stats generated=%d requested=%d evals=%d\n",
+                "lgn2: Laguna decode stats generated=%d requested=%d evals=%d\n",
                 generated,
                 n_predict,
                 successful_decode_evals);
@@ -7126,11 +7126,11 @@ static int generate_laguna_metal_argmax(
 
 #endif
 
-ds4_context_memory ds4_context_memory_estimate(int ctx_size) {
+lgn2_context_memory lgn2_context_memory_estimate(int ctx_size) {
     /* Derive the values from the same dimensions and per-layer cache caps as
      * lgn_graph_alloc().  The model is always whole-mmap backed. */
-    ds4_context_memory m = {0};
-    const ds4_shape *shape = lgn_model_shape();
+    lgn2_context_memory m = {0};
+    const lgn2_shape *shape = lgn_model_shape();
     if (!shape || ctx_size <= 0 ||
         (uint64_t)ctx_size > shape->context_length) {
         return m;
@@ -7180,9 +7180,9 @@ ds4_context_memory ds4_context_memory_estimate(int ctx_size) {
     return m;
 }
 
-#ifdef DS4_TEST_HOOKS
-bool ds4_test_laguna_context_memory_estimator(void) {
-    const ds4_shape *shape = lgn_model_shape();
+#ifdef LGN2_TEST_HOOKS
+bool lgn2_test_laguna_context_memory_estimator(void) {
+    const lgn2_shape *shape = lgn_model_shape();
     static const struct {
         int ctx;
         uint32_t prefill_cap;
@@ -7203,8 +7203,8 @@ bool ds4_test_laguna_context_memory_estimator(void) {
         return false;
     }
     for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
-        const ds4_context_memory m =
-            ds4_context_memory_estimate(expected[i].ctx);
+        const lgn2_context_memory m =
+            lgn2_context_memory_estimate(expected[i].ctx);
         if (m.prefill_cap != expected[i].prefill_cap ||
             m.raw_cap != expected[i].raw_cap ||
             m.comp_cap != expected[i].comp_cap ||
@@ -7216,18 +7216,18 @@ bool ds4_test_laguna_context_memory_estimator(void) {
             return false;
         }
     }
-    const ds4_context_memory invalid_zero =
-        ds4_context_memory_estimate(0);
-    const ds4_context_memory invalid_high =
-        ds4_context_memory_estimate(262145);
+    const lgn2_context_memory invalid_zero =
+        lgn2_context_memory_estimate(0);
+    const lgn2_context_memory invalid_high =
+        lgn2_context_memory_estimate(262145);
     return invalid_zero.total_bytes == 0u && invalid_high.total_bytes == 0u;
 }
 
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
-bool ds4_test_laguna_graph_env_flag(void) {
-    static const char name[] = "DS4_TEST_LAGUNA_GRAPH_ENV_FLAG";
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
+bool lgn2_test_laguna_graph_env_flag(void) {
+    static const char name[] = "LGN2_TEST_LAGUNA_GRAPH_ENV_FLAG";
     const char *old = getenv(name);
-    char *saved = old ? ds4_strdup(old) : NULL;
+    char *saved = old ? lgn2_strdup(old) : NULL;
     bool ok = true;
 
     unsetenv(name);
@@ -7263,50 +7263,50 @@ bool ds4_test_laguna_graph_env_flag(void) {
  * to the CLI and server.
  */
 
-bool ds4_think_mode_enabled(ds4_think_mode mode) {
-    return mode == DS4_THINK_HIGH || mode == DS4_THINK_MAX;
+bool lgn2_think_mode_enabled(lgn2_think_mode mode) {
+    return mode == LGN2_THINK_HIGH || mode == LGN2_THINK_MAX;
 }
 
-const char *ds4_think_mode_name(ds4_think_mode mode) {
+const char *lgn2_think_mode_name(lgn2_think_mode mode) {
     switch (mode) {
-    case DS4_THINK_NONE: return "none";
-    case DS4_THINK_HIGH: return "high";
-    case DS4_THINK_MAX:  return "max";
+    case LGN2_THINK_NONE: return "none";
+    case LGN2_THINK_HIGH: return "high";
+    case LGN2_THINK_MAX:  return "max";
     }
     return "unknown";
 }
 
-const char *ds4_think_max_prefix(void) {
-    return DS4_REASONING_EFFORT_MAX_PREFIX;
+const char *lgn2_think_max_prefix(void) {
+    return LGN2_REASONING_EFFORT_MAX_PREFIX;
 }
 
-uint32_t ds4_think_max_min_context(void) {
-    return DS4_THINK_MAX_MIN_CONTEXT;
+uint32_t lgn2_think_max_min_context(void) {
+    return LGN2_THINK_MAX_MIN_CONTEXT;
 }
 
-ds4_think_mode ds4_think_mode_for_context(ds4_think_mode mode, int ctx_size) {
-    if (mode == DS4_THINK_MAX && (uint32_t)(ctx_size > 0 ? ctx_size : 0) < DS4_THINK_MAX_MIN_CONTEXT) {
-        return DS4_THINK_HIGH;
+lgn2_think_mode lgn2_think_mode_for_context(lgn2_think_mode mode, int ctx_size) {
+    if (mode == LGN2_THINK_MAX && (uint32_t)(ctx_size > 0 ? ctx_size : 0) < LGN2_THINK_MAX_MIN_CONTEXT) {
+        return LGN2_THINK_HIGH;
     }
     return mode;
 }
 
-static void ds4_release_instance_lock(void) {
-    if (g_ds4_lock_fd >= 0) {
-        close(g_ds4_lock_fd);
-        g_ds4_lock_fd = -1;
+static void lgn2_release_instance_lock(void) {
+    if (g_lgn2_lock_fd >= 0) {
+        close(g_lgn2_lock_fd);
+        g_lgn2_lock_fd = -1;
     }
 }
 
-/* Refuse to start a second ds4 process.  The model can map tens of GiB, so a
+/* Refuse to start a second lgn2 process.  The model can map tens of GiB, so a
  * stale accidental second run is more dangerous than a normal CLI error. */
-static void ds4_acquire_instance_lock(void) {
-    const char *path = getenv("DS4_LOCK_FILE");
-    if (!path || !path[0]) path = "/tmp/ds4.lock";
+static void lgn2_acquire_instance_lock(void) {
+    const char *path = getenv("LGN2_LOCK_FILE");
+    if (!path || !path[0]) path = "/tmp/lgn2.lock";
 
     const int fd = open(path, O_RDWR | O_CREAT, 0600);
     if (fd < 0) {
-        fprintf(stderr, "ds4: failed to open lock file %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "lgn2: failed to open lock file %s: %s\n", path, strerror(errno));
         exit(2);
     }
     (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -7322,36 +7322,36 @@ static void ds4_acquire_instance_lock(void) {
                 owner = strtol(buf, &end, 10);
             }
             if (owner > 0) {
-                fprintf(stderr, "ds4: another ds4 process is already running (pid %ld); refusing to start\n", owner);
+                fprintf(stderr, "lgn2: another lgn2 process is already running (pid %ld); refusing to start\n", owner);
             } else {
-                fprintf(stderr, "ds4: another ds4 process is already running; refusing to start\n");
+                fprintf(stderr, "lgn2: another lgn2 process is already running; refusing to start\n");
             }
             close(fd);
             exit(2);
         }
-        fprintf(stderr, "ds4: failed to lock %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "lgn2: failed to lock %s: %s\n", path, strerror(errno));
         close(fd);
         exit(2);
     }
 
     if (ftruncate(fd, 0) != 0) {
-        fprintf(stderr, "ds4: failed to truncate lock file %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "lgn2: failed to truncate lock file %s: %s\n", path, strerror(errno));
         close(fd);
         exit(2);
     }
     dprintf(fd, "%ld\n", (long)getpid());
-    g_ds4_lock_fd = fd;
-    atexit(ds4_release_instance_lock);
+    g_lgn2_lock_fd = fd;
+    atexit(lgn2_release_instance_lock);
 }
 
-struct ds4_session {
-    ds4_engine *engine;
+struct lgn2_session {
+    lgn2_engine *engine;
     bool speculative_enabled;
     bool registered_with_engine;
-#ifndef DS4_NO_GPU
-    ds4_laguna_gpu_graph laguna_graph;
+#ifndef LGN2_NO_GPU
+    lgn2_laguna_gpu_graph laguna_graph;
     bool laguna_graph_ready;
-    ds4_dflash_gpu_graph dflash_graph;
+    lgn2_dflash_gpu_graph dflash_graph;
     bool dflash_graph_ready;
     bool dflash_synced;
     uint64_t dflash_cycles;
@@ -7391,52 +7391,52 @@ struct ds4_session {
     bool logsumexp_valid;
     bool logsumexp_ok;
     double last_sample_ms;
-    ds4_session_progress_fn progress;
+    lgn2_session_progress_fn progress;
     void *progress_ud;
-    ds4_session_progress_fn display_progress;
+    lgn2_session_progress_fn display_progress;
     void *display_progress_ud;
-    ds4_session_cancel_fn cancel;
+    lgn2_session_cancel_fn cancel;
     void *cancel_ud;
     uint32_t prefill_cap;
     int ctx_size;
     bool checkpoint_valid;
 };
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 /* Model-independent routing seam: the public mixed-prefill API still owns
  * validation and ordering, while these hooks substitute only the Laguna
  * sync/eval leaves.  Production builds contain neither the hooks nor their
  * counters. */
-typedef int (*ds4_test_route_sync_fn)(
-        ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen);
-typedef int (*ds4_test_route_eval_fn)(
-        ds4_session *s, int token, char *err, size_t errlen);
-static ds4_test_route_sync_fn g_ds4_test_route_sync_fn;
-static ds4_test_route_eval_fn g_ds4_test_route_eval_fn;
-static uint32_t g_ds4_test_route_sync_calls;
-static uint32_t g_ds4_test_route_eval_calls;
-static uint32_t g_ds4_test_route_generic_eval_calls;
-static DS4_MAYBE_UNUSED bool g_ds4_test_route_generic_access_forbidden;
+typedef int (*lgn2_test_route_sync_fn)(
+        lgn2_session *s, const lgn2_tokens *prompt, char *err, size_t errlen);
+typedef int (*lgn2_test_route_eval_fn)(
+        lgn2_session *s, int token, char *err, size_t errlen);
+static lgn2_test_route_sync_fn g_lgn2_test_route_sync_fn;
+static lgn2_test_route_eval_fn g_lgn2_test_route_eval_fn;
+static uint32_t g_lgn2_test_route_sync_calls;
+static uint32_t g_lgn2_test_route_eval_calls;
+static uint32_t g_lgn2_test_route_generic_eval_calls;
+static LGN2_MAYBE_UNUSED bool g_lgn2_test_route_generic_access_forbidden;
 #endif
 
 /* Marks the session's logits content as replaced.  Every public entry point
  * that can write s->logits calls this on entry, which stales the shared
  * logsumexp cache below.  Over-marking is harmless (it only forces a
  * recompute), so entry points mark unconditionally. */
-static void ds4_session_note_logits_dirty(ds4_session *s) {
+static void lgn2_session_note_logits_dirty(lgn2_session *s) {
     if (s) s->logits_gen++;
 }
 
-#ifdef DS4_TEST_HOOKS
-static ds4_test_logprob_stats g_ds4_test_logprob_stats;
+#ifdef LGN2_TEST_HOOKS
+static lgn2_test_logprob_stats g_lgn2_test_logprob_stats;
 
-void ds4_test_logprob_stats_reset(void) {
-    memset(&g_ds4_test_logprob_stats, 0,
-           sizeof(g_ds4_test_logprob_stats));
+void lgn2_test_logprob_stats_reset(void) {
+    memset(&g_lgn2_test_logprob_stats, 0,
+           sizeof(g_lgn2_test_logprob_stats));
 }
 
-void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out) {
-    if (out) *out = g_ds4_test_logprob_stats;
+void lgn2_test_logprob_stats_get(lgn2_test_logprob_stats *out) {
+    if (out) *out = g_lgn2_test_logprob_stats;
 }
 #endif
 
@@ -7460,7 +7460,7 @@ void ds4_test_logprob_stats_get(ds4_test_logprob_stats *out) {
  * token to match a session that had just prefetched the prefix.
  */
 
-#define DS4_SESSION_IO_CHUNK (8u * 1024u * 1024u)
+#define LGN2_SESSION_IO_CHUNK (8u * 1024u * 1024u)
 
 static void payload_set_err(char *err, size_t errlen, const char *msg) {
     if (errlen != 0) snprintf(err, errlen, "%s", msg);
@@ -7494,7 +7494,7 @@ static int payload_write_bytes(FILE *fp, const void *ptr, uint64_t bytes, char *
     return 0;
 }
 
-static DS4_MAYBE_UNUSED int payload_read_bytes(FILE *fp, void *ptr, uint64_t bytes, uint64_t *remaining, char *err, size_t errlen) {
+static LGN2_MAYBE_UNUSED int payload_read_bytes(FILE *fp, void *ptr, uint64_t bytes, uint64_t *remaining, char *err, size_t errlen) {
     if (remaining && *remaining < bytes) {
         payload_set_err(err, errlen, "truncated session payload");
         return 1;
@@ -7514,13 +7514,13 @@ static DS4_MAYBE_UNUSED int payload_read_bytes(FILE *fp, void *ptr, uint64_t byt
     return 0;
 }
 
-static DS4_MAYBE_UNUSED int payload_write_u32(FILE *fp, uint32_t v, char *err, size_t errlen) {
+static LGN2_MAYBE_UNUSED int payload_write_u32(FILE *fp, uint32_t v, char *err, size_t errlen) {
     uint8_t b[4];
     payload_put_u32(b, v);
     return payload_write_bytes(fp, b, sizeof(b), err, errlen);
 }
 
-static DS4_MAYBE_UNUSED int payload_read_u32(FILE *fp, uint32_t *v, uint64_t *remaining, char *err, size_t errlen) {
+static LGN2_MAYBE_UNUSED int payload_read_u32(FILE *fp, uint32_t *v, uint64_t *remaining, char *err, size_t errlen) {
     uint8_t b[4];
     if (remaining && *remaining < sizeof(b)) {
         payload_set_err(err, errlen, "truncated session payload");
@@ -7536,10 +7536,10 @@ static DS4_MAYBE_UNUSED int payload_read_u32(FILE *fp, uint32_t *v, uint64_t *re
 }
 
 static int payload_copy_file_bytes(FILE *src, FILE *dst, uint64_t bytes, char *err, size_t errlen) {
-    uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
+    uint8_t *buf = xmalloc(LGN2_SESSION_IO_CHUNK);
     int rc = 0;
     while (bytes != 0) {
-        const size_t n = bytes > DS4_SESSION_IO_CHUNK ? DS4_SESSION_IO_CHUNK : (size_t)bytes;
+        const size_t n = bytes > LGN2_SESSION_IO_CHUNK ? LGN2_SESSION_IO_CHUNK : (size_t)bytes;
         if (fread(buf, 1, n, src) != n) {
             payload_set_err(err, errlen, "failed to read staged session payload");
             rc = 1;
@@ -7556,24 +7556,24 @@ static int payload_copy_file_bytes(FILE *src, FILE *dst, uint64_t bytes, char *e
     return rc;
 }
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
 static uint32_t session_laguna_layer_live_rows(
-        const ds4_laguna_gpu_graph *g,
+        const lgn2_laguna_gpu_graph *g,
         uint32_t                    layer,
         uint32_t                    checkpoint_len) {
-    if (!g || layer >= DS4_N_LAYER || layer >= DS4_MAX_LAYER) return 0;
+    if (!g || layer >= LGN2_N_LAYER || layer >= LGN2_MAX_LAYER) return 0;
     uint32_t rows = g->cache_cap[layer];
     if (rows > checkpoint_len) rows = checkpoint_len;
     return rows;
 }
 
 static uint64_t session_laguna_payload_live_tensor_bytes(
-        const ds4_laguna_gpu_graph *g,
+        const lgn2_laguna_gpu_graph *g,
         uint32_t                    checkpoint_len) {
     const uint64_t row_bytes =
-        (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
+        (uint64_t)LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM * sizeof(uint16_t);
     uint64_t bytes = 0;
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+    for (uint32_t il = 0; il < LGN2_N_LAYER; il++) {
         const uint64_t rows =
             session_laguna_layer_live_rows(g, il, checkpoint_len);
         if (rows > (UINT64_MAX - bytes) / (2u * row_bytes)) return 0;
@@ -7585,11 +7585,11 @@ static uint64_t session_laguna_payload_live_tensor_bytes(
 /* Accelerator tensors are copied through a fixed-size CPU buffer.  We do not mmap the
  * cache file and we do not allocate a second graph-sized blob just to serialize
  * it; both would be poor fits for this very large model. */
-static int payload_write_tensor_span(FILE *fp, const ds4_gpu_tensor *tensor,
+static int payload_write_tensor_span(FILE *fp, const lgn2_gpu_tensor *tensor,
                                      uint64_t offset, uint64_t bytes,
                                      uint8_t *buf, size_t cap, char *err, size_t errlen) {
-    if (!tensor || offset > ds4_gpu_tensor_bytes(tensor) ||
-        bytes > ds4_gpu_tensor_bytes(tensor) - offset)
+    if (!tensor || offset > lgn2_gpu_tensor_bytes(tensor) ||
+        bytes > lgn2_gpu_tensor_bytes(tensor) - offset)
     {
         payload_set_err(err, errlen, "session tensor is smaller than the payload");
         return 1;
@@ -7597,7 +7597,7 @@ static int payload_write_tensor_span(FILE *fp, const ds4_gpu_tensor *tensor,
     uint64_t done = 0;
     while (done < bytes) {
         const size_t n = bytes - done > (uint64_t)cap ? cap : (size_t)(bytes - done);
-        if (ds4_gpu_tensor_read(tensor, offset + done, buf, n) == 0) {
+        if (lgn2_gpu_tensor_read(tensor, offset + done, buf, n) == 0) {
             payload_set_err(err, errlen, "failed to read accelerator session tensor");
             return 1;
         }
@@ -7607,12 +7607,12 @@ static int payload_write_tensor_span(FILE *fp, const ds4_gpu_tensor *tensor,
     return 0;
 }
 
-static int payload_read_tensor_span(FILE *fp, ds4_gpu_tensor *tensor,
+static int payload_read_tensor_span(FILE *fp, lgn2_gpu_tensor *tensor,
                                     uint64_t offset, uint64_t bytes,
                                     uint8_t *buf, size_t cap, uint64_t *remaining,
                                     char *err, size_t errlen) {
-    if (!tensor || offset > ds4_gpu_tensor_bytes(tensor) ||
-        bytes > ds4_gpu_tensor_bytes(tensor) - offset)
+    if (!tensor || offset > lgn2_gpu_tensor_bytes(tensor) ||
+        bytes > lgn2_gpu_tensor_bytes(tensor) - offset)
     {
         payload_set_err(err, errlen, "session tensor is smaller than the payload");
         return 1;
@@ -7621,7 +7621,7 @@ static int payload_read_tensor_span(FILE *fp, ds4_gpu_tensor *tensor,
     while (done < bytes) {
         const size_t n = bytes - done > (uint64_t)cap ? cap : (size_t)(bytes - done);
         if (payload_read_bytes(fp, buf, n, remaining, err, errlen) != 0) return 1;
-        if (ds4_gpu_tensor_write(tensor, offset + done, buf, n) == 0) {
+        if (lgn2_gpu_tensor_write(tensor, offset + done, buf, n) == 0) {
             payload_set_err(err, errlen, "failed to restore accelerator session tensor");
             return 1;
         }
@@ -7634,7 +7634,7 @@ static int payload_read_tensor_span(FILE *fp, ds4_gpu_tensor *tensor,
  * use a different context allocation while retaining the same last-window
  * state because the file layout does not expose the source ring position. */
 static int payload_write_laguna_ring(FILE *fp,
-                                     const ds4_gpu_tensor *tensor,
+                                     const lgn2_gpu_tensor *tensor,
                                      uint32_t cap, uint32_t logical_first,
                                      uint32_t rows, uint64_t row_bytes,
                                      uint8_t *buf, size_t buf_cap,
@@ -7669,7 +7669,7 @@ static int payload_write_laguna_ring(FILE *fp,
 }
 
 static int payload_read_laguna_ring(FILE *fp,
-                                    ds4_gpu_tensor *tensor,
+                                    lgn2_gpu_tensor *tensor,
                                     uint32_t cap, uint32_t logical_first,
                                     uint32_t rows, uint64_t row_bytes,
                                     uint8_t *buf, size_t buf_cap,
@@ -7709,16 +7709,16 @@ static int payload_read_laguna_ring(FILE *fp,
 
 #endif
 
-static bool ds4_session_is_laguna(const ds4_session *s) {
-    return s && s->engine && DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA;
+static bool lgn2_session_is_laguna(const lgn2_session *s) {
+    return s && s->engine && LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA;
 }
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
 /* The DFlash support graph owns a separate KV/feature history from the
  * Laguna target graph.  Any operation that invalidates the target timeline
  * must invalidate this history as one unit too; in particular, a deferred
  * feature injection must never survive across a target payload restore. */
-static void ds4_session_dflash_invalidate(ds4_session *s) {
+static void lgn2_session_dflash_invalidate(lgn2_session *s) {
     if (!s) return;
     s->dflash_synced = false;
     s->dflash_deferred_rows = 0;
@@ -7728,34 +7728,34 @@ static void ds4_session_dflash_invalidate(ds4_session *s) {
 
 #endif
 
-static uint32_t ds4_model_normal_layer_count(void) {
-    return DS4_N_LAYER <= DS4_MAX_LAYER ? (uint32_t)DS4_N_LAYER : 0;
+static uint32_t lgn2_model_normal_layer_count(void) {
+    return LGN2_N_LAYER <= LGN2_MAX_LAYER ? (uint32_t)LGN2_N_LAYER : 0;
 }
 
-static bool ds4_layer_payload_range_valid(uint32_t layer_start, uint32_t layer_end) {
-    const uint32_t n_layers = ds4_model_normal_layer_count();
+static bool lgn2_layer_payload_range_valid(uint32_t layer_start, uint32_t layer_end) {
+    const uint32_t n_layers = lgn2_model_normal_layer_count();
     return n_layers != 0 && layer_start <= layer_end && layer_end < n_layers;
 }
 
-uint64_t ds4_session_layer_payload_bytes(ds4_session *s,
+uint64_t lgn2_session_layer_payload_bytes(lgn2_session *s,
                                          uint32_t layer_start,
                                          uint32_t layer_end) {
     if (!s || !s->checkpoint_valid ||
-        !ds4_layer_payload_range_valid(layer_start, layer_end))
+        !lgn2_layer_payload_range_valid(layer_start, layer_end))
         return 0;
-    if (ds4_session_is_laguna(s)) return 0;
+    if (lgn2_session_is_laguna(s)) return 0;
     return 0;
 }
 
-int ds4_session_save_layer_payload(ds4_session *s, FILE *fp,
+int lgn2_session_save_layer_payload(lgn2_session *s, FILE *fp,
                                    uint32_t layer_start, uint32_t layer_end,
                                    char *err, size_t errlen) {
     if (!s || !fp || !s->checkpoint_valid ||
-        !ds4_layer_payload_range_valid(layer_start, layer_end)) {
+        !lgn2_layer_payload_range_valid(layer_start, layer_end)) {
         payload_set_err(err, errlen, "invalid session layer payload save");
         return 1;
     }
-    if (ds4_session_is_laguna(s)) {
+    if (lgn2_session_is_laguna(s)) {
         payload_set_err(err, errlen,
                         "Laguna layer snapshots are not supported");
         return 1;
@@ -7764,17 +7764,17 @@ int ds4_session_save_layer_payload(ds4_session *s, FILE *fp,
     return 1;
 }
 
-int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
+int lgn2_session_load_layer_payload(lgn2_session *s, FILE *fp,
                                    uint64_t payload_bytes,
                                    const int *tokens, uint32_t n_tokens,
                                    uint32_t layer_start, uint32_t layer_end,
                                    char *err, size_t errlen) {
     if (!s || !fp || !tokens ||
-        !ds4_layer_payload_range_valid(layer_start, layer_end)) {
+        !lgn2_layer_payload_range_valid(layer_start, layer_end)) {
         payload_set_err(err, errlen, "invalid session layer payload load");
         return 1;
     }
-    if (ds4_session_is_laguna(s)) {
+    if (lgn2_session_is_laguna(s)) {
         payload_set_err(err, errlen,
                         "Laguna layer restores are not supported");
         return 1;
@@ -7787,44 +7787,44 @@ int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
     return 1;
 }
 
-int ds4_engine_routed_quant_bits(ds4_engine *e) {
+int lgn2_engine_routed_quant_bits(lgn2_engine *e) {
     if (!e) return 0;
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        const ds4_tensor *gate = e->weights.layer[il].ffn_gate_exps;
+    for (uint32_t il = 0; il < LGN2_N_LAYER; il++) {
+        const lgn2_tensor *gate = e->weights.layer[il].ffn_gate_exps;
         if (!gate) continue;
-        return gate->type == DS4_TENSOR_Q4_K ? 4 : 2;
+        return gate->type == LGN2_TENSOR_Q4_K ? 4 : 2;
     }
     return 0;
 }
 
-bool ds4_engine_has_output_head(ds4_engine *e) {
+bool lgn2_engine_has_output_head(lgn2_engine *e) {
     return e && weights_have_output_head(&e->weights);
 }
 
-bool ds4_engine_has_dflash(ds4_engine *e) {
+bool lgn2_engine_has_dflash(lgn2_engine *e) {
     return e && e->dflash_ready;
 }
 
-int ds4_engine_dflash_draft_tokens(ds4_engine *e) {
-    return ds4_engine_has_dflash(e) ? e->dflash_draft_tokens : 0;
+int lgn2_engine_dflash_draft_tokens(lgn2_engine *e) {
+    return lgn2_engine_has_dflash(e) ? e->dflash_draft_tokens : 0;
 }
 
-const ds4_tokens *ds4_session_tokens(ds4_session *s) {
+const lgn2_tokens *lgn2_session_tokens(lgn2_session *s) {
     return s ? &s->checkpoint : NULL;
 }
 
 
-uint64_t ds4_session_payload_bytes(ds4_session *s) {
+uint64_t lgn2_session_payload_bytes(lgn2_session *s) {
     if (!s || !s->checkpoint_valid) return 0;
-    if (ds4_session_is_laguna(s)) {
-#ifdef DS4_NO_GPU
+    if (lgn2_session_is_laguna(s)) {
+#ifdef LGN2_NO_GPU
         return 0;
 #else
         if (!s->laguna_graph_ready) return 0;
         uint64_t bytes =
-            (uint64_t)DS4_SESSION_PAYLOAD_U32_FIELDS * sizeof(uint32_t);
+            (uint64_t)LGN2_SESSION_PAYLOAD_U32_FIELDS * sizeof(uint32_t);
         bytes += (uint64_t)s->checkpoint.len * sizeof(uint32_t);
-        bytes += (uint64_t)DS4_N_VOCAB * sizeof(float);
+        bytes += (uint64_t)LGN2_N_VOCAB * sizeof(float);
         const uint64_t kv_bytes = session_laguna_payload_live_tensor_bytes(
             &s->laguna_graph, (uint32_t)s->checkpoint.len);
         if (kv_bytes == 0 && s->checkpoint.len != 0) return 0;
@@ -7835,7 +7835,7 @@ uint64_t ds4_session_payload_bytes(ds4_session *s) {
     return 0;
 }
 
-int ds4_session_write_staged_payload(const ds4_session_payload_file *payload,
+int lgn2_session_write_staged_payload(const lgn2_session_payload_file *payload,
                                      FILE *fp, char *err, size_t errlen) {
     if (!payload || !payload->path || !fp) {
         payload_set_err(err, errlen, "invalid staged session payload");
@@ -7854,7 +7854,7 @@ int ds4_session_write_staged_payload(const ds4_session_payload_file *payload,
     return rc;
 }
 
-void ds4_session_payload_file_free(ds4_session_payload_file *payload) {
+void lgn2_session_payload_file_free(lgn2_session_payload_file *payload) {
     if (!payload) return;
     if (payload->path) {
         unlink(payload->path);
@@ -7863,7 +7863,7 @@ void ds4_session_payload_file_free(ds4_session_payload_file *payload) {
     memset(payload, 0, sizeof(*payload));
 }
 
-int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
+int lgn2_session_stage_payload(lgn2_session *s, lgn2_session_payload_file *out,
                               char *err, size_t errlen) {
     if (!out) {
         payload_set_err(err, errlen, "invalid session payload staging request");
@@ -7875,7 +7875,7 @@ int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
         return 1;
     }
 
-    char tmpl[] = "/tmp/ds4-session-payload.XXXXXX";
+    char tmpl[] = "/tmp/lgn2-session-payload.XXXXXX";
     int fd = mkstemp(tmpl);
     if (fd < 0) {
         payload_set_err(err, errlen, "failed to create staged session payload");
@@ -7891,7 +7891,7 @@ int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
         return 1;
     }
 
-    int rc = ds4_session_save_payload(s, fp, err, errlen);
+    int rc = lgn2_session_save_payload(s, fp, err, errlen);
     if (rc == 0 && fflush(fp) != 0) {
         payload_set_err(err, errlen, "failed to flush staged session payload");
         rc = 1;
@@ -7912,18 +7912,18 @@ int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
         unlink(tmpl);
         return 1;
     }
-    out->path = ds4_strdup(tmpl);
+    out->path = lgn2_strdup(tmpl);
     out->bytes = (uint64_t)pos;
     return 0;
 }
 
-int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen) {
+int lgn2_session_save_payload(lgn2_session *s, FILE *fp, char *err, size_t errlen) {
     if (!s || !fp || !s->checkpoint_valid) {
         payload_set_err(err, errlen, "session has no valid checkpoint to save");
         return 1;
     }
-    if (ds4_session_is_laguna(s)) {
-#ifdef DS4_NO_GPU
+    if (lgn2_session_is_laguna(s)) {
+#ifdef LGN2_NO_GPU
         payload_set_err(err, errlen, "graph backend support is not compiled in");
         return 1;
 #else
@@ -7931,33 +7931,33 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
             payload_set_err(err, errlen, "Laguna graph is not ready for snapshot");
             return 1;
         }
-        if (ds4_gpu_synchronize() == 0) {
+        if (lgn2_gpu_synchronize() == 0) {
             payload_set_err(err, errlen,
                             "failed to synchronize accelerator before Laguna snapshot");
             return 1;
         }
 
-        ds4_laguna_gpu_graph *g = &s->laguna_graph;
+        lgn2_laguna_gpu_graph *g = &s->laguna_graph;
         const uint32_t checkpoint_len = (uint32_t)s->checkpoint.len;
         /* Laguna payload fields identify its heterogeneous attention layout:
          * context, SWA window, full/SWA query heads, KV heads, token count,
          * layers, head width, rotary width, vocabulary, and KV element bytes. */
-        uint32_t header[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
-            DS4_SESSION_PAYLOAD_MAGIC,
-            DS4_SESSION_PAYLOAD_VERSION,
+        uint32_t header[LGN2_SESSION_PAYLOAD_U32_FIELDS] = {
+            LGN2_SESSION_PAYLOAD_MAGIC,
+            LGN2_SESSION_PAYLOAD_VERSION,
             (uint32_t)s->ctx_size,
-            DS4_N_SWA,
-            ds4_layer_head_count(0),
-            ds4_layer_head_count(1),
-            DS4_N_HEAD_KV,
+            LGN2_N_SWA,
+            lgn2_layer_head_count(0),
+            lgn2_layer_head_count(1),
+            LGN2_N_HEAD_KV,
             checkpoint_len,
-            DS4_N_LAYER,
-            DS4_N_HEAD_DIM,
-            DS4_N_ROT,
-            DS4_N_VOCAB,
+            LGN2_N_LAYER,
+            LGN2_N_HEAD_DIM,
+            LGN2_N_ROT,
+            LGN2_N_VOCAB,
             (uint32_t)sizeof(uint16_t),
         };
-        for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
+        for (uint32_t i = 0; i < LGN2_SESSION_PAYLOAD_U32_FIELDS; i++) {
             if (payload_write_u32(fp, header[i], err, errlen) != 0) return 1;
         }
         for (int i = 0; i < s->checkpoint.len; i++) {
@@ -7966,15 +7966,15 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
         }
         if (payload_write_bytes(fp,
                                 s->logits,
-                                (uint64_t)DS4_N_VOCAB * sizeof(float),
+                                (uint64_t)LGN2_N_VOCAB * sizeof(float),
                                 err,
                                 errlen) != 0) return 1;
 
         const uint64_t row_bytes =
-            (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
-        uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
+            (uint64_t)LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM * sizeof(uint16_t);
+        uint8_t *buf = xmalloc(LGN2_SESSION_IO_CHUNK);
         int rc = 0;
-        for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
+        for (uint32_t il = 0; rc == 0 && il < LGN2_N_LAYER; il++) {
             const uint32_t live =
                 session_laguna_layer_live_rows(g, il, checkpoint_len);
             const uint32_t logical_first = checkpoint_len - live;
@@ -7985,7 +7985,7 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
                                            live,
                                            row_bytes,
                                            buf,
-                                           DS4_SESSION_IO_CHUNK,
+                                           LGN2_SESSION_IO_CHUNK,
                                            err,
                                            errlen);
             if (rc == 0) {
@@ -7996,7 +7996,7 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
                                                live,
                                                row_bytes,
                                                buf,
-                                               DS4_SESSION_IO_CHUNK,
+                                               LGN2_SESSION_IO_CHUNK,
                                                err,
                                                errlen);
             }
@@ -8009,33 +8009,33 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
     return 1;
 }
 
-int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
+int lgn2_session_load_payload(lgn2_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen) {
     if (!s) {
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
     }
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
     /* Payload restore replaces the Laguna target timeline.  Invalidate the
      * independent DFlash support history before reading or validating any
      * payload bytes so every failed load attempt is safe too. */
-    if (ds4_session_is_laguna(s)) ds4_session_dflash_invalidate(s);
+    if (lgn2_session_is_laguna(s)) lgn2_session_dflash_invalidate(s);
 #endif
     if (!fp) {
         payload_set_err(err, errlen, "invalid session payload load");
         return 1;
     }
-    ds4_session_note_logits_dirty(s);
+    lgn2_session_note_logits_dirty(s);
     uint64_t remaining = payload_bytes;
-    uint32_t h[DS4_SESSION_PAYLOAD_U32_FIELDS];
-    for (uint32_t i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++) {
+    uint32_t h[LGN2_SESSION_PAYLOAD_U32_FIELDS];
+    for (uint32_t i = 0; i < LGN2_SESSION_PAYLOAD_U32_FIELDS; i++) {
         if (payload_read_u32(fp, &h[i], &remaining, err, errlen) != 0) return 1;
     }
-    if (h[0] != DS4_SESSION_PAYLOAD_MAGIC || h[1] != DS4_SESSION_PAYLOAD_VERSION) {
+    if (h[0] != LGN2_SESSION_PAYLOAD_MAGIC || h[1] != LGN2_SESSION_PAYLOAD_VERSION) {
         payload_set_err(err, errlen, "unsupported session payload version");
         return 1;
     }
-    if (ds4_session_is_laguna(s)) {
-#ifdef DS4_NO_GPU
+    if (lgn2_session_is_laguna(s)) {
+#ifdef LGN2_NO_GPU
         payload_set_err(err, errlen, "graph backend support is not compiled in");
         return 1;
 #else
@@ -8052,14 +8052,14 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
                             "Laguna KV checkpoint does not fit current context");
             return 1;
         }
-        if (h[3] != DS4_N_SWA ||
-            h[4] != ds4_layer_head_count(0) ||
-            h[5] != ds4_layer_head_count(1) ||
-            h[6] != DS4_N_HEAD_KV ||
-            h[8] != DS4_N_LAYER ||
-            h[9] != DS4_N_HEAD_DIM ||
-            h[10] != DS4_N_ROT ||
-            h[11] != DS4_N_VOCAB ||
+        if (h[3] != LGN2_N_SWA ||
+            h[4] != lgn2_layer_head_count(0) ||
+            h[5] != lgn2_layer_head_count(1) ||
+            h[6] != LGN2_N_HEAD_KV ||
+            h[8] != LGN2_N_LAYER ||
+            h[9] != LGN2_N_HEAD_DIM ||
+            h[10] != LGN2_N_ROT ||
+            h[11] != LGN2_N_VOCAB ||
             h[12] != sizeof(uint16_t)) {
             payload_set_err(err, errlen,
                             "KV checkpoint was written for a different Laguna layout");
@@ -8073,7 +8073,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
                 token_vec_free(&new_checkpoint);
                 return 1;
             }
-            if (tok >= DS4_N_VOCAB) {
+            if (tok >= LGN2_N_VOCAB) {
                 token_vec_free(&new_checkpoint);
                 payload_set_err(err, errlen,
                                 "Laguna KV checkpoint contains an invalid token");
@@ -8083,14 +8083,14 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         }
         if (payload_read_bytes(fp,
                                s->logits,
-                               (uint64_t)DS4_N_VOCAB * sizeof(float),
+                               (uint64_t)LGN2_N_VOCAB * sizeof(float),
                                &remaining,
                                err,
                                errlen) != 0) {
             token_vec_free(&new_checkpoint);
             return 1;
         }
-        if (ds4_gpu_synchronize() == 0) {
+        if (lgn2_gpu_synchronize() == 0) {
             token_vec_free(&new_checkpoint);
             payload_set_err(err, errlen,
                             "failed to synchronize accelerator before Laguna KV restore");
@@ -8098,12 +8098,12 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         }
 
         s->checkpoint_valid = false;
-        ds4_laguna_gpu_graph *g = &s->laguna_graph;
+        lgn2_laguna_gpu_graph *g = &s->laguna_graph;
         const uint64_t row_bytes =
-            (uint64_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
-        uint8_t *buf = xmalloc(DS4_SESSION_IO_CHUNK);
+            (uint64_t)LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM * sizeof(uint16_t);
+        uint8_t *buf = xmalloc(LGN2_SESSION_IO_CHUNK);
         int rc = 0;
-        for (uint32_t il = 0; rc == 0 && il < DS4_N_LAYER; il++) {
+        for (uint32_t il = 0; rc == 0 && il < LGN2_N_LAYER; il++) {
             const uint32_t live =
                 session_laguna_layer_live_rows(g, il, saved_tokens);
             const uint32_t logical_first = saved_tokens - live;
@@ -8114,7 +8114,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
                                           live,
                                           row_bytes,
                                           buf,
-                                          DS4_SESSION_IO_CHUNK,
+                                          LGN2_SESSION_IO_CHUNK,
                                           &remaining,
                                           err,
                                           errlen);
@@ -8126,7 +8126,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
                                               live,
                                               row_bytes,
                                               buf,
-                                              DS4_SESSION_IO_CHUNK,
+                                              LGN2_SESSION_IO_CHUNK,
                                               &remaining,
                                               err,
                                               errlen);
@@ -8143,7 +8143,7 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
                             "Laguna KV checkpoint has trailing payload bytes");
             return 1;
         }
-        if (ds4_gpu_synchronize() == 0) {
+        if (lgn2_gpu_synchronize() == 0) {
             token_vec_free(&new_checkpoint);
             payload_set_err(err, errlen,
                             "failed to synchronize accelerator after Laguna KV restore");
@@ -8160,12 +8160,12 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
     return 1;
 }
 
-int ds4_session_save_snapshot(ds4_session *s, ds4_session_snapshot *snap, char *err, size_t errlen) {
+int lgn2_session_save_snapshot(lgn2_session *s, lgn2_session_snapshot *snap, char *err, size_t errlen) {
     if (!s || !snap) {
         payload_set_err(err, errlen, "invalid session snapshot save");
         return 1;
     }
-    const uint64_t bytes = ds4_session_payload_bytes(s);
+    const uint64_t bytes = lgn2_session_payload_bytes(s);
     if (bytes == 0) {
         payload_set_err(err, errlen, "session has no valid checkpoint to snapshot");
         return 1;
@@ -8189,7 +8189,7 @@ int ds4_session_save_snapshot(ds4_session *s, ds4_session_snapshot *snap, char *
         payload_set_err(err, errlen, "failed to open memory stream for session snapshot");
         return 1;
     }
-    const int rc = ds4_session_save_payload(s, fp, err, errlen);
+    const int rc = lgn2_session_save_payload(s, fp, err, errlen);
     if (fclose(fp) != 0 && rc == 0) {
         payload_set_err(err, errlen, "failed to finalize memory session snapshot");
         return 1;
@@ -8199,12 +8199,12 @@ int ds4_session_save_snapshot(ds4_session *s, ds4_session_snapshot *snap, char *
     return 0;
 }
 
-int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, char *err, size_t errlen) {
+int lgn2_session_load_snapshot(lgn2_session *s, const lgn2_session_snapshot *snap, char *err, size_t errlen) {
     if (!s || !snap || !snap->ptr || snap->len == 0) {
         payload_set_err(err, errlen, "invalid session snapshot load");
         return 1;
     }
-    ds4_session_note_logits_dirty(s);
+    lgn2_session_note_logits_dirty(s);
     if (snap->len > (uint64_t)SIZE_MAX) {
         payload_set_err(err, errlen, "session snapshot is too large for this platform");
         return 1;
@@ -8215,7 +8215,7 @@ int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, 
         payload_set_err(err, errlen, "failed to open memory stream for session snapshot restore");
         return 1;
     }
-    const int rc = ds4_session_load_payload(s, fp, snap->len, err, errlen);
+    const int rc = lgn2_session_load_payload(s, fp, snap->len, err, errlen);
     if (fclose(fp) != 0 && rc == 0) {
         payload_set_err(err, errlen, "failed to close memory session snapshot");
         return 1;
@@ -8223,51 +8223,51 @@ int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, 
     return rc;
 }
 
-void ds4_session_snapshot_free(ds4_session_snapshot *snap) {
+void lgn2_session_snapshot_free(lgn2_session_snapshot *snap) {
     if (!snap) return;
     free(snap->ptr);
     memset(snap, 0, sizeof(*snap));
 }
 
-#ifdef DS4_TEST_HOOKS
-#ifndef DS4_NO_GPU
+#ifdef LGN2_TEST_HOOKS
+#ifndef LGN2_NO_GPU
 typedef struct {
-    ds4_shape saved_shape;
-} ds4_test_laguna_shape_scope;
+    lgn2_shape saved_shape;
+} lgn2_test_laguna_shape_scope;
 
-static void ds4_test_laguna_shape_scope_begin(
-        ds4_test_laguna_shape_scope *scope) {
+static void lgn2_test_laguna_shape_scope_begin(
+        lgn2_test_laguna_shape_scope *scope) {
     if (!scope) return;
-    scope->saved_shape = g_ds4_shape;
+    scope->saved_shape = g_lgn2_shape;
     /* The malformed payload is rejected before any layout fields are read;
      * the family gate is the minimum Laguna state needed by this seam. */
-    g_ds4_shape.family = DS4_MODEL_FAMILY_LAGUNA;
+    g_lgn2_shape.family = LGN2_MODEL_FAMILY_LAGUNA;
 }
 
-static void ds4_test_laguna_shape_scope_end(
-        const ds4_test_laguna_shape_scope *scope) {
+static void lgn2_test_laguna_shape_scope_end(
+        const lgn2_test_laguna_shape_scope *scope) {
     if (!scope) return;
-    g_ds4_shape = scope->saved_shape;
+    g_lgn2_shape = scope->saved_shape;
 }
 
 /* Exercise the payload-restore boundary without opening a model or allocating
  * the production Laguna/DFlash graphs.  A malformed payload is sufficient:
  * the loader must invalidate already-synced/deferred support state before it
  * can reject the header, and snapshot restore must reach that same loader. */
-bool ds4_test_dflash_payload_invalidation(void) {
-    ds4_test_laguna_shape_scope shape_scope;
-    ds4_test_laguna_shape_scope_begin(&shape_scope);
+bool lgn2_test_dflash_payload_invalidation(void) {
+    lgn2_test_laguna_shape_scope shape_scope;
+    lgn2_test_laguna_shape_scope_begin(&shape_scope);
 
-    ds4_engine engine;
+    lgn2_engine engine;
     memset(&engine, 0, sizeof(engine));
 
-    ds4_session session;
+    lgn2_session session;
     memset(&session, 0, sizeof(session));
     session.engine = &engine;
 
-    const uint32_t bad_payload[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
-        DS4_SESSION_PAYLOAD_MAGIC,
-        DS4_SESSION_PAYLOAD_VERSION + 1u,
+    const uint32_t bad_payload[LGN2_SESSION_PAYLOAD_U32_FIELDS] = {
+        LGN2_SESSION_PAYLOAD_MAGIC,
+        LGN2_SESSION_PAYLOAD_VERSION + 1u,
     };
     char err[128] = {0};
     FILE *payload_fp = NULL;
@@ -8282,7 +8282,7 @@ bool ds4_test_dflash_payload_invalidation(void) {
     session.dflash_defer_inject = true;
     payload_fp = fmemopen((void *)bad_payload, sizeof(bad_payload), "rb");
     if (!payload_fp) goto cleanup;
-    payload_rc = ds4_session_load_payload(
+    payload_rc = lgn2_session_load_payload(
         &session, payload_fp, sizeof(bad_payload), err, sizeof(err));
     payload_cleared =
         payload_rc != 0 &&
@@ -8297,13 +8297,13 @@ bool ds4_test_dflash_payload_invalidation(void) {
     session.dflash_deferred_rows = 2u;
     session.dflash_deferred_pos0 = 17u;
     session.dflash_defer_inject = true;
-    ds4_session_snapshot snap = {
+    lgn2_session_snapshot snap = {
         .ptr = (uint8_t *)(uintptr_t)bad_payload,
         .len = sizeof(bad_payload),
         .cap = sizeof(bad_payload),
     };
     memset(err, 0, sizeof(err));
-    snapshot_rc = ds4_session_load_snapshot(
+    snapshot_rc = lgn2_session_load_snapshot(
         &session, &snap, err, sizeof(err));
     snapshot_cleared =
         snapshot_rc != 0 &&
@@ -8314,19 +8314,19 @@ bool ds4_test_dflash_payload_invalidation(void) {
 
 cleanup:
     if (payload_fp) fclose(payload_fp);
-    ds4_test_laguna_shape_scope_end(&shape_scope);
+    lgn2_test_laguna_shape_scope_end(&shape_scope);
     return payload_cleared && snapshot_cleared;
 }
-#endif /* !DS4_NO_GPU */
-#endif /* DS4_TEST_HOOKS */
+#endif /* !LGN2_NO_GPU */
+#endif /* LGN2_TEST_HOOKS */
 
-void ds4_engine_dump_tokens(ds4_engine *e, const ds4_tokens *tokens) {
+void lgn2_engine_dump_tokens(lgn2_engine *e, const lgn2_tokens *tokens) {
     dump_tokens(&e->vocab, tokens);
 }
 
-int ds4_dump_text_tokenization(const char *model_path, const char *text, FILE *fp) {
-    ds4_model model;
-    ds4_vocab vocab;
+int lgn2_dump_text_tokenization(const char *model_path, const char *text, FILE *fp) {
+    lgn2_model model;
+    lgn2_vocab vocab;
     token_vec tokens = {0};
 
     if (!fp) fp = stdout;
@@ -8343,56 +8343,56 @@ int ds4_dump_text_tokenization(const char *model_path, const char *text, FILE *f
 }
 
 /* Laguna evaluation owns its KV timeline and logits buffer.  Its argmax entry
- * point must use ds4_session_eval(), never the unsupported generic evaluator
+ * point must use lgn2_session_eval(), never the unsupported generic evaluator
  * below. */
-static bool ds4_session_eval_argmax_uses_laguna_path(const ds4_session *s) {
-    return ds4_session_is_laguna(s);
+static bool lgn2_session_eval_argmax_uses_laguna_path(const lgn2_session *s) {
+    return lgn2_session_is_laguna(s);
 }
 
-#ifdef DS4_TEST_HOOKS
-typedef int (*ds4_test_argmax_eval_fn)(
-        ds4_session *s, int token, char *err, size_t errlen);
-static ds4_test_argmax_eval_fn g_ds4_test_argmax_eval_fn;
-static uint32_t g_ds4_test_argmax_laguna_eval_calls;
+#ifdef LGN2_TEST_HOOKS
+typedef int (*lgn2_test_argmax_eval_fn)(
+        lgn2_session *s, int token, char *err, size_t errlen);
+static lgn2_test_argmax_eval_fn g_lgn2_test_argmax_eval_fn;
+static uint32_t g_lgn2_test_argmax_laguna_eval_calls;
 #endif
 
 /* Keep the public argmax boundary intact while letting model-independent
  * tests substitute only the selected session evaluator.  The production path
- * remains a direct call to ds4_session_eval(). */
-static int ds4_session_eval_argmax_dispatch_eval(
-        ds4_session *s,
+ * remains a direct call to lgn2_session_eval(). */
+static int lgn2_session_eval_argmax_dispatch_eval(
+        lgn2_session *s,
         int           token,
         char         *err,
         size_t        errlen,
         bool          laguna_path) {
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
     if (laguna_path) {
-        g_ds4_test_argmax_laguna_eval_calls++;
-        if (g_ds4_test_argmax_eval_fn) {
-            return g_ds4_test_argmax_eval_fn(s, token, err, errlen);
+        g_lgn2_test_argmax_laguna_eval_calls++;
+        if (g_lgn2_test_argmax_eval_fn) {
+            return g_lgn2_test_argmax_eval_fn(s, token, err, errlen);
         }
     }
 #else
     (void)laguna_path;
 #endif
-    return ds4_session_eval(s, token, err, errlen);
+    return lgn2_session_eval(s, token, err, errlen);
 }
 
-int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
+int lgn2_session_eval_argmax(lgn2_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (!laguna_metal_swa_gqa9_preflight(
             s->engine, "session argmax", err, errlen)) return -1;
 #endif
-    ds4_session_note_logits_dirty(s);
-    const bool laguna_path = ds4_session_eval_argmax_uses_laguna_path(s);
+    lgn2_session_note_logits_dirty(s);
+    const bool laguna_path = lgn2_session_eval_argmax_uses_laguna_path(s);
     if (laguna_path) {
-        if (ds4_session_eval_argmax_dispatch_eval(
+        if (lgn2_session_eval_argmax_dispatch_eval(
                 s, token, err, errlen, laguna_path) != 0) return -1;
-        return ds4_session_argmax(s);
+        return lgn2_session_argmax(s);
     }
-#ifdef DS4_TEST_HOOKS
-    g_ds4_test_route_generic_eval_calls++;
+#ifdef LGN2_TEST_HOOKS
+    g_lgn2_test_route_generic_eval_calls++;
 #endif
     snprintf(err, errlen, "generic graph argmax is unsupported");
     return -1;
@@ -8407,29 +8407,29 @@ int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen)
  * 4. fall back to ordinary one-token decode if the fast verifier cannot prove
  *    the target stream. */
 
-int ds4_engine_generate_argmax(
-        ds4_engine        *e,
-        const ds4_tokens  *prompt,
+int lgn2_engine_generate_argmax(
+        lgn2_engine        *e,
+        const lgn2_tokens  *prompt,
         int                n_predict,
         int                ctx_size,
-        ds4_token_emit_fn  emit,
-        ds4_generation_done_fn done,
+        lgn2_token_emit_fn  emit,
+        lgn2_generation_done_fn done,
         void              *emit_ud,
-        ds4_session_progress_fn progress,
+        lgn2_session_progress_fn progress,
         void              *progress_ud) {
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (!laguna_metal_swa_gqa9_preflight(
             e, "generation", NULL, 0)) return 1;
     if (!laguna_metal_router_simd_topk_preflight(
             e, "generation", NULL, 0)) return 1;
 #endif
-#ifndef DS4_NO_GPU
-    const ds4_model *model = &e->model;
-    const ds4_vocab *vocab = &e->vocab;
-    const ds4_weights *weights = &e->weights;
+#ifndef LGN2_NO_GPU
+    const lgn2_model *model = &e->model;
+    const lgn2_vocab *vocab = &e->vocab;
+    const lgn2_weights *weights = &e->weights;
 
     if (!e->metal_ready) {
-        fprintf(stderr, "ds4: Metal generation requested but the runtime is unavailable\n");
+        fprintf(stderr, "lgn2: Metal generation requested but the runtime is unavailable\n");
         return 1;
     }
     return generate_laguna_metal_argmax(model, vocab, weights, prompt,
@@ -8446,44 +8446,44 @@ int ds4_engine_generate_argmax(
     (void)emit_ud;
     (void)progress;
     (void)progress_ud;
-    fprintf(stderr, "ds4: Metal generation is unavailable in this host-only build\n");
+    fprintf(stderr, "lgn2: Metal generation is unavailable in this host-only build\n");
     return 1;
 #endif
 }
 
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 
-int ds4_test_session_read_logits(ds4_session *s, float *out,
+int lgn2_test_session_read_logits(lgn2_session *s, float *out,
                                  uint64_t out_bytes) {
     if (!s || !out ||
-        out_bytes < (uint64_t)DS4_N_VOCAB * sizeof(float)) {
+        out_bytes < (uint64_t)LGN2_N_VOCAB * sizeof(float)) {
         return 1;
     }
-    return ds4_session_copy_logits(s, out, (int)DS4_N_VOCAB) ==
-                   (int)DS4_N_VOCAB ? 0 : 1;
+    return lgn2_session_copy_logits(s, out, (int)LGN2_N_VOCAB) ==
+                   (int)LGN2_N_VOCAB ? 0 : 1;
 }
 
-#endif /* DS4_TEST_HOOKS */
+#endif /* LGN2_TEST_HOOKS */
 
-static int ds4_engine_open_internal(ds4_engine **out,
-                                    const ds4_engine_options *opt);
+static int lgn2_engine_open_internal(lgn2_engine **out,
+                                    const lgn2_engine_options *opt);
 
-int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
-    return ds4_engine_open_internal(out, opt);
+int lgn2_engine_open(lgn2_engine **out, const lgn2_engine_options *opt) {
+    return lgn2_engine_open_internal(out, opt);
 }
 
-static int ds4_engine_open_internal(ds4_engine **out,
-                                     const ds4_engine_options *opt) {
-    ds4_engine *e = xcalloc(1, sizeof(*e));
+static int lgn2_engine_open_internal(lgn2_engine **out,
+                                     const lgn2_engine_options *opt) {
+    lgn2_engine *e = xcalloc(1, sizeof(*e));
     e->model.fd = -1;
     e->dflash_model.fd = -1;
     e->quality = opt->quality;
     if (opt->dflash_draft_tokens < 0 ||
-        opt->dflash_draft_tokens >= DS4_DFLASH_BLOCK_SIZE) {
+        opt->dflash_draft_tokens >= LGN2_DFLASH_BLOCK_SIZE) {
         fprintf(stderr,
-                "ds4: --dflash-draft must be between 1 and %u\n",
-                DS4_DFLASH_BLOCK_SIZE - 1u);
+                "lgn2: --dflash-draft must be between 1 and %u\n",
+                LGN2_DFLASH_BLOCK_SIZE - 1u);
         free(e);
         *out = NULL;
         return 1;
@@ -8496,7 +8496,7 @@ static int ds4_engine_open_internal(ds4_engine **out,
         (!isfinite(opt->dflash_p_min) ||
          opt->dflash_p_min < 0.0f || opt->dflash_p_min > 1.0f)) {
         fprintf(stderr,
-                "ds4: --dflash-p-min must be between 0 and 1\n");
+                "lgn2: --dflash-p-min must be between 0 and 1\n");
         free(e);
         *out = NULL;
         return 1;
@@ -8504,10 +8504,10 @@ static int ds4_engine_open_internal(ds4_engine **out,
     e->dflash_p_min =
         opt->dflash_p_min_set ? opt->dflash_p_min : 0.4f;
     if (opt->n_threads > 0) g_requested_threads = (uint32_t)opt->n_threads;
-    ds4_acquire_instance_lock();
+    lgn2_acquire_instance_lock();
 
-#ifdef DS4_TEST_HOOKS
-    g_ds4_test_engine_model_open_calls++;
+#ifdef LGN2_TEST_HOOKS
+    g_lgn2_test_engine_model_open_calls++;
 #endif
     model_open(&e->model, opt->model_path, true, false);
     /* Admit the model before weight warming or graph setup.
@@ -8517,19 +8517,19 @@ static int ds4_engine_open_internal(ds4_engine **out,
     if (opt->warm_weights) model_warm_weights(&e->model);
     weights_bind(&e->weights, &e->model);
 
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
+    if (LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA) {
         if (opt->inspect_only) {
             if (opt->dflash_path && opt->dflash_path[0]) {
                 model_open(&e->dflash_model, opt->dflash_path, false, false);
                 e->support_kind =
                     support_model_detect(&e->dflash_model,
                                          &e->support_stages);
-                if (e->support_kind != DS4_SUPPORT_DFLASH) {
+                if (e->support_kind != LGN2_SUPPORT_DFLASH) {
                     fprintf(stderr,
-                            "ds4: unsupported --dflash support model %s; "
+                            "lgn2: unsupported --dflash support model %s; "
                             "expected architecture=dflash\n",
                             opt->dflash_path);
-                    ds4_engine_close(e);
+                    lgn2_engine_close(e);
                     *out = NULL;
                     return 1;
                 }
@@ -8541,8 +8541,8 @@ static int ds4_engine_open_internal(ds4_engine **out,
     } else if (!opt->inspect_only) {
         if (opt->dflash_path && opt->dflash_path[0]) {
             fprintf(stderr,
-                    "ds4: --dflash is supported only with Laguna S 2.1\n");
-            ds4_engine_close(e);
+                    "lgn2: --dflash is supported only with Laguna S 2.1\n");
+            lgn2_engine_close(e);
             *out = NULL;
             return 1;
         }
@@ -8550,16 +8550,16 @@ static int ds4_engine_open_internal(ds4_engine **out,
     }
     const char *support_path = opt->dflash_path;
     if (support_path && support_path[0]) {
-        ds4_model *support_model = &e->dflash_model;
+        lgn2_model *support_model = &e->dflash_model;
         model_open(support_model, support_path, true, false);
         e->support_kind =
             support_model_detect(support_model, &e->support_stages);
-        if (e->support_kind != DS4_SUPPORT_DFLASH) {
+        if (e->support_kind != LGN2_SUPPORT_DFLASH) {
             fprintf(stderr,
-                    "ds4: unsupported --dflash support model %s; "
+                    "lgn2: unsupported --dflash support model %s; "
                     "expected architecture=dflash\n",
                     support_path);
-            ds4_engine_close(e);
+            lgn2_engine_close(e);
             *out = NULL;
             return 1;
         }
@@ -8567,10 +8567,10 @@ static int ds4_engine_open_internal(ds4_engine **out,
         if (e->dflash_weights.fc->type == LGN_TENSOR_BF16) {
             e->dflash_f16_map = lgn_dflash_prepare_f16_map(
                 &e->dflash_model,
-                ds4_lgn_dflash_parallel_for,
+                lgn2_lgn_dflash_parallel_for,
                 NULL);
             if (!e->dflash_f16_map) {
-                ds4_engine_close(e);
+                lgn2_engine_close(e);
                 *out = NULL;
                 return 1;
             }
@@ -8578,7 +8578,7 @@ static int ds4_engine_open_internal(ds4_engine **out,
         }
         e->dflash_ready = true;
         fprintf(stderr,
-                "ds4: Laguna DFlash support loaded: %s "
+                "lgn2: Laguna DFlash support loaded: %s "
                 "(weights=%s, draft=%d, p-min=%.2f, block=%u, "
                 "cache=%u)\n",
                 support_path,
@@ -8586,24 +8586,24 @@ static int ds4_engine_open_internal(ds4_engine **out,
                 e->dflash_draft_tokens,
                 e->dflash_p_min,
                 e->dflash_weights.block_size,
-                DS4_DFLASH_CACHE_CAP);
+                LGN2_DFLASH_CACHE_CAP);
     }
 
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
     /* The supported runtime is always the whole-model Laguna Metal graph. */
-    e->metal_ready = ds4_gpu_init() != 0;
+    e->metal_ready = lgn2_gpu_init() != 0;
     if (!e->metal_ready) {
-        fprintf(stderr, "ds4: Metal runtime unavailable; aborting startup\n");
-        ds4_engine_close(e);
+        fprintf(stderr, "lgn2: Metal runtime unavailable; aborting startup\n");
+        lgn2_engine_close(e);
         *out = NULL;
         return 1;
     }
-    ds4_gpu_set_quality(e->quality);
+    lgn2_gpu_set_quality(e->quality);
     const uint64_t model_tensor_bytes =
         e->model.size > e->model.tensor_data_pos ?
             e->model.size - e->model.tensor_data_pos : 0;
     e->startup_model_span_bytes = model_tensor_bytes;
-    const int model_map_ok = ds4_gpu_set_model_map_range(
+    const int model_map_ok = lgn2_gpu_set_model_map_range(
         e->model.map,
         e->model.size,
         e->model.tensor_data_pos,
@@ -8611,20 +8611,20 @@ static int ds4_engine_open_internal(ds4_engine **out,
         e->model.max_tensor_bytes);
     if (!model_map_ok) {
         fprintf(stderr,
-                "ds4: Metal failed to map model views; aborting startup. "
+                "lgn2: Metal failed to map model views; aborting startup. "
                 "This is commonly caused by insufficient memory or accelerator VM budget.\n");
-        ds4_engine_close(e);
+        lgn2_engine_close(e);
         *out = NULL;
         return 1;
     }
     const bool support_model_runtime_ready = e->dflash_ready;
-    const ds4_model *support_model = &e->dflash_model;
+    const lgn2_model *support_model = &e->dflash_model;
     const void *support_model_map = lgn_dflash_weight_map(
         support_model, e->dflash_f16_map);
     const uint64_t support_model_map_size = lgn_dflash_weight_map_size(
         support_model, e->dflash_f16_map, e->dflash_f16_map_size);
     if (support_model_runtime_ready &&
-        !ds4_gpu_set_model_map_range(support_model_map,
+        !lgn2_gpu_set_model_map_range(support_model_map,
                                       support_model_map_size,
                                       support_model->tensor_data_pos,
                                       support_model_map_size >
@@ -8633,42 +8633,42 @@ static int ds4_engine_open_internal(ds4_engine **out,
                                               support_model->tensor_data_pos : 0,
                                       support_model->max_tensor_bytes)) {
         fprintf(stderr,
-                "ds4: Metal failed to map support model views; aborting startup. "
+                "lgn2: Metal failed to map support model views; aborting startup. "
                 "This is commonly caused by insufficient memory or accelerator VM budget.\n");
-        ds4_engine_close(e);
+        lgn2_engine_close(e);
         *out = NULL;
         return 1;
     }
-    (void)ds4_gpu_set_model_fd_for_map(e->model.fd, e->model.map);
+    (void)lgn2_gpu_set_model_fd_for_map(e->model.fd, e->model.map);
     if (support_model_runtime_ready) {
         /* A BF16 DFlash support map is an anonymous F16 shadow, so it has no
          * backing descriptor; quantized support weights remain file-backed. */
         const int support_model_fd = lgn_dflash_weight_map_fd(
             support_model, e->dflash_f16_map);
-        (void)ds4_gpu_set_model_fd_for_map(support_model_fd,
+        (void)lgn2_gpu_set_model_fd_for_map(support_model_fd,
                                            support_model_map);
-        (void)ds4_gpu_set_model_fd_for_map(e->model.fd, e->model.map);
+        (void)lgn2_gpu_set_model_fd_for_map(e->model.fd, e->model.map);
     }
-    fprintf(stderr, "ds4: Metal runtime initialized for Laguna graph\n");
+    fprintf(stderr, "lgn2: Metal runtime initialized for Laguna graph\n");
 #else
-    fprintf(stderr, "ds4: Metal runtime is unavailable in this host-only build\n");
-    ds4_engine_close(e);
+    fprintf(stderr, "lgn2: Metal runtime is unavailable in this host-only build\n");
+    lgn2_engine_close(e);
     *out = NULL;
     return 1;
 #endif
 
     if (!opt->inspect_only) {
-        ds4_engine_print_startup_memory(e, opt->context_size);
+        lgn2_engine_print_startup_memory(e, opt->context_size);
     }
     *out = e;
     return 0;
 }
 
-void ds4_engine_summary(ds4_engine *e) {
+void lgn2_engine_summary(lgn2_engine *e) {
     model_summary(&e->model);
     if (e->dflash_model.map) {
         printf("\nsupport model");
-        if (e->support_kind != DS4_SUPPORT_NONE) {
+        if (e->support_kind != LGN2_SUPPORT_NONE) {
             printf(" (%s", support_kind_name(e->support_kind));
             if (e->support_stages) printf(", stages=%u", e->support_stages);
             printf(")");
@@ -8678,49 +8678,49 @@ void ds4_engine_summary(ds4_engine *e) {
     }
 }
 
-int ds4_engine_vocab_size(ds4_engine *e) {
+int lgn2_engine_vocab_size(lgn2_engine *e) {
     return e ? e->vocab.n_vocab : 0;
 }
 
-const char *ds4_engine_model_name(ds4_engine *e) {
+const char *lgn2_engine_model_name(lgn2_engine *e) {
     (void)e;
-    return DS4_MODEL_SHAPE_NAME;
+    return LGN2_MODEL_SHAPE_NAME;
 }
 
-int ds4_engine_layer_count(ds4_engine *e) {
+int lgn2_engine_layer_count(lgn2_engine *e) {
     (void)e;
-    return (int)DS4_N_LAYER;
+    return (int)LGN2_N_LAYER;
 }
 
-int ds4_engine_model_id(ds4_engine *e) {
+int lgn2_engine_model_id(lgn2_engine *e) {
     (void)e;
-    return (int)DS4_MODEL_VARIANT;
+    return (int)LGN2_MODEL_VARIANT;
 }
 
-bool ds4_engine_is_laguna(ds4_engine *e) {
+bool lgn2_engine_is_laguna(lgn2_engine *e) {
     (void)e;
-    return DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA;
+    return LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA;
 }
 
-const char *ds4_engine_default_system_prompt(ds4_engine *e) {
+const char *lgn2_engine_default_system_prompt(lgn2_engine *e) {
     (void)e;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
+    if (LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA) {
         return "You are a helpful, conversationally-fluent assistant made by Poolside. "
                "You are here to be helpful to users through natural language conversations.";
     }
     return "You are a helpful assistant";
 }
 
-void ds4_engine_sampling_defaults(ds4_engine *e, float *temperature,
+void lgn2_engine_sampling_defaults(lgn2_engine *e, float *temperature,
                                   int *top_k, float *top_p, float *min_p) {
     (void)e;
     if (!temperature || !top_k || !top_p || !min_p) return;
-    *temperature = DS4_DEFAULT_TEMPERATURE;
+    *temperature = LGN2_DEFAULT_TEMPERATURE;
     *top_k = 0;
-    *top_p = DS4_DEFAULT_TOP_P;
-    *min_p = DS4_DEFAULT_MIN_P;
+    *top_p = LGN2_DEFAULT_TOP_P;
+    *min_p = LGN2_DEFAULT_MIN_P;
 
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
+    if (LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA) {
         *temperature = 0.7f;
         *top_k = 20;
         *top_p = 0.95f;
@@ -8728,16 +8728,16 @@ void ds4_engine_sampling_defaults(ds4_engine *e, float *temperature,
     }
 }
 
-static bool ds4_session_register_with_engine(ds4_session *s) {
-    ds4_engine *e = s ? s->engine : NULL;
+static bool lgn2_session_register_with_engine(lgn2_session *s) {
+    lgn2_engine *e = s ? s->engine : NULL;
     if (!e || s->registered_with_engine) return false;
     if (e->closing) {
         fprintf(stderr,
-                "ds4: cannot register a session while the engine is closing\n");
+                "lgn2: cannot register a session while the engine is closing\n");
         return false;
     }
     if (e->live_sessions == SIZE_MAX) {
-        fprintf(stderr, "ds4: engine live-session count overflow\n");
+        fprintf(stderr, "lgn2: engine live-session count overflow\n");
         return false;
     }
     e->live_sessions++;
@@ -8745,116 +8745,116 @@ static bool ds4_session_register_with_engine(ds4_session *s) {
     return true;
 }
 
-static void ds4_session_unregister_from_engine(ds4_session *s) {
+static void lgn2_session_unregister_from_engine(lgn2_session *s) {
     if (!s || !s->registered_with_engine) return;
-    ds4_engine *e = s->engine;
+    lgn2_engine *e = s->engine;
     s->registered_with_engine = false;
     if (!e) {
         fprintf(stderr,
-                "ds4: registered session lost its engine during teardown\n");
+                "lgn2: registered session lost its engine during teardown\n");
         return;
     }
     if (e->live_sessions == 0) {
         fprintf(stderr,
-                "ds4: engine live-session count was already zero during session teardown\n");
+                "lgn2: engine live-session count was already zero during session teardown\n");
         return;
     }
     e->live_sessions--;
 }
 
-static int ds4_session_publish(ds4_session **out, ds4_session *s) {
-    if (!out || !s || !ds4_session_register_with_engine(s)) {
-        ds4_session_free(s);
+static int lgn2_session_publish(lgn2_session **out, lgn2_session *s) {
+    if (!out || !s || !lgn2_session_register_with_engine(s)) {
+        lgn2_session_free(s);
         return 1;
     }
     *out = s;
     return 0;
 }
 
-void ds4_engine_close(ds4_engine *e) {
+void lgn2_engine_close(lgn2_engine *e) {
     if (!e) return;
     if (e->closing) {
-        fprintf(stderr, "ds4: engine close is already in progress\n");
+        fprintf(stderr, "lgn2: engine close is already in progress\n");
         return;
     }
     if (e->live_sessions != 0) {
         fprintf(stderr,
-                "ds4: refusing to close engine with %zu live session%s\n",
+                "lgn2: refusing to close engine with %zu live session%s\n",
                 e->live_sessions,
                 e->live_sessions == 1 ? "" : "s");
         return;
     }
     e->closing = true;
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_BEGIN);
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_BEGIN);
 
     /* Model tensors are exposed to graph backends as no-copy views.  Drain
      * submitted work and destroy every backend cache while the main, support,
      * and optional shadow mappings are all still valid. */
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN);
-#ifndef DS4_NO_GPU
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_GPU_DRAIN_BEGIN);
+#ifndef LGN2_NO_GPU
     bool gpu_drained = false;
     if (e->metal_ready) {
         /* metal_ready proves initialization, so this guard prevents the
          * synchronize API from initializing a backend during teardown. */
-        gpu_drained = ds4_gpu_synchronize() != 0;
-        ds4_engine_close_note_drain_result(e, gpu_drained);
+        gpu_drained = lgn2_gpu_synchronize() != 0;
+        lgn2_engine_close_note_drain_result(e, gpu_drained);
         if (!gpu_drained) {
             fprintf(stderr,
-                    "ds4: warning: GPU drain failed during engine close; "
+                    "lgn2: warning: GPU drain failed during engine close; "
                     "the terminal wait completed and backend cleanup "
                     "will continue\n");
         }
     } else {
-        ds4_engine_close_note_drain_result(e, true);
+        lgn2_engine_close_note_drain_result(e, true);
     }
 #endif
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_DRAINED);
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_CLEANUP_BEGIN);
-#ifndef DS4_NO_GPU
-    ds4_gpu_cleanup();
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_GPU_DRAINED);
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_GPU_CLEANUP_BEGIN);
+#ifndef LGN2_NO_GPU
+    lgn2_gpu_cleanup();
     e->metal_ready = false;
 #endif
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_GPU_CLEANED);
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_GPU_CLEANED);
 
     /* No worker or host-side tensor alias may survive into model unmapping. */
-    ds4_threads_shutdown();
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_CPU_WORKERS_STOPPED);
+    lgn2_threads_shutdown();
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_CPU_WORKERS_STOPPED);
     weights_free(&e->weights);
     memset(&e->dflash_weights, 0, sizeof(e->dflash_weights));
     vocab_free(&e->vocab);
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED);
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_HOST_ALIASES_CLEARED);
 
     lgn_dflash_release_f16_map(e->dflash_f16_map,
                                e->dflash_f16_map_size);
     e->dflash_f16_map = NULL;
     e->dflash_f16_map_size = 0;
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED);
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED);
     model_close(&e->dflash_model);
     model_close(&e->model);
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED);
-    ds4_release_instance_lock();
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_LOCK_RELEASED);
-    ds4_engine_close_note(e, DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING);
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_MODEL_MAPS_CLOSED);
+    lgn2_release_instance_lock();
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_LOCK_RELEASED);
+    lgn2_engine_close_note(e, LGN2_ENGINE_CLOSE_ALLOCATIONS_RELEASING);
     free(e);
 }
 
 
-int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
+int lgn2_session_create(lgn2_session **out, lgn2_engine *e, int ctx_size) {
     if (!out || !e || ctx_size <= 0) return 1;
     if (e->closing) {
-        fprintf(stderr, "ds4: cannot create a session while the engine is closing\n");
+        fprintf(stderr, "lgn2: cannot create a session while the engine is closing\n");
         return 1;
     }
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (!laguna_metal_swa_gqa9_preflight(
             e, "session create", NULL, 0)) return 1;
     if (!laguna_metal_router_simd_topk_preflight(
             e, "session create", NULL, 0)) return 1;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA &&
+    if (LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA &&
         !laguna_metal_router_decode_fused_preflight(
             &e->model, &e->weights)) return 1;
 #endif
-#ifdef DS4_NO_GPU
+#ifdef LGN2_NO_GPU
     (void)ctx_size;
     return 1;
 #else
@@ -8864,16 +8864,16 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
      * or any KV/scratch state.  Later entrypoints repeat this cheap preflight
      * so an environment change after session creation cannot silently switch
      * to stock fallback. */
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA &&
+    if (LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA &&
         !laguna_dense_q8_gate_up_swiglu_preflight(
             &e->model, &e->weights, NULL)) {
         return 1;
     }
 
-    ds4_session *s = xcalloc(1, sizeof(*s));
+    lgn2_session *s = xcalloc(1, sizeof(*s));
     s->engine = e;
     s->ctx_size = ctx_size;
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_LAGUNA) {
+    if (LGN2_MODEL_FAMILY == LGN2_MODEL_FAMILY_LAGUNA) {
 #ifdef __APPLE__
         if (!laguna_metal_decode_residual_norm_preflight()) {
             free(s);
@@ -8901,10 +8901,10 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
             s->dflash_graph_ready = true;
         }
         s->prefill_cap = (uint32_t)ctx_size;
-        s->logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
+        s->logits = xmalloc((size_t)LGN2_N_VOCAB * sizeof(s->logits[0]));
         s->sample_probs =
-            xmalloc((size_t)DS4_N_VOCAB * sizeof(s->sample_probs[0]));
-        return ds4_session_publish(out, s);
+            xmalloc((size_t)LGN2_N_VOCAB * sizeof(s->sample_probs[0]));
+        return lgn2_session_publish(out, s);
     }
     /* Generic graph sessions are unreachable for the supported Laguna
      * model contract. */
@@ -8913,12 +8913,12 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
 #endif
 }
 
-void ds4_session_free(ds4_session *s) {
+void lgn2_session_free(lgn2_session *s) {
     if (!s) return;
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
     if (s->dflash_cycles != 0u) {
         fprintf(stderr,
-                "ds4: DFlash: %" PRIu64 " cycles, %" PRIu64
+                "lgn2: DFlash: %" PRIu64 " cycles, %" PRIu64
                 "/%" PRIu64 " draft tokens accepted (%.1f%%), "
                 "%" PRIu64 " low-confidence skipped, "
                 "pipeline %.2f ms/cycle\n",
@@ -8939,89 +8939,89 @@ void ds4_session_free(ds4_session *s) {
     free(s->logits);
     free(s->sample_probs);
     free(s->sample_cands.v);
-    ds4_session_unregister_from_engine(s);
+    lgn2_session_unregister_from_engine(s);
     s->engine = NULL;
     free(s);
 }
 
-#ifdef DS4_TEST_HOOKS
-bool ds4_test_engine_session_lifecycle(void) {
+#ifdef LGN2_TEST_HOOKS
+bool lgn2_test_engine_session_lifecycle(void) {
     bool ok = true;
-    ds4_engine *e = xcalloc(1, sizeof(*e));
+    lgn2_engine *e = xcalloc(1, sizeof(*e));
     e->model.fd = -1;
     e->dflash_model.fd = -1;
 
-    ds4_session *registered = xcalloc(1, sizeof(*registered));
+    lgn2_session *registered = xcalloc(1, sizeof(*registered));
     registered->engine = e;
-    ok = ok && ds4_session_register_with_engine(registered);
+    ok = ok && lgn2_session_register_with_engine(registered);
     ok = ok && registered->registered_with_engine && e->live_sessions == 1;
 
     /* A partially-built/failed session must not consume another session's
      * registration or underflow the engine count when its cleanup runs. */
-    ds4_session *unregistered = xcalloc(1, sizeof(*unregistered));
+    lgn2_session *unregistered = xcalloc(1, sizeof(*unregistered));
     unregistered->engine = e;
-    ds4_session_free(unregistered);
+    lgn2_session_free(unregistered);
     ok = ok && e->live_sessions == 1;
 
     /* Supported lifetime calls are serialized: close must refuse while the
      * registered session exists, then remain retryable after that session is
      * freed.  No raw engine pointer is concurrently dereferenced here. */
-    ds4_engine_close(e);
+    lgn2_engine_close(e);
     ok = ok && !e->closing && e->live_sessions == 1;
 
-    ds4_session_free(registered);
+    lgn2_session_free(registered);
     ok = ok && e->live_sessions == 0;
 
-    ds4_session *out = (ds4_session *)(uintptr_t)0x1;
-    ok = ok && ds4_session_create(&out, e, 0) != 0 &&
-         out == (ds4_session *)(uintptr_t)0x1 && e->live_sessions == 0;
+    lgn2_session *out = (lgn2_session *)(uintptr_t)0x1;
+    ok = ok && lgn2_session_create(&out, e, 0) != 0 &&
+         out == (lgn2_session *)(uintptr_t)0x1 && e->live_sessions == 0;
 
     e->closing = true;
-    ok = ok && ds4_session_create(&out, e, 1) != 0 &&
-         out == (ds4_session *)(uintptr_t)0x1 && e->live_sessions == 0;
-    ds4_session *late = xcalloc(1, sizeof(*late));
+    ok = ok && lgn2_session_create(&out, e, 1) != 0 &&
+         out == (lgn2_session *)(uintptr_t)0x1 && e->live_sessions == 0;
+    lgn2_session *late = xcalloc(1, sizeof(*late));
     late->engine = e;
-    ok = ok && ds4_session_publish(&out, late) != 0 &&
-         out == (ds4_session *)(uintptr_t)0x1 && e->live_sessions == 0;
+    ok = ok && lgn2_session_publish(&out, late) != 0 &&
+         out == (lgn2_session *)(uintptr_t)0x1 && e->live_sessions == 0;
     e->closing = false;
 
     e->live_sessions = SIZE_MAX;
-    ds4_session *overflow = xcalloc(1, sizeof(*overflow));
+    lgn2_session *overflow = xcalloc(1, sizeof(*overflow));
     overflow->engine = e;
-    ok = ok && !ds4_session_register_with_engine(overflow) &&
+    ok = ok && !lgn2_session_register_with_engine(overflow) &&
          !overflow->registered_with_engine && e->live_sessions == SIZE_MAX;
-    ds4_session_free(overflow);
+    lgn2_session_free(overflow);
     ok = ok && e->live_sessions == SIZE_MAX;
     e->live_sessions = 0;
 
-    ds4_test_engine_close_trace retry_trace = {
+    lgn2_test_engine_close_trace retry_trace = {
         .engine = e,
         .maps_live_through_gpu = true,
     };
-    ds4_test_engine_close_trace *previous = g_ds4_test_engine_close_trace;
-    g_ds4_test_engine_close_trace = &retry_trace;
-    ds4_engine_close(e);
-    g_ds4_test_engine_close_trace = previous;
+    lgn2_test_engine_close_trace *previous = g_lgn2_test_engine_close_trace;
+    g_lgn2_test_engine_close_trace = &retry_trace;
+    lgn2_engine_close(e);
+    g_lgn2_test_engine_close_trace = previous;
     ok = ok && retry_trace.phase_count != 0 &&
-         retry_trace.phases[0] == DS4_ENGINE_CLOSE_BEGIN &&
+         retry_trace.phases[0] == LGN2_ENGINE_CLOSE_BEGIN &&
          retry_trace.phases[retry_trace.phase_count - 1] ==
-             DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING;
+             LGN2_ENGINE_CLOSE_ALLOCATIONS_RELEASING;
     return ok;
 }
 
-bool ds4_test_engine_close_order(void) {
-    static const ds4_engine_close_phase expected[] = {
-        DS4_ENGINE_CLOSE_BEGIN,
-        DS4_ENGINE_CLOSE_GPU_DRAIN_BEGIN,
-        DS4_ENGINE_CLOSE_GPU_DRAINED,
-        DS4_ENGINE_CLOSE_GPU_CLEANUP_BEGIN,
-        DS4_ENGINE_CLOSE_GPU_CLEANED,
-        DS4_ENGINE_CLOSE_CPU_WORKERS_STOPPED,
-        DS4_ENGINE_CLOSE_HOST_ALIASES_CLEARED,
-        DS4_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED,
-        DS4_ENGINE_CLOSE_MODEL_MAPS_CLOSED,
-        DS4_ENGINE_CLOSE_LOCK_RELEASED,
-        DS4_ENGINE_CLOSE_ALLOCATIONS_RELEASING,
+bool lgn2_test_engine_close_order(void) {
+    static const lgn2_engine_close_phase expected[] = {
+        LGN2_ENGINE_CLOSE_BEGIN,
+        LGN2_ENGINE_CLOSE_GPU_DRAIN_BEGIN,
+        LGN2_ENGINE_CLOSE_GPU_DRAINED,
+        LGN2_ENGINE_CLOSE_GPU_CLEANUP_BEGIN,
+        LGN2_ENGINE_CLOSE_GPU_CLEANED,
+        LGN2_ENGINE_CLOSE_CPU_WORKERS_STOPPED,
+        LGN2_ENGINE_CLOSE_HOST_ALIASES_CLEARED,
+        LGN2_ENGINE_CLOSE_DFLASH_SHADOW_UNMAPPED,
+        LGN2_ENGINE_CLOSE_MODEL_MAPS_CLOSED,
+        LGN2_ENGINE_CLOSE_LOCK_RELEASED,
+        LGN2_ENGINE_CLOSE_ALLOCATIONS_RELEASING,
     };
 
     const long page_long = sysconf(_SC_PAGESIZE);
@@ -9043,7 +9043,7 @@ bool ds4_test_engine_close_order(void) {
         }
     }
 
-    ds4_engine *e = xcalloc(1, sizeof(*e));
+    lgn2_engine *e = xcalloc(1, sizeof(*e));
     e->model.fd = -1;
     e->dflash_model.fd = -1;
     e->model.map = maps[0];
@@ -9055,14 +9055,14 @@ bool ds4_test_engine_close_order(void) {
     memset(&e->weights, 0xa5, sizeof(e->weights));
     memset(&e->dflash_weights, 0xa5, sizeof(e->dflash_weights));
 
-    ds4_test_engine_close_trace trace = {
+    lgn2_test_engine_close_trace trace = {
         .engine = e,
         .maps_live_through_gpu = true,
     };
-    ds4_test_engine_close_trace *previous = g_ds4_test_engine_close_trace;
-    g_ds4_test_engine_close_trace = &trace;
-    ds4_engine_close(e);
-    g_ds4_test_engine_close_trace = previous;
+    lgn2_test_engine_close_trace *previous = g_lgn2_test_engine_close_trace;
+    g_lgn2_test_engine_close_trace = &trace;
+    lgn2_engine_close(e);
+    g_lgn2_test_engine_close_trace = previous;
 
     const bool phase_count_ok =
         trace.phase_count == sizeof(expected) / sizeof(expected[0]);
@@ -9074,7 +9074,7 @@ bool ds4_test_engine_close_order(void) {
                     trace.model_maps_unmapped;
     if (!ok) {
         fprintf(stderr,
-                "ds4: engine close-order test failed: phases=%zu/%zu order=%d "
+                "lgn2: engine close-order test failed: phases=%zu/%zu order=%d "
                 "gpu_maps=%d aliases=%d shadow=%d models=%d\n",
                 trace.phase_count,
                 sizeof(expected) / sizeof(expected[0]),
@@ -9087,12 +9087,12 @@ bool ds4_test_engine_close_order(void) {
     return ok;
 }
 
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
 /* Preserve terminal GPU-drain failure coverage without resurrecting the
  * removed shared-prefill workspace owner.  This queues real Metal work,
  * injects the one-shot synchronize report after that work is drained, and
  * proves engine close still cleans tensors and mappings in ownership order. */
-bool ds4_test_engine_close_drain_failure(void) {
+bool lgn2_test_engine_close_drain_failure(void) {
     const long page_long = sysconf(_SC_PAGESIZE);
     if (page_long <= 0) return false;
     const size_t page = (size_t)page_long;
@@ -9102,9 +9102,9 @@ bool ds4_test_engine_close_drain_failure(void) {
     const int anonymous = MAP_ANON;
 #endif
 
-    ds4_gpu_cleanup();
-    if (!ds4_gpu_test_cleanup_state_is_clean() || !ds4_gpu_init()) {
-        ds4_gpu_cleanup();
+    lgn2_gpu_cleanup();
+    if (!lgn2_gpu_test_cleanup_state_is_clean() || !lgn2_gpu_init()) {
+        lgn2_gpu_cleanup();
         return false;
     }
 
@@ -9121,28 +9121,28 @@ bool ds4_test_engine_close_drain_failure(void) {
         memset(maps[i], 0x5a, page);
     }
 
-    ds4_gpu_tensor *src = NULL;
-    ds4_gpu_tensor *dst = NULL;
+    lgn2_gpu_tensor *src = NULL;
+    lgn2_gpu_tensor *dst = NULL;
     bool model_map_registered = false;
     uint64_t live_handles_before_close = 0;
     uint64_t live_bytes_before_close = 0;
     if (setup_ok) {
         model_map_registered =
-            ds4_gpu_set_model_map_range(maps[0], page, 0, page, page) != 0;
-        src = ds4_gpu_tensor_alloc(64);
-        dst = ds4_gpu_tensor_alloc(64);
+            lgn2_gpu_set_model_map_range(maps[0], page, 0, page, page) != 0;
+        src = lgn2_gpu_tensor_alloc(64);
+        dst = lgn2_gpu_tensor_alloc(64);
         setup_ok = model_map_registered && src != NULL && dst != NULL &&
-                   ds4_gpu_begin_commands() != 0 &&
-                   ds4_gpu_tensor_copy(dst, 0, src, 0, 64) != 0 &&
-                   ds4_gpu_commands_active() != 0 &&
-                   ds4_gpu_test_tensor_tracking_state(
+                   lgn2_gpu_begin_commands() != 0 &&
+                   lgn2_gpu_tensor_copy(dst, 0, src, 0, 64) != 0 &&
+                   lgn2_gpu_commands_active() != 0 &&
+                   lgn2_gpu_test_tensor_tracking_state(
                        &live_handles_before_close, &live_bytes_before_close) != 0 &&
                    live_handles_before_close >= 2u &&
                    live_bytes_before_close != 0;
     }
 
-    ds4_engine *e = NULL;
-    ds4_test_engine_close_trace trace = {0};
+    lgn2_engine *e = NULL;
+    lgn2_test_engine_close_trace trace = {0};
     if (setup_ok) {
         e = xcalloc(1, sizeof(*e));
         e->model.fd = -1;
@@ -9156,61 +9156,61 @@ bool ds4_test_engine_close_drain_failure(void) {
         e->dflash_f16_map_size = page;
         trace.engine = e;
         trace.maps_live_through_gpu = true;
-        ds4_test_engine_close_trace *previous = g_ds4_test_engine_close_trace;
-        g_ds4_test_engine_close_trace = &trace;
-        ds4_gpu_test_inject_synchronize_failure();
-        ds4_engine_close(e);
-        g_ds4_test_engine_close_trace = previous;
+        lgn2_test_engine_close_trace *previous = g_lgn2_test_engine_close_trace;
+        g_lgn2_test_engine_close_trace = &trace;
+        lgn2_gpu_test_inject_synchronize_failure();
+        lgn2_engine_close(e);
+        g_lgn2_test_engine_close_trace = previous;
         e = NULL;
     }
 
     if (e) {
-        if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
-        ds4_engine_close(e);
+        if (lgn2_gpu_commands_active()) (void)lgn2_gpu_discard_commands();
+        lgn2_engine_close(e);
     } else if (!setup_ok) {
-        if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
-        ds4_gpu_tensor_free(src);
-        ds4_gpu_tensor_free(dst);
+        if (lgn2_gpu_commands_active()) (void)lgn2_gpu_discard_commands();
+        lgn2_gpu_tensor_free(src);
+        lgn2_gpu_tensor_free(dst);
         for (size_t i = 0; i < sizeof(maps) / sizeof(maps[0]); i++) {
             if (maps[i]) munmap(maps[i], page);
         }
-        ds4_gpu_cleanup();
+        lgn2_gpu_cleanup();
     }
 
     return setup_ok && trace.gpu_drain_reported_failure &&
            trace.maps_live_through_gpu && trace.model_maps_unmapped &&
-           ds4_gpu_test_cleanup_state_is_clean();
+           lgn2_gpu_test_cleanup_state_is_clean();
 }
 #endif
 
-#endif /* DS4_TEST_HOOKS */
+#endif /* LGN2_TEST_HOOKS */
 
-void ds4_session_set_progress(ds4_session *s, ds4_session_progress_fn fn, void *ud) {
+void lgn2_session_set_progress(lgn2_session *s, lgn2_session_progress_fn fn, void *ud) {
     if (!s) return;
     s->progress = fn;
     s->progress_ud = ud;
 }
 
-void ds4_session_set_display_progress(ds4_session *s, ds4_session_progress_fn fn, void *ud) {
+void lgn2_session_set_display_progress(lgn2_session *s, lgn2_session_progress_fn fn, void *ud) {
     if (!s) return;
     s->display_progress = fn;
     s->display_progress_ud = ud;
 }
 
-void ds4_session_set_cancel(ds4_session *s, ds4_session_cancel_fn fn, void *ud) {
+void lgn2_session_set_cancel(lgn2_session *s, lgn2_session_cancel_fn fn, void *ud) {
     if (!s) return;
     s->cancel = fn;
     s->cancel_ud = ud;
 }
 
-void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled) {
+void lgn2_session_set_speculative_enabled(lgn2_session *s, bool enabled) {
     if (!s || s->speculative_enabled == enabled) return;
     s->speculative_enabled = enabled;
-#ifndef DS4_NO_GPU
+#ifndef LGN2_NO_GPU
     /* The target checkpoint remains valid, but a disabled DFlash cache may
      * miss arbitrary intervening tokens. Rebuild its last-window state on the
      * next enabled sync instead of guessing whether it stayed current. */
-    ds4_session_dflash_invalidate(s);
+    lgn2_session_dflash_invalidate(s);
     s->dflash_baseline_ms = 0.0;
     s->dflash_baseline_tokens = 0;
     s->dflash_cycles_since_baseline = 0;
@@ -9227,34 +9227,34 @@ void ds4_session_set_speculative_enabled(ds4_session *s, bool enabled) {
 #endif
 }
 
-static bool ds4_session_cancelled(ds4_session *s) {
+static bool lgn2_session_cancelled(lgn2_session *s) {
     return s && s->cancel && s->cancel(s->cancel_ud);
 }
 
-void ds4_session_report_progress(ds4_session *s, const char *event, int current, int total) {
+void lgn2_session_report_progress(lgn2_session *s, const char *event, int current, int total) {
     if (!s || !s->progress || !event) return;
     s->progress(s->progress_ud, event, current, total);
 }
 
 
-#ifndef DS4_NO_GPU
-static bool ds4_session_dflash_enabled(const ds4_session *s) {
+#ifndef LGN2_NO_GPU
+static bool lgn2_session_dflash_enabled(const lgn2_session *s) {
     return s && s->speculative_enabled && s->engine &&
            s->engine->dflash_ready &&
            s->dflash_graph_ready &&
            !s->dflash_suspended;
 }
 
-static ds4_laguna_feature_capture ds4_session_dflash_capture(
-        ds4_session *s,
+static lgn2_laguna_feature_capture lgn2_session_dflash_capture(
+        lgn2_session *s,
         uint32_t     src_row0,
         uint32_t     n_rows) {
-    ds4_laguna_feature_capture capture;
+    lgn2_laguna_feature_capture capture;
     memset(&capture, 0, sizeof(capture));
-    if (!ds4_session_dflash_enabled(s) || n_rows == 0u) return capture;
+    if (!lgn2_session_dflash_enabled(s) || n_rows == 0u) return capture;
     capture.features = s->dflash_graph.features;
     capture.target_layers = s->engine->dflash_weights.target_layers;
-    capture.n_aux = DS4_DFLASH_N_AUX;
+    capture.n_aux = LGN2_DFLASH_N_AUX;
     capture.src_row0 = src_row0;
     capture.dst_row0 = 0;
     capture.n_rows = n_rows;
@@ -9264,11 +9264,11 @@ static ds4_laguna_feature_capture ds4_session_dflash_capture(
 /* A GPU-draft verifier borrows the caller's active batch.  The caller must
  * observe an active owner here: a missing batch means the helper violated its
  * ownership contract or a terminal boundary already ran. */
-static bool ds4_session_dflash_discard_owned_commands(void) {
-    return ds4_gpu_commands_active() && ds4_gpu_discard_commands() != 0;
+static bool lgn2_session_dflash_discard_owned_commands(void) {
+    return lgn2_gpu_commands_active() && lgn2_gpu_discard_commands() != 0;
 }
 
-static void ds4_session_dflash_quarantine(ds4_session *s) {
+static void lgn2_session_dflash_quarantine(lgn2_session *s) {
     if (!s) return;
     s->checkpoint_valid = false;
     s->dflash_synced = false;
@@ -9281,8 +9281,8 @@ static void ds4_session_dflash_quarantine(ds4_session *s) {
  * command buffer that wrote its backup has completed successfully.  Keep the
  * completion proof at the restore boundary so terminal failures cannot read a
  * stale or unwritten backup merely because an earlier flush succeeded. */
-static bool ds4_session_dflash_restore_snapshot(
-        ds4_session *s,
+static bool lgn2_session_dflash_restore_snapshot(
+        lgn2_session *s,
         bool         snapshot_completed,
         uint32_t     pos0,
         uint32_t     accepted_rows,
@@ -9299,16 +9299,16 @@ static bool ds4_session_dflash_restore_snapshot(
     /* laguna_graph_spec_restore submits the Apple rollback CB and leaves it
      * pending.  Do not let the caller append checkpoint tokens or mark
      * DFlash synchronized until this exact CB has completed successfully. */
-    if (ds4_gpu_wait_submitted_commands() == 0) return false;
+    if (lgn2_gpu_wait_submitted_commands() == 0) return false;
 #endif
     return true;
 }
 
-static bool ds4_session_dflash_finish_capture(
-        ds4_session *s,
+static bool lgn2_session_dflash_finish_capture(
+        lgn2_session *s,
         uint32_t     pos0,
         uint32_t     n_rows) {
-    if (!ds4_session_dflash_enabled(s) || n_rows == 0u) return true;
+    if (!lgn2_session_dflash_enabled(s) || n_rows == 0u) return true;
     if (!dflash_graph_encode_inject(&s->dflash_graph,
                                     s->engine,
                                     pos0,
@@ -9335,9 +9335,9 @@ static bool ds4_session_dflash_finish_capture(
     return true;
 }
 
-static bool ds4_session_dflash_flush_deferred(ds4_session *s) {
+static bool lgn2_session_dflash_flush_deferred(lgn2_session *s) {
     if (!s || s->dflash_deferred_rows == 0u) return true;
-    if (!ds4_session_dflash_finish_capture(s,
+    if (!lgn2_session_dflash_finish_capture(s,
                                            s->dflash_deferred_pos0,
                                            s->dflash_deferred_rows)) {
         return false;
@@ -9350,13 +9350,13 @@ static bool ds4_session_dflash_flush_deferred(ds4_session *s) {
 
 
 
-static int ds4_session_eval_internal(ds4_session *s, int token,
+static int lgn2_session_eval_internal(lgn2_session *s, int token,
                                      char *err, size_t errlen);
 
 
 /* Bring the live backend state to exactly the supplied token prefix.
  *
- * ds4-server and the REPL are stateless at the text/API layer but stateful here:
+ * lgn2-server and the REPL are stateless at the text/API layer but stateful here:
  * they resend or rebuild the full transcript, and this function decides whether
  * the live checkpoint is a prefix.  A matching prefix is extended in one of two
  * ways:
@@ -9369,20 +9369,20 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
  *
  * A non-matching prompt discards the checkpoint and prefills from token zero.
  */
-static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen);
+static int lgn2_session_sync_internal(lgn2_session *s, const lgn2_tokens *prompt, char *err, size_t errlen);
 
-int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+int lgn2_session_sync(lgn2_session *s, const lgn2_tokens *prompt, char *err, size_t errlen) {
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (s && !laguna_metal_swa_gqa9_preflight(
             s->engine, "session sync", err, errlen)) return 1;
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session sync", err, errlen)) return 1;
 #endif
-    ds4_session_note_logits_dirty(s);
-    return ds4_session_sync_internal(s, prompt, err, errlen);
+    lgn2_session_note_logits_dirty(s);
+    return lgn2_session_sync_internal(s, prompt, err, errlen);
 }
 
-static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
+static int lgn2_session_sync_internal(lgn2_session *s, const lgn2_tokens *prompt, char *err, size_t errlen) {
     if (!s || !prompt) {
         snprintf(err, errlen, "missing session or prompt");
         return 1;
@@ -9397,26 +9397,26 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
                  prompt->len, s->ctx_size);
         return 1;
     }
-    if (ds4_session_cancelled(s)) {
+    if (lgn2_session_cancelled(s)) {
         snprintf(err, errlen, "interrupted");
-        return DS4_SESSION_SYNC_INTERRUPTED;
+        return LGN2_SESSION_SYNC_INTERRUPTED;
     }
-#ifdef DS4_TEST_HOOKS
-    if (ds4_session_is_laguna(s) && g_ds4_test_route_sync_fn) {
-        g_ds4_test_route_sync_calls++;
-        return g_ds4_test_route_sync_fn(s, prompt, err, errlen);
+#ifdef LGN2_TEST_HOOKS
+    if (lgn2_session_is_laguna(s) && g_lgn2_test_route_sync_fn) {
+        g_lgn2_test_route_sync_calls++;
+        return g_lgn2_test_route_sync_fn(s, prompt, err, errlen);
     }
 #endif
-#ifdef DS4_NO_GPU
+#ifdef LGN2_NO_GPU
     (void)s;
     (void)prompt;
     snprintf(err, errlen, "GPU support is not compiled in");
     return 1;
 #else
-    ds4_engine *e = s->engine;
-    const char *runtime_name = DS4_RUNTIME_NAME;
+    lgn2_engine *e = s->engine;
+    const char *runtime_name = LGN2_RUNTIME_NAME;
     (void)runtime_name; (void)e;
-    if (ds4_session_is_laguna(s)) {
+    if (lgn2_session_is_laguna(s)) {
         if (!laguna_dense_q8_gate_up_swiglu_preflight(
                     &e->model, &e->weights, NULL)) {
             snprintf(err, errlen,
@@ -9457,7 +9457,7 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         s->dflash_suspended = false;
         s->dflash_guard_decided = false;
         s->dflash_defer_inject = false;
-        if (!ds4_session_dflash_flush_deferred(s)) {
+        if (!lgn2_session_dflash_flush_deferred(s)) {
             snprintf(err, errlen,
                      "%s DFlash deferred injection failed before sync",
                      runtime_name);
@@ -9468,7 +9468,7 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         int start = 0;
         if (s->checkpoint_valid &&
             prompt->len >= s->checkpoint.len &&
-            ds4_tokens_starts_with(prompt, &s->checkpoint)) {
+            lgn2_tokens_starts_with(prompt, &s->checkpoint)) {
             start = s->checkpoint.len;
         } else {
             s->checkpoint.len = 0;
@@ -9476,7 +9476,7 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
             s->dflash_synced = false;
         }
 
-        const bool dflash_enabled = ds4_session_dflash_enabled(s);
+        const bool dflash_enabled = lgn2_session_dflash_enabled(s);
         /*
          * Replaying only the last DFlash window is not correct after the
          * support cache has fallen behind: Laguna's sliding-window KV ring
@@ -9490,15 +9490,15 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
             s->checkpoint.len = 0;
             s->checkpoint_valid = false;
         }
-        int capture_floor = prompt->len > (int)DS4_DFLASH_CACHE_CAP ?
-            prompt->len - (int)DS4_DFLASH_CACHE_CAP : 0;
+        int capture_floor = prompt->len > (int)LGN2_DFLASH_CACHE_CAP ?
+            prompt->len - (int)LGN2_DFLASH_CACHE_CAP : 0;
         if (s->dflash_synced && capture_floor < start) capture_floor = start;
 
         for (int i = start; i < prompt->len;) {
-            if (ds4_session_cancelled(s)) {
+            if (lgn2_session_cancelled(s)) {
                 snprintf(err, errlen, "interrupted");
                 s->checkpoint_valid = s->checkpoint.len != 0;
-                return DS4_SESSION_SYNC_INTERRUPTED;
+                return LGN2_SESSION_SYNC_INTERRUPTED;
             }
             uint32_t n = (uint32_t)(prompt->len - i);
             if (n > s->laguna_graph.prefill_cap) {
@@ -9507,20 +9507,20 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
             const bool last = i + (int)n == prompt->len;
             int capture_begin = i;
             uint32_t capture_rows = 0;
-            ds4_laguna_feature_capture capture;
+            lgn2_laguna_feature_capture capture;
             memset(&capture, 0, sizeof(capture));
             if (dflash_enabled) {
                 if (capture_begin < capture_floor) capture_begin = capture_floor;
                 const int capture_end = i + (int)n;
                 if (capture_begin < capture_end) {
                     capture_rows = (uint32_t)(capture_end - capture_begin);
-                    capture = ds4_session_dflash_capture(
+                    capture = lgn2_session_dflash_capture(
                         s,
                         (uint32_t)(capture_begin - i),
                         capture_rows);
                 }
             }
-            const ds4_laguna_feature_capture *capture_ptr =
+            const lgn2_laguna_feature_capture *capture_ptr =
                 capture_rows ? &capture : NULL;
             bool ok = n == 1u ?
                 laguna_graph_forward_token(&s->laguna_graph,
@@ -9553,7 +9553,7 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
                 return 1;
             }
             if (capture_rows &&
-                !ds4_session_dflash_finish_capture(
+                !lgn2_session_dflash_finish_capture(
                     s,
                     (uint32_t)capture_begin,
                     capture_rows)) {
@@ -9580,19 +9580,19 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         return 0;
     }
     snprintf(err, errlen, "%s session route is unsupported",
-             DS4_RUNTIME_NAME);
+             LGN2_RUNTIME_NAME);
     return 1;
 #endif
 }
 
 /* Return true when canonicalization would replace already-sampled tokens.
  *
- * A DS4 session checkpoint is more than a token vector: the Laguna target
+ * A LGN2 session checkpoint is more than a token vector: the Laguna target
  * graph also contains persistent KV rings and optional DFlash feature history.
  * Replacing any part of the live tail requires restoring that whole frontier
  * first.  Extending exactly at the live end is safe; rewriting behind it is
  * not an in-place operation. */
-bool ds4_session_rewrite_requires_rebuild(int live_len, int canonical_len, int common) {
+bool lgn2_session_rewrite_requires_rebuild(int live_len, int canonical_len, int common) {
     if (live_len < 0 || canonical_len < 0 || common < 0) return true;
     if (common > live_len || common > canonical_len) return true;
     return common < live_len;
@@ -9608,55 +9608,55 @@ bool ds4_session_rewrite_requires_rebuild(int live_len, int canonical_len, int c
  * the rewrite point, any replacement behind the live end reports that a rebuild
  * is needed without mutating the session.  The server may still find an older
  * disk KV checkpoint before falling back to a full replay. */
-ds4_session_rewrite_result ds4_session_rewrite_from_common(
-        ds4_session *s, const ds4_tokens *prompt, int common,
+lgn2_session_rewrite_result lgn2_session_rewrite_from_common(
+        lgn2_session *s, const lgn2_tokens *prompt, int common,
         char *err, size_t errlen) {
     if (!s || !prompt) {
         snprintf(err, errlen, "missing session or prompt");
-        return DS4_SESSION_REWRITE_ERROR;
+        return LGN2_SESSION_REWRITE_ERROR;
     }
     if (prompt->len <= 0) {
         snprintf(err, errlen, "empty prompt");
-        return DS4_SESSION_REWRITE_ERROR;
+        return LGN2_SESSION_REWRITE_ERROR;
     }
     if (prompt->len >= s->ctx_size) {
         snprintf(err, errlen,
                  "prompt length %d exceeds context %d (one token of generation room is required)",
                  prompt->len, s->ctx_size);
-        return DS4_SESSION_REWRITE_ERROR;
+        return LGN2_SESSION_REWRITE_ERROR;
     }
-    ds4_session_note_logits_dirty(s);
+    lgn2_session_note_logits_dirty(s);
     if (!s->checkpoint_valid) {
         snprintf(err, errlen, "session has no valid checkpoint");
-        return DS4_SESSION_REWRITE_ERROR;
+        return LGN2_SESSION_REWRITE_ERROR;
     }
     if (common < 0 || common > s->checkpoint.len || common > prompt->len) {
         snprintf(err, errlen, "invalid rewrite prefix");
-        return DS4_SESSION_REWRITE_ERROR;
+        return LGN2_SESSION_REWRITE_ERROR;
     }
     for (int i = 0; i < common; i++) {
         if (s->checkpoint.v[i] != prompt->v[i]) {
             snprintf(err, errlen, "rewrite prefix does not match live checkpoint");
-            return DS4_SESSION_REWRITE_ERROR;
+            return LGN2_SESSION_REWRITE_ERROR;
         }
     }
 
     if (common == s->checkpoint.len) {
-        return ds4_session_sync(s, prompt, err, errlen) == 0 ?
-            DS4_SESSION_REWRITE_OK : DS4_SESSION_REWRITE_ERROR;
+        return lgn2_session_sync(s, prompt, err, errlen) == 0 ?
+            LGN2_SESSION_REWRITE_OK : LGN2_SESSION_REWRITE_ERROR;
     }
 
-    if (ds4_session_rewrite_requires_rebuild(s->checkpoint.len, prompt->len, common)) {
+    if (lgn2_session_rewrite_requires_rebuild(s->checkpoint.len, prompt->len, common)) {
         snprintf(err, errlen, "rewrite needs rebuild: common=%d live=%d canonical=%d",
                  common, s->checkpoint.len, prompt->len);
-        return DS4_SESSION_REWRITE_REBUILD_NEEDED;
+        return LGN2_SESSION_REWRITE_REBUILD_NEEDED;
     }
 
     snprintf(err, errlen, "unexpected canonical rewrite state");
-    return DS4_SESSION_REWRITE_ERROR;
+    return LGN2_SESSION_REWRITE_ERROR;
 }
 
-int ds4_session_common_prefix(ds4_session *s, const ds4_tokens *prompt) {
+int lgn2_session_common_prefix(lgn2_session *s, const lgn2_tokens *prompt) {
     if (!s->checkpoint_valid) return 0;
     int n = s->checkpoint.len < prompt->len ? s->checkpoint.len : prompt->len;
     int i = 0;
@@ -9664,19 +9664,19 @@ int ds4_session_common_prefix(ds4_session *s, const ds4_tokens *prompt) {
     return i;
 }
 
-int ds4_session_argmax(ds4_session *s) {
-    return sample_argmax(s->logits, DS4_N_VOCAB);
+int lgn2_session_argmax(lgn2_session *s) {
+    return sample_argmax(s->logits, LGN2_N_VOCAB);
 }
 
-int ds4_session_argmax_excluding(ds4_session *s, int excluded_id) {
+int lgn2_session_argmax_excluding(lgn2_session *s, int excluded_id) {
     if (!s || !s->logits) return -1;
-    if (getenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
+    if (getenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
         return argmax_f32_excluding_unrolled8(
-                s->logits, DS4_N_VOCAB, excluded_id);
+                s->logits, LGN2_N_VOCAB, excluded_id);
     }
     int best = -1;
-    float best_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    float best_logit = LGN2_NEG_INF;
+    for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) {
         if ((int)i == excluded_id) continue;
         const float v = s->logits[i];
         if (best < 0 || v > best_logit) {
@@ -9687,7 +9687,7 @@ int ds4_session_argmax_excluding(ds4_session *s, int excluded_id) {
     return best;
 }
 
-int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
+int lgn2_sample_logits(const float *logits, int n_vocab, float temperature,
                       int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!logits || n_vocab <= 0) return 0;
     float *scratch = xmalloc((size_t)n_vocab * sizeof(scratch[0]));
@@ -9700,15 +9700,15 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
     return token;
 }
 
-int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
+int lgn2_session_sample(lgn2_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
     if (!s->engine->dflash_ready || !s->speculative_enabled) {
-        return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
+        return sample_top_p_min_p(s->logits, LGN2_N_VOCAB, temperature, top_k,
                                   top_p, min_p, rng, s->sample_probs,
                                   &s->sample_cands);
     }
     const double t0 = now_sec();
     const int token =
-        sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
+        sample_top_p_min_p(s->logits, LGN2_N_VOCAB, temperature, top_k,
                            top_p, min_p, rng, s->sample_probs,
                            &s->sample_cands);
     s->last_sample_ms = (now_sec() - t0) * 1000.0;
@@ -9723,22 +9723,22 @@ int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p
  * order, so a cached result is bit-identical to recomputation.  The top-k
  * observer supplies the max from its ranking pass so this helper only scans
  * the vocabulary for the sum on a cold top-k request. */
-static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out,
+static bool lgn2_session_logsumexp(lgn2_session *s, double *logsum_out,
                                   bool have_max, float known_max_logit) {
     if (s->logsumexp_valid && s->logsumexp_gen == s->logits_gen) {
-#ifdef DS4_TEST_HOOKS
-        g_ds4_test_logprob_stats.cache_hits++;
+#ifdef LGN2_TEST_HOOKS
+        g_lgn2_test_logprob_stats.cache_hits++;
 #endif
         *logsum_out = s->logsumexp;
         return s->logsumexp_ok;
     }
     float max_logit = known_max_logit;
     if (!have_max) {
-#ifdef DS4_TEST_HOOKS
-        g_ds4_test_logprob_stats.max_scans++;
+#ifdef LGN2_TEST_HOOKS
+        g_lgn2_test_logprob_stats.max_scans++;
 #endif
-        max_logit = DS4_NEG_INF;
-        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        max_logit = LGN2_NEG_INF;
+        for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) {
             const float v = s->logits[i];
             if (isfinite(v) && v > max_logit) max_logit = v;
         }
@@ -9746,11 +9746,11 @@ static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out,
     double logsum = 0.0;
     bool ok = false;
     if (isfinite(max_logit)) {
-#ifdef DS4_TEST_HOOKS
-        g_ds4_test_logprob_stats.sum_scans++;
+#ifdef LGN2_TEST_HOOKS
+        g_lgn2_test_logprob_stats.sum_scans++;
 #endif
         double sum = 0.0;
-        for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+        for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) {
             const float v = s->logits[i];
             if (isfinite(v)) sum += exp((double)v - (double)max_logit);
         }
@@ -9765,20 +9765,20 @@ static bool ds4_session_logsumexp(ds4_session *s, double *logsum_out,
     return ok;
 }
 
-int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
+int lgn2_session_top_logprobs(lgn2_session *s, lgn2_token_score *out, int k) {
     if (!s || !out || k <= 0) return 0;
-    if (k > (int)DS4_N_VOCAB) k = (int)DS4_N_VOCAB;
+    if (k > (int)LGN2_N_VOCAB) k = (int)LGN2_N_VOCAB;
     for (int i = 0; i < k; i++) {
         out[i].id = -1;
-        out[i].logit = DS4_NEG_INF;
-        out[i].logprob = DS4_NEG_INF;
+        out[i].logit = LGN2_NEG_INF;
+        out[i].logprob = LGN2_NEG_INF;
     }
 
-    float max_logit = DS4_NEG_INF;
-#ifdef DS4_TEST_HOOKS
-    g_ds4_test_logprob_stats.max_scans++;
+    float max_logit = LGN2_NEG_INF;
+#ifdef LGN2_TEST_HOOKS
+    g_lgn2_test_logprob_stats.max_scans++;
 #endif
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) {
         const float v = s->logits[i];
         if (!isfinite(v)) continue;
         if (v > max_logit) max_logit = v;
@@ -9794,46 +9794,46 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
     if (!isfinite(max_logit)) return 0;
 
     double logsum = 0.0;
-    if (!ds4_session_logsumexp(s, &logsum, true, max_logit)) return 0;
+    if (!lgn2_session_logsumexp(s, &logsum, true, max_logit)) return 0;
     for (int i = 0; i < k && out[i].id >= 0; i++) {
-        out[i].logprob = isfinite(out[i].logit) ? (float)((double)out[i].logit - logsum) : DS4_NEG_INF;
+        out[i].logprob = isfinite(out[i].logit) ? (float)((double)out[i].logit - logsum) : LGN2_NEG_INF;
     }
     return k;
 }
 
-int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
-    if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
+int lgn2_session_token_logprob(lgn2_session *s, int token, lgn2_token_score *out) {
+    if (!s || !out || token < 0 || token >= (int)LGN2_N_VOCAB) return 0;
 
     double logsum = 0.0;
-    if (!ds4_session_logsumexp(s, &logsum, false, DS4_NEG_INF)) return 0;
+    if (!lgn2_session_logsumexp(s, &logsum, false, LGN2_NEG_INF)) return 0;
     out->id = token;
     out->logit = s->logits[token];
-    out->logprob = isfinite(out->logit) ? (float)((double)out->logit - logsum) : DS4_NEG_INF;
+    out->logprob = isfinite(out->logit) ? (float)((double)out->logit - logsum) : LGN2_NEG_INF;
     return 1;
 }
 
-int ds4_session_copy_logits(ds4_session *s, float *out, int cap) {
-    if (!s || !out || cap < (int)DS4_N_VOCAB) return 0;
-    memcpy(out, s->logits, (size_t)DS4_N_VOCAB * sizeof(out[0]));
-    return (int)DS4_N_VOCAB;
+int lgn2_session_copy_logits(lgn2_session *s, float *out, int cap) {
+    if (!s || !out || cap < (int)LGN2_N_VOCAB) return 0;
+    memcpy(out, s->logits, (size_t)LGN2_N_VOCAB * sizeof(out[0]));
+    return (int)LGN2_N_VOCAB;
 }
 
-int ds4_session_set_logits(ds4_session *s, const float *logits, int n) {
-    if (!s || !logits || n != (int)DS4_N_VOCAB) return 1;
-    ds4_session_note_logits_dirty(s);
-    memcpy(s->logits, logits, (size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
+int lgn2_session_set_logits(lgn2_session *s, const float *logits, int n) {
+    if (!s || !logits || n != (int)LGN2_N_VOCAB) return 1;
+    lgn2_session_note_logits_dirty(s);
+    memcpy(s->logits, logits, (size_t)LGN2_N_VOCAB * sizeof(s->logits[0]));
     return 0;
 }
 
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
 /* Exercise the cache without loading a model.  The probe deliberately uses
  * the public logits setter so a mutation must advance the same generation
  * counter as production callers. */
-int ds4_test_logprob_cache_probe(void) {
-    ds4_session s = {0};
-    float *initial = xmalloc((size_t)DS4_N_VOCAB * sizeof(initial[0]));
-    float *mutated = xmalloc((size_t)DS4_N_VOCAB * sizeof(mutated[0]));
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+int lgn2_test_logprob_cache_probe(void) {
+    lgn2_session s = {0};
+    float *initial = xmalloc((size_t)LGN2_N_VOCAB * sizeof(initial[0]));
+    float *mutated = xmalloc((size_t)LGN2_N_VOCAB * sizeof(mutated[0]));
+    for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) {
         initial[i] = -3.0f - (float)(i % 257u) * 0.001f;
     }
     initial[17] = 2.5f;
@@ -9842,42 +9842,42 @@ int ds4_test_logprob_cache_probe(void) {
     memcpy(&initial[23], &neg_inf_bits, sizeof(neg_inf_bits));
     memcpy(&initial[29], &nan_bits, sizeof(nan_bits));
     memcpy(mutated, initial,
-           (size_t)DS4_N_VOCAB * sizeof(mutated[0]));
-    s.logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+           (size_t)LGN2_N_VOCAB * sizeof(mutated[0]));
+    s.logits = xmalloc((size_t)LGN2_N_VOCAB * sizeof(s.logits[0]));
     memcpy(s.logits, initial,
-           (size_t)DS4_N_VOCAB * sizeof(s.logits[0]));
+           (size_t)LGN2_N_VOCAB * sizeof(s.logits[0]));
     /* A synthetic session has no eval entry point to mark its first logits. */
-    ds4_session_note_logits_dirty(&s);
+    lgn2_session_note_logits_dirty(&s);
 
-    ds4_test_logprob_stats_reset();
-    ds4_token_score top[4], top_again[4], token_before, token_after;
-    bool ok = ds4_session_top_logprobs(&s, top, 4) == 4;
-    ds4_test_logprob_stats stats = {0};
-    ds4_test_logprob_stats_get(&stats);
+    lgn2_test_logprob_stats_reset();
+    lgn2_token_score top[4], top_again[4], token_before, token_after;
+    bool ok = lgn2_session_top_logprobs(&s, top, 4) == 4;
+    lgn2_test_logprob_stats stats = {0};
+    lgn2_test_logprob_stats_get(&stats);
     ok = ok && stats.max_scans == 1 && stats.sum_scans == 1 &&
          stats.cache_hits == 0 && top[0].id == 17;
 
     /* Repeating the observer still scans to select the top entries, but must
      * reuse the already accumulated normalizer. */
-    ok = ok && ds4_session_top_logprobs(&s, top_again, 4) == 4;
-    ds4_test_logprob_stats_get(&stats);
+    ok = ok && lgn2_session_top_logprobs(&s, top_again, 4) == 4;
+    lgn2_test_logprob_stats_get(&stats);
     ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
          stats.cache_hits == 1;
-    ok = ok && ds4_session_token_logprob(&s, 17, &token_before) == 1;
-    ds4_test_logprob_stats_get(&stats);
+    ok = ok && lgn2_session_token_logprob(&s, 17, &token_before) == 1;
+    lgn2_test_logprob_stats_get(&stats);
     ok = ok && stats.max_scans == 2 && stats.sum_scans == 1 &&
          stats.cache_hits == 2;
 
     /* Check the cached arithmetic against an independent copy that uses the
      * same max-then-sum order as the original implementation. */
-    float max_logit = DS4_NEG_INF;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    float max_logit = LGN2_NEG_INF;
+    for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) {
         if (isfinite(initial[i]) && initial[i] > max_logit) {
             max_logit = initial[i];
         }
     }
     double sum = 0.0;
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
+    for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) {
         if (isfinite(initial[i])) {
             sum += exp((double)initial[i] - (double)max_logit);
         }
@@ -9890,9 +9890,9 @@ int ds4_test_logprob_cache_probe(void) {
          token_before.logprob == reference_logprob;
 
     mutated[17] = 3.75f;
-    ok = ok && ds4_session_set_logits(&s, mutated, (int)DS4_N_VOCAB) == 0;
-    ok = ok && ds4_session_token_logprob(&s, 17, &token_after) == 1;
-    ds4_test_logprob_stats_get(&stats);
+    ok = ok && lgn2_session_set_logits(&s, mutated, (int)LGN2_N_VOCAB) == 0;
+    ok = ok && lgn2_session_token_logprob(&s, 17, &token_after) == 1;
+    lgn2_test_logprob_stats_get(&stats);
     ok = ok && stats.max_scans == 3 && stats.sum_scans == 2 &&
          stats.cache_hits == 2 && token_after.logprob != token_before.logprob &&
          token_after.logit == 3.75f;
@@ -9906,47 +9906,47 @@ int ds4_test_logprob_cache_probe(void) {
 
 /* Pay the one-time first-submission GPU cost (pipeline ramp plus model-heap
  * residency for the batched prefill kernels) outside any measured window. */
-void ds4_session_gpu_warmup(ds4_session *s) {
+void lgn2_session_gpu_warmup(lgn2_session *s) {
     (void)s;
 }
 
-static int ds4_session_eval_internal(ds4_session *s, int token,
+static int lgn2_session_eval_internal(lgn2_session *s, int token,
                                      char *err, size_t errlen) {
     if (!s) return 1;
-#ifdef DS4_NO_GPU
+#ifdef LGN2_NO_GPU
     (void)s;
     (void)token;
     snprintf(err, errlen, "GPU support is not compiled in");
     return 1;
 #else
-    ds4_engine *e = s->engine;
-    if (ds4_session_is_laguna(s)) {
+    lgn2_engine *e = s->engine;
+    if (lgn2_session_is_laguna(s)) {
         if (!laguna_dense_q8_gate_up_swiglu_preflight(
                     &e->model, &e->weights, NULL)) {
             if (errlen) snprintf(err, errlen,
                                  "%s Laguna dense Q8 gate/up+SwiGLU "
                                  "preflight failed",
-                                 DS4_RUNTIME_NAME);
+                                 LGN2_RUNTIME_NAME);
             return 1;
         }
 #ifdef __APPLE__
         if (!laguna_metal_decode_residual_norm_preflight()) {
             if (errlen) snprintf(err, errlen,
                                  "%s Laguna decode residual fusion preflight failed",
-                                 DS4_RUNTIME_NAME);
+                                 LGN2_RUNTIME_NAME);
             return 1;
         }
         if (!laguna_metal_qk_norm_rope_simd32_preflight()) {
             if (errlen) snprintf(err, errlen,
                                  "%s Laguna Q/K norm/RoPE SIMD32 preflight failed",
-                                 DS4_RUNTIME_NAME);
+                                 LGN2_RUNTIME_NAME);
             return 1;
         }
 #endif
         if (!s->laguna_graph_ready) {
             if (errlen) snprintf(err, errlen,
                                  "%s Laguna graph is not initialized",
-                                 DS4_RUNTIME_NAME);
+                                 LGN2_RUNTIME_NAME);
             return 1;
         }
         if ((uint32_t)s->checkpoint.len >= s->laguna_graph.ctx_size) {
@@ -9955,18 +9955,18 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
                                  s->laguna_graph.ctx_size);
             return 1;
         }
-        const bool dflash_enabled = ds4_session_dflash_enabled(s);
+        const bool dflash_enabled = lgn2_session_dflash_enabled(s);
         const bool dflash_was_synced = s->dflash_synced;
         if (dflash_enabled && !s->dflash_defer_inject &&
-            !ds4_session_dflash_flush_deferred(s)) {
+            !lgn2_session_dflash_flush_deferred(s)) {
             if (errlen) snprintf(err, errlen,
                                  "%s DFlash deferred injection failed",
-                                 DS4_RUNTIME_NAME);
+                                 LGN2_RUNTIME_NAME);
             s->checkpoint_valid = false;
             return 1;
         }
-        ds4_laguna_feature_capture capture =
-            ds4_session_dflash_capture(s, 0, 1);
+        lgn2_laguna_feature_capture capture =
+            lgn2_session_dflash_capture(s, 0, 1);
         if (dflash_enabled && s->dflash_defer_inject) {
             const uint32_t pos = (uint32_t)s->checkpoint.len;
             if (s->dflash_deferred_rows == 0u) {
@@ -9974,7 +9974,7 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
             } else if (pos != s->dflash_deferred_pos0 +
                               s->dflash_deferred_rows ||
                        s->dflash_deferred_rows >=
-                           DS4_DFLASH_BLOCK_SIZE) {
+                           LGN2_DFLASH_BLOCK_SIZE) {
                 if (errlen) snprintf(err, errlen,
                                      "DFlash deferred capture is not contiguous");
                 s->checkpoint_valid = false;
@@ -9991,7 +9991,7 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
                                         dflash_enabled ? &capture : NULL,
                                         s->logits)) {
             if (errlen) snprintf(err, errlen, "%s Laguna decode failed",
-                                 DS4_RUNTIME_NAME);
+                                 LGN2_RUNTIME_NAME);
             s->checkpoint_valid = false;
             s->dflash_synced = false;
             return 1;
@@ -9999,11 +9999,11 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
         if (dflash_enabled && s->dflash_defer_inject) {
             s->dflash_deferred_rows++;
         } else if (dflash_enabled &&
-            !ds4_session_dflash_finish_capture(
+            !lgn2_session_dflash_finish_capture(
                 s, (uint32_t)s->checkpoint.len, 1)) {
             if (errlen) snprintf(err, errlen,
                                  "%s DFlash cache injection failed",
-                                 DS4_RUNTIME_NAME);
+                                 LGN2_RUNTIME_NAME);
             s->checkpoint_valid = false;
             return 1;
         }
@@ -10015,9 +10015,9 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
         s->checkpoint_valid = true;
         return 0;
     }
-    #ifdef DS4_TEST_HOOKS
-    g_ds4_test_route_generic_eval_calls++;
-    if (g_ds4_test_route_generic_access_forbidden) {
+    #ifdef LGN2_TEST_HOOKS
+    g_lgn2_test_route_generic_eval_calls++;
+    if (g_lgn2_test_route_generic_access_forbidden) {
         snprintf(err, errlen, "unsupported generic evaluator was reached");
     } else {
         snprintf(err, errlen, "generic graph session evaluation is unsupported");
@@ -10029,45 +10029,45 @@ static int ds4_session_eval_internal(ds4_session *s, int token,
 #endif
 }
 
-static int ds4_session_eval_probe(ds4_session *s, int token,
+static int lgn2_session_eval_probe(lgn2_session *s, int token,
                                   char *err, size_t errlen) {
-#ifdef DS4_TEST_HOOKS
-    if (ds4_session_is_laguna(s) && g_ds4_test_route_eval_fn) {
-        g_ds4_test_route_eval_calls++;
-        return g_ds4_test_route_eval_fn(s, token, err, errlen);
+#ifdef LGN2_TEST_HOOKS
+    if (lgn2_session_is_laguna(s) && g_lgn2_test_route_eval_fn) {
+        g_lgn2_test_route_eval_calls++;
+        return g_lgn2_test_route_eval_fn(s, token, err, errlen);
     }
 #endif
-    return ds4_session_eval_internal(s, token, err, errlen);
+    return lgn2_session_eval_internal(s, token, err, errlen);
 }
 
-int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+int lgn2_session_eval(lgn2_session *s, int token, char *err, size_t errlen) {
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (s && !laguna_metal_swa_gqa9_preflight(
             s->engine, "session eval", err, errlen)) return 1;
     if (s && !laguna_metal_router_simd_topk_preflight(
             s->engine, "session eval", err, errlen)) return 1;
 #endif
-    ds4_session_note_logits_dirty(s);
-    return ds4_session_eval_probe(s, token, err, errlen);
+    lgn2_session_note_logits_dirty(s);
+    return lgn2_session_eval_probe(s, token, err, errlen);
 }
 
-int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
+int lgn2_sessions_eval_batch(lgn2_decode_item *items, int count,
                             char *err, size_t errlen) {
     if (!items || count <= 0) {
         if (err && errlen) snprintf(err, errlen, "empty decode batch");
         return 1;
     }
     if (count == 1) {
-        return ds4_session_eval(items[0].session, items[0].token, err, errlen);
+        return lgn2_session_eval(items[0].session, items[0].token, err, errlen);
     }
-    ds4_session *first = items[0].session;
+    lgn2_session *first = items[0].session;
     if (!first || !first->engine) {
         if (err && errlen) snprintf(err, errlen, "decode batch has no session");
         return 1;
     }
-    ds4_engine *e = first->engine;
+    lgn2_engine *e = first->engine;
     for (int i = 0; i < count; i++) {
-        ds4_session *s = items[i].session;
+        lgn2_session *s = items[i].session;
         if (!s || s->engine != e) {
             if (err && errlen) {
                 snprintf(err, errlen,
@@ -10075,7 +10075,7 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
             }
             return 1;
         }
-        if (items[i].token < 0 || items[i].token >= (int)DS4_N_VOCAB) {
+        if (items[i].token < 0 || items[i].token >= (int)LGN2_N_VOCAB) {
             if (err && errlen) {
                 snprintf(err, errlen, "decode batch item %d has an invalid token", i);
             }
@@ -10100,24 +10100,24 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
         }
     }
 
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (!laguna_metal_swa_gqa9_preflight(
             first->engine, "session batch eval", err, errlen)) return 1;
     if (!laguna_metal_router_simd_topk_preflight(
             e, "session batch eval", err, errlen)) return 1;
 #endif
     for (int i = 0; i < count; i++) {
-        ds4_session_note_logits_dirty(items[i].session);
+        lgn2_session_note_logits_dirty(items[i].session);
     }
 
     /* Preserve logical all-or-nothing behavior even on the serialized path.
      * A failure can leave earlier members advanced, so force every member to
      * rebuild before it is used again. */
     for (int i = 0; i < count; i++) {
-        if (ds4_session_eval(items[i].session, items[i].token,
+        if (lgn2_session_eval(items[i].session, items[i].token,
                              err, errlen) != 0) {
             for (int j = 0; j < count; j++) {
-                ds4_session_invalidate(items[j].session);
+                lgn2_session_invalidate(items[j].session);
             }
             return 1;
         }
@@ -10125,11 +10125,11 @@ int ds4_sessions_eval_batch(ds4_decode_item *items, int count,
     return 0;
 }
 
-int ds4_sessions_eval_batch_with_prefill(
-        ds4_decode_item *items,
+int lgn2_sessions_eval_batch_with_prefill(
+        lgn2_decode_item *items,
         int count,
-        ds4_session *prefill_session,
-        const ds4_tokens *prefill_prompt,
+        lgn2_session *prefill_session,
+        const lgn2_tokens *prefill_prompt,
         char *err,
         size_t errlen) {
     if (!items || count <= 0 || !prefill_session || !prefill_prompt ||
@@ -10140,7 +10140,7 @@ int ds4_sessions_eval_batch_with_prefill(
     if (!prefill_session->checkpoint_valid ||
         prefill_prompt->len <= prefill_session->checkpoint.len ||
         prefill_prompt->len >= prefill_session->ctx_size ||
-        !ds4_tokens_starts_with(prefill_prompt, &prefill_session->checkpoint)) {
+        !lgn2_tokens_starts_with(prefill_prompt, &prefill_session->checkpoint)) {
         if (err && errlen) {
             snprintf(err, errlen,
                      "mixed prefill must extend a valid session checkpoint");
@@ -10148,11 +10148,11 @@ int ds4_sessions_eval_batch_with_prefill(
         return 1;
     }
     for (int i = 0; i < count; i++) {
-        ds4_session *s = items[i].session;
+        lgn2_session *s = items[i].session;
         if (!s || s == prefill_session ||
             s->engine != prefill_session->engine ||
             !s->checkpoint_valid || s->checkpoint.len >= s->ctx_size ||
-            items[i].token < 0 || items[i].token >= (int)DS4_N_VOCAB) {
+            items[i].token < 0 || items[i].token >= (int)LGN2_N_VOCAB) {
             if (err && errlen) {
                 snprintf(err, errlen, "invalid mixed decode item %d", i);
             }
@@ -10170,7 +10170,7 @@ int ds4_sessions_eval_batch_with_prefill(
         }
     }
 
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (!laguna_metal_swa_gqa9_preflight(
             prefill_session->engine, "session mixed prefill/eval",
             err, errlen)) return 1;
@@ -10180,22 +10180,22 @@ int ds4_sessions_eval_batch_with_prefill(
     }
 #endif
 
-    ds4_session_note_logits_dirty(prefill_session);
+    lgn2_session_note_logits_dirty(prefill_session);
     for (int i = 0; i < count; i++) {
-        ds4_session_note_logits_dirty(items[i].session);
+        lgn2_session_note_logits_dirty(items[i].session);
     }
 
-    int rc = ds4_session_sync(prefill_session, prefill_prompt, err, errlen);
+    int rc = lgn2_session_sync(prefill_session, prefill_prompt, err, errlen);
     if (rc != 0) return rc;
-    rc = ds4_sessions_eval_batch(items, count, err, errlen);
-    if (rc != 0) ds4_session_invalidate(prefill_session);
+    rc = lgn2_sessions_eval_batch(items, count, err, errlen);
+    if (rc != 0) lgn2_session_invalidate(prefill_session);
     return rc;
 }
 
 
-#ifndef DS4_NO_GPU
-static int ds4_session_eval_dflash_speculative_argmax(
-        ds4_session *s,
+#ifndef LGN2_NO_GPU
+static int lgn2_session_eval_dflash_speculative_argmax(
+        lgn2_session *s,
         int          first_token,
         int          max_tokens,
         int          eos_token,
@@ -10203,7 +10203,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
         int          accepted_cap,
         char        *err,
         size_t       errlen) {
-    ds4_engine *e = s->engine;
+    lgn2_engine *e = s->engine;
 #ifdef __APPLE__
     /* Do this before snapshotting target KV or touching the support graph so
      * an explicit SIMD32 request can never degrade into a split verifier. */
@@ -10213,10 +10213,10 @@ static int ds4_session_eval_dflash_speculative_argmax(
         return -1;
     }
 #endif
-    if (!ds4_session_dflash_enabled(s) || !s->dflash_synced ||
+    if (!lgn2_session_dflash_enabled(s) || !s->dflash_synced ||
         e->dflash_draft_tokens <= 0 || first_token == eos_token ||
         max_tokens <= 1 || accepted_cap <= 1) {
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+        if (lgn2_session_eval(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;
         return 1;
     }
@@ -10224,7 +10224,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
         const double decode_t0 = now_sec();
         const bool defer_inject = !s->dflash_suspended;
         s->dflash_defer_inject = defer_inject;
-        const int eval_rc = ds4_session_eval(s, first_token, err, errlen);
+        const int eval_rc = lgn2_session_eval(s, first_token, err, errlen);
         s->dflash_defer_inject = false;
         if (eval_rc != 0) return -1;
         const double decode_ms = (now_sec() - decode_t0) * 1000.0;
@@ -10238,7 +10238,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
             }
             if (s->dflash_baseline_tokens == 3u) {
                 s->dflash_baseline_ms /= 2.0;
-                if (!ds4_session_dflash_flush_deferred(s)) {
+                if (!lgn2_session_dflash_flush_deferred(s)) {
                     if (errlen) snprintf(err, errlen,
                                          "DFlash baseline injection failed");
                     return -1;
@@ -10253,7 +10253,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
          * than their first few tokens. Periodically spend one ordinary target
          * token to refresh the break-even estimate under current conditions. */
         const double decode_t0 = now_sec();
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+        if (lgn2_session_eval(s, first_token, err, errlen) != 0) return -1;
         const double current_ms =
             (now_sec() - decode_t0) * 1000.0 + s->last_sample_ms;
         s->dflash_baseline_ms =
@@ -10264,8 +10264,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
 
     uint32_t requested_draft = (uint32_t)e->dflash_draft_tokens;
-    if (requested_draft > DS4_DFLASH_BLOCK_SIZE - 1u) {
-        requested_draft = DS4_DFLASH_BLOCK_SIZE - 1u;
+    if (requested_draft > LGN2_DFLASH_BLOCK_SIZE - 1u) {
+        requested_draft = LGN2_DFLASH_BLOCK_SIZE - 1u;
     }
     if (s->dflash_active_draft == 0u) {
         s->dflash_active_draft = requested_draft < 3u ? requested_draft : 3u;
@@ -10286,7 +10286,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
         n_draft = (uint32_t)(room - 1);
     }
     if (n_draft == 0u) {
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+        if (lgn2_session_eval(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;
         return 1;
     }
@@ -10294,9 +10294,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
     const uint32_t pos0 = (uint32_t)s->checkpoint.len;
     uint32_t n_rows = n_draft + 1u;
     const uint32_t generated_draft = n_draft;
-    int draft_top[DS4_DFLASH_BLOCK_SIZE] = {0};
-    int target_top[DS4_DFLASH_BLOCK_SIZE] = {0};
-    int verify_tokens[DS4_DFLASH_BLOCK_SIZE] = {0};
+    int draft_top[LGN2_DFLASH_BLOCK_SIZE] = {0};
+    int target_top[LGN2_DFLASH_BLOCK_SIZE] = {0};
+    int verify_tokens[LGN2_DFLASH_BLOCK_SIZE] = {0};
     const float draft_p_min = e->dflash_p_min;
     bool draft_read_ok = false;
     bool snapshot_submitted = false;
@@ -10312,8 +10312,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
      * allowed to be discarded.  The replacement batch is queue-ordered after
      * this nonblocking flush, so restore can safely read the committed backup
      * later without a CPU wait here. */
-    if (ds4_gpu_flush_commands() == 0) {
-        ds4_session_dflash_quarantine(s);
+    if (lgn2_gpu_flush_commands() == 0) {
+        lgn2_session_dflash_quarantine(s);
         if (errlen) snprintf(err, errlen,
                              "Laguna verifier snapshot commit failed");
         return -1;
@@ -10330,9 +10330,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
                                   pos0,
                                   n_draft)) {
         fprintf(stderr,
-                "ds4: DFlash draft failed; falling back to Laguna decode\n");
+                "lgn2: DFlash draft failed; falling back to Laguna decode\n");
         const bool draft_discard_ok =
-            ds4_session_dflash_discard_owned_commands();
+            lgn2_session_dflash_discard_owned_commands();
         /* A successful pre-submit discard proves the support transaction was
          * never promoted.  Preserve the valid host checkpoint while disabling
          * another speculative attempt, matching the existing fallback path. */
@@ -10343,12 +10343,12 @@ static int ds4_session_eval_dflash_speculative_argmax(
         if (!draft_discard_ok) {
             /* A failed discard may have waited work that was already
              * submitted.  Do not let the old checkpoint certify it. */
-            ds4_session_dflash_quarantine(s);
+            lgn2_session_dflash_quarantine(s);
             if (errlen) snprintf(err, errlen,
                                  "DFlash draft rollback failed");
             return -1;
         }
-        if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+        if (lgn2_session_eval(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;
         return 1;
     }
@@ -10356,13 +10356,13 @@ static int ds4_session_eval_dflash_speculative_argmax(
     bool target_preencoded = false;
 #ifdef __APPLE__
     if (draft_p_min > 0.0f) {
-        if (ds4_gpu_flush_commands() == 0) {
+        if (lgn2_gpu_flush_commands() == 0) {
             /* The draft may already be in flight even when creation of the
              * replacement batch fails.  Treat this as terminal and poison
              * both sync and checkpoint state. */
-            const bool rollback_ok = !ds4_gpu_commands_active() ||
-                ds4_gpu_discard_commands() != 0;
-            ds4_session_dflash_quarantine(s);
+            const bool rollback_ok = !lgn2_gpu_commands_active() ||
+                lgn2_gpu_discard_commands() != 0;
+            lgn2_session_dflash_quarantine(s);
             if (errlen) snprintf(err, errlen, "%s",
                                  rollback_ok ?
                                  "DFlash draft batch flush failed" :
@@ -10375,8 +10375,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
          * reading confidence or discard it and encode the shorter verifier.
          */
         verify_tokens[0] = first_token;
-        ds4_laguna_feature_capture speculative_capture =
-            ds4_session_dflash_capture(s, 0, n_rows);
+        lgn2_laguna_feature_capture speculative_capture =
+            lgn2_session_dflash_capture(s, 0, n_rows);
         target_preencoded = laguna_graph_forward_batch(
             &s->laguna_graph,
             &e->model,
@@ -10393,9 +10393,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
             0);
         if (!target_preencoded) {
             const bool target_discard_ok =
-                ds4_session_dflash_discard_owned_commands();
+                lgn2_session_dflash_discard_owned_commands();
             if (!target_discard_ok) {
-                ds4_session_dflash_quarantine(s);
+                lgn2_session_dflash_quarantine(s);
                 if (errlen) snprintf(err, errlen,
                                      "DFlash target pre-encode rollback failed");
                 return -1;
@@ -10405,8 +10405,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
              * empty wait for that proof; carry the successful boundary state
              * forward explicitly. */
             if (snapshot_submitted) snapshot_completed = true;
-        } else if (!ds4_gpu_commands_active()) {
-            ds4_session_dflash_quarantine(s);
+        } else if (!lgn2_gpu_commands_active()) {
+            lgn2_session_dflash_quarantine(s);
             if (errlen) snprintf(err, errlen,
                                  "DFlash target pre-encode lost its batch");
             return -1;
@@ -10414,10 +10414,10 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
 #endif
     if (draft_p_min > 0.0f) {
-        float draft_probabilities[DS4_DFLASH_BLOCK_SIZE] = {0};
+        float draft_probabilities[LGN2_DFLASH_BLOCK_SIZE] = {0};
 #ifdef __APPLE__
         const bool snapshot_wait_ok =
-            ds4_gpu_wait_submitted_commands() != 0;
+            lgn2_gpu_wait_submitted_commands() != 0;
         /* wait_submitted_commands covers the committed snapshot and the
          * speculative draft CB in queue order.  A reported failure means the
          * backup must remain untrusted, even if the device completed some
@@ -10425,12 +10425,12 @@ static int ds4_session_eval_dflash_speculative_argmax(
         snapshot_completed = snapshot_wait_ok;
         draft_read_ok =
             snapshot_wait_ok &&
-            ds4_gpu_tensor_read(
+            lgn2_gpu_tensor_read(
                 s->dflash_graph.argmax,
                 0,
                 draft_top,
                 (uint64_t)n_rows * sizeof(draft_top[0])) != 0 &&
-            ds4_gpu_tensor_read(
+            lgn2_gpu_tensor_read(
                 s->dflash_graph.probabilities,
                 0,
                 draft_probabilities,
@@ -10438,16 +10438,16 @@ static int ds4_session_eval_dflash_speculative_argmax(
                     sizeof(draft_probabilities[0])) != 0;
 #else
         const bool snapshot_end_ok =
-            ds4_gpu_end_commands() != 0;
+            lgn2_gpu_end_commands() != 0;
         snapshot_completed = snapshot_end_ok;
         draft_read_ok =
             snapshot_end_ok &&
-            ds4_gpu_tensor_read(
+            lgn2_gpu_tensor_read(
                 s->dflash_graph.argmax,
                 0,
                 draft_top,
                 (uint64_t)n_rows * sizeof(draft_top[0])) != 0 &&
-            ds4_gpu_tensor_read(
+            lgn2_gpu_tensor_read(
                 s->dflash_graph.probabilities,
                 0,
                 draft_probabilities,
@@ -10462,7 +10462,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
             }
         }
         if (target_preencoded && n_draft != generated_draft) {
-            draft_read_ok = ds4_session_dflash_discard_owned_commands();
+            draft_read_ok = lgn2_session_dflash_discard_owned_commands();
 #ifdef __APPLE__
             /* The speculative target was discarded before completion; never
              * let its pre-encode snapshot certify the replacement target. */
@@ -10470,21 +10470,21 @@ static int ds4_session_eval_dflash_speculative_argmax(
 #endif
             target_preencoded = false;
         }
-#ifdef DS4_TEST_HOOKS
+#ifdef LGN2_TEST_HOOKS
         /* Fault-injection hook for the narrow confidence-read failure path:
          * the speculative target may already have been encoded/deferred, so
          * its evidence must be discarded before returning the error. */
         const char *confidence_fault =
-            getenv("DS4_TEST_DFLASH_CONFIDENCE_READ_FAIL");
+            getenv("LGN2_TEST_DFLASH_CONFIDENCE_READ_FAIL");
         if (confidence_fault && strcmp(confidence_fault, "1") == 0) {
             draft_read_ok = false;
         }
 #endif
         if (!draft_read_ok ||
-            (!target_preencoded && ds4_gpu_begin_commands() == 0)) {
-            const bool cleanup_ok = !ds4_gpu_commands_active() ?
-                true : ds4_session_dflash_discard_owned_commands();
-            ds4_session_dflash_quarantine(s);
+            (!target_preencoded && lgn2_gpu_begin_commands() == 0)) {
+            const bool cleanup_ok = !lgn2_gpu_commands_active() ?
+                true : lgn2_session_dflash_discard_owned_commands();
+            lgn2_session_dflash_quarantine(s);
             if (!cleanup_ok) {
                 if (errlen) snprintf(err, errlen,
                                      "DFlash confidence rollback failed");
@@ -10497,8 +10497,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
 
     verify_tokens[0] = first_token;
-    ds4_laguna_feature_capture capture =
-        ds4_session_dflash_capture(s, 0, n_rows);
+    lgn2_laguna_feature_capture capture =
+        lgn2_session_dflash_capture(s, 0, n_rows);
     bool verify_ok = target_preencoded;
     if (!target_preencoded) {
         verify_ok = laguna_graph_forward_batch(
@@ -10517,8 +10517,8 @@ static int ds4_session_eval_dflash_speculative_argmax(
                 0);
         if (!verify_ok) {
             const bool discard_ok =
-                ds4_session_dflash_discard_owned_commands();
-            ds4_session_dflash_quarantine(s);
+                lgn2_session_dflash_discard_owned_commands();
+            lgn2_session_dflash_quarantine(s);
             if (errlen) snprintf(err, errlen,
                                  discard_ok ?
                                  "DFlash target verifier failed" :
@@ -10528,7 +10528,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
     bool inject_ok = false;
     if (verify_ok) {
-        inject_ok = ds4_session_dflash_finish_capture(s, pos0, n_rows);
+        inject_ok = lgn2_session_dflash_finish_capture(s, pos0, n_rows);
         /* p_min == 0 intentionally keeps snapshot, verification, and
          * injection in one transaction.  finish_capture's successful
          * terminal boundary is the completion proof for that snapshot. */
@@ -10536,13 +10536,13 @@ static int ds4_session_eval_dflash_speculative_argmax(
     }
     bool target_read_ok = false;
     if (inject_ok) {
-        target_read_ok = ds4_gpu_tensor_read(
+        target_read_ok = lgn2_gpu_tensor_read(
             s->laguna_graph.spec_argmax,
             0,
             target_top,
             (uint64_t)n_rows * sizeof(target_top[0])) != 0;
         if (!draft_read_ok) {
-            draft_read_ok = ds4_gpu_tensor_read(
+            draft_read_ok = lgn2_gpu_tensor_read(
                 s->dflash_graph.argmax,
                 0,
                 draft_top,
@@ -10550,17 +10550,17 @@ static int ds4_session_eval_dflash_speculative_argmax(
         }
     }
     if (!verify_ok || !inject_ok || !target_read_ok || !draft_read_ok) {
-        ds4_session_dflash_quarantine(s);
+        lgn2_session_dflash_quarantine(s);
         if (snapshot_completed) {
-            const bool repair_ok = ds4_session_dflash_restore_snapshot(
+            const bool repair_ok = lgn2_session_dflash_restore_snapshot(
                 s, snapshot_completed, pos0, 0, n_rows);
             /* This is best-effort repair after a terminal verifier failure;
              * neither repair outcome may re-certify the host checkpoint. */
-            if (!repair_ok) ds4_session_dflash_quarantine(s);
+            if (!repair_ok) lgn2_session_dflash_quarantine(s);
         }
         if (errlen) snprintf(err, errlen,
                              "%s DFlash target verification failed",
-                             DS4_RUNTIME_NAME);
+                             LGN2_RUNTIME_NAME);
         return -1;
     }
 
@@ -10577,7 +10577,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
      * target cache after a successful verifier.  Refuse to use the backup if
      * its submitting command never acquired a successful completion proof. */
     if (!snapshot_submitted || !snapshot_completed) {
-        ds4_session_dflash_quarantine(s);
+        lgn2_session_dflash_quarantine(s);
         if (errlen) snprintf(err, errlen,
                              "DFlash verifier snapshot completion missing");
         return -1;
@@ -10587,10 +10587,10 @@ static int ds4_session_eval_dflash_speculative_argmax(
         &s->laguna_graph,
         (uint32_t)(n_accept - 1),
         s->logits);
-    const bool target_restore_ok = ds4_session_dflash_restore_snapshot(
+    const bool target_restore_ok = lgn2_session_dflash_restore_snapshot(
         s, snapshot_completed, pos0, (uint32_t)n_accept, n_rows);
     if (!logits_ok || !target_restore_ok) {
-        ds4_session_dflash_quarantine(s);
+        lgn2_session_dflash_quarantine(s);
         if (errlen) snprintf(err, errlen,
                              "DFlash verifier rollback failed");
         return -1;
@@ -10653,9 +10653,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
                     uint32_t next = s->dflash_active_draft * 2u + 1u;
                     if (next > requested_draft) next = requested_draft;
                     s->dflash_active_draft = next;
-                    if (getenv("DS4_DFLASH_TIMING") != NULL) {
+                    if (getenv("LGN2_DFLASH_TIMING") != NULL) {
                         fprintf(stderr,
-                                "ds4: DFlash testing draft depth %u "
+                                "lgn2: DFlash testing draft depth %u "
                                 "after %.2f ms/token at depth %u\n",
                                 next,
                                 spec_ms_per_token,
@@ -10665,9 +10665,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
                     if (s->dflash_cycles >= 10u) {
                         s->dflash_guard_decided = true;
                     }
-                    if (getenv("DS4_DFLASH_TIMING") != NULL) {
+                    if (getenv("LGN2_DFLASH_TIMING") != NULL) {
                         fprintf(stderr,
-                                "ds4: DFlash retaining draft depth %u; "
+                                "lgn2: DFlash retaining draft depth %u; "
                                 "only %u/5 calibration blocks were fully "
                                 "accepted\n",
                                 s->dflash_active_draft,
@@ -10680,7 +10680,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
                     const uint32_t rejected = s->dflash_active_draft;
                     s->dflash_active_draft = s->dflash_best_draft;
                     fprintf(stderr,
-                            "ds4: DFlash using draft depth %u; depth %u "
+                            "lgn2: DFlash using draft depth %u; depth %u "
                             "measured %.2f ms/token versus %.2f ms/token "
                             "at the best depth\n",
                             s->dflash_active_draft,
@@ -10695,7 +10695,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
             s->dflash_active_draft = s->dflash_best_draft;
             s->dflash_guard_decided = true;
             fprintf(stderr,
-                    "ds4: DFlash using draft depth %u; depth %u measured "
+                    "lgn2: DFlash using draft depth %u; depth %u measured "
                     "%.2f ms/token versus %.2f ms normal decode\n",
                     s->dflash_active_draft,
                     rejected,
@@ -10705,18 +10705,18 @@ static int ds4_session_eval_dflash_speculative_argmax(
                    cumulative_ms_per_token <
                        s->dflash_baseline_ms * 0.98) {
             s->dflash_guard_decided = true;
-            if (getenv("DS4_DFLASH_TIMING") != NULL) {
+            if (getenv("LGN2_DFLASH_TIMING") != NULL) {
                 fprintf(stderr,
-                        "ds4: DFlash retaining draft depth %u after local "
+                        "lgn2: DFlash retaining draft depth %u after local "
                         "slowdown; cumulative cost is %.2f ms/token\n",
                         s->dflash_active_draft,
                         cumulative_ms_per_token);
             }
         } else if (s->dflash_cycles < 10u &&
                    spec_ms_per_token < s->dflash_baseline_ms * 1.05) {
-            if (getenv("DS4_DFLASH_TIMING") != NULL) {
+            if (getenv("LGN2_DFLASH_TIMING") != NULL) {
                 fprintf(stderr,
-                        "ds4: DFlash calibration is within startup noise "
+                        "lgn2: DFlash calibration is within startup noise "
                         "(%.2f vs %.2f ms/token); measuring another window\n",
                         spec_ms_per_token,
                         s->dflash_baseline_ms);
@@ -10726,7 +10726,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
             s->dflash_suspended = true;
             s->dflash_synced = false;
             fprintf(stderr,
-                    "ds4: DFlash paused for this turn "
+                    "lgn2: DFlash paused for this turn "
                     "(%.2f ms/token speculative vs %.2f ms normal decode)\n",
                     spec_ms_per_token,
                     s->dflash_baseline_ms);
@@ -10750,7 +10750,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
             s->dflash_suspended = true;
             s->dflash_synced = false;
             fprintf(stderr,
-                    "ds4: DFlash paused for this turn after measured slowdown "
+                    "lgn2: DFlash paused for this turn after measured slowdown "
                     "(%.2f ms/token cumulative vs %.2f ms normal decode)\n",
                     cumulative_ms_per_token,
                     s->dflash_baseline_ms);
@@ -10759,9 +10759,9 @@ static int ds4_session_eval_dflash_speculative_argmax(
         s->dflash_window_tokens = 0;
         s->dflash_window_cycles = 0;
     }
-    if (getenv("DS4_DFLASH_TIMING") != NULL) {
+    if (getenv("LGN2_DFLASH_TIMING") != NULL) {
         fprintf(stderr,
-                "ds4: DFlash cycle drafted=%u verified=%u accepted=%d "
+                "lgn2: DFlash cycle drafted=%u verified=%u accepted=%d "
                 "pipeline=%.3f ms\n",
                 generated_draft,
                 n_draft,
@@ -10772,18 +10772,18 @@ static int ds4_session_eval_dflash_speculative_argmax(
 }
 #endif
 
-int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
+int lgn2_session_eval_speculative_argmax(lgn2_session *s, int first_token,
                                         int max_tokens, int eos_token,
                                         int *accepted, int accepted_cap,
                                         char *err, size_t errlen) {
     if (!s || !accepted || max_tokens <= 0 || accepted_cap <= 0) return 0;
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
     if (!laguna_metal_swa_gqa9_preflight(
             s->engine, "speculative eval", err, errlen)) return -1;
     if (!laguna_metal_router_simd_topk_preflight(
             s->engine, "speculative eval", err, errlen)) return -1;
     const bool laguna_router_simd_topk_trace =
-        ds4_session_is_laguna(s) &&
+        lgn2_session_is_laguna(s) &&
         laguna_metal_router_simd_topk_trace_enabled();
     if (laguna_router_simd_topk_trace) {
         /* DFlash may stage a support-model command stream before its target
@@ -10792,22 +10792,22 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
         laguna_metal_router_simd_topk_trace_reset();
     }
 #endif
-    ds4_session_note_logits_dirty(s);
-#ifdef DS4_NO_GPU
+    lgn2_session_note_logits_dirty(s);
+#ifdef LGN2_NO_GPU
     (void)s; (void)first_token; (void)max_tokens; (void)eos_token;
     (void)accepted; (void)accepted_cap;
     snprintf(err, errlen, "GPU support is not compiled in");
     return -1;
 #else
-    ds4_engine *e = s->engine;
-    if (ds4_session_is_laguna(s) &&
-        e->support_kind == DS4_SUPPORT_DFLASH) {
+    lgn2_engine *e = s->engine;
+    if (lgn2_session_is_laguna(s) &&
+        e->support_kind == LGN2_SUPPORT_DFLASH) {
         if (!laguna_dense_q8_gate_up_swiglu_preflight(
                     &e->model, &e->weights, NULL)) {
             if (err && errlen) {
                 snprintf(err, errlen,
                          "%s Laguna dense Q8 gate/up+SwiGLU preflight failed",
-                         DS4_RUNTIME_NAME);
+                         LGN2_RUNTIME_NAME);
             }
             return -1;
         }
@@ -10819,12 +10819,12 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
             if (err && errlen) {
                 snprintf(err, errlen,
                          "%s Laguna decode residual fusion preflight failed",
-                         DS4_RUNTIME_NAME);
+                         LGN2_RUNTIME_NAME);
             }
             return -1;
         }
 #endif
-        const int rc = ds4_session_eval_dflash_speculative_argmax(
+        const int rc = lgn2_session_eval_dflash_speculative_argmax(
             s,
             first_token,
             max_tokens,
@@ -10833,7 +10833,7 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
             accepted_cap,
             err,
             errlen);
-#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#if defined(__APPLE__) && !defined(LGN2_NO_GPU)
         if (laguna_router_simd_topk_trace) {
             /* The DFlash helper waits before reading/rolling back the target
              * graph, so this report is safe even when its first target batch
@@ -10845,77 +10845,77 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
         return rc;
     }
     /* Non-DFlash speculative requests use the ordinary target evaluator. */
-    if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
+    if (lgn2_session_eval(s, first_token, err, errlen) != 0) return -1;
     accepted[0] = first_token;
     return 1;
 #endif
 }
 
-void ds4_session_invalidate(ds4_session *s) {
+void lgn2_session_invalidate(lgn2_session *s) {
     if (!s) return;
     s->checkpoint_valid = false;
     s->checkpoint.len = 0;
-#ifndef DS4_NO_GPU
-    ds4_session_dflash_invalidate(s);
+#ifndef LGN2_NO_GPU
+    lgn2_session_dflash_invalidate(s);
 #endif
 }
 
-void ds4_session_rewind(ds4_session *s, int pos) {
+void lgn2_session_rewind(lgn2_session *s, int pos) {
     if (pos < 0) pos = 0;
     if (pos > s->checkpoint.len) pos = s->checkpoint.len;
     s->checkpoint.len = pos;
-#ifndef DS4_NO_GPU
-    ds4_session_dflash_invalidate(s);
+#ifndef LGN2_NO_GPU
+    lgn2_session_dflash_invalidate(s);
 #endif
 }
 
-int ds4_session_pos(ds4_session *s) {
+int lgn2_session_pos(lgn2_session *s) {
     return s->checkpoint.len;
 }
 
-int ds4_session_ctx(ds4_session *s) {
+int lgn2_session_ctx(lgn2_session *s) {
     return s->ctx_size;
 }
 
-int ds4_session_prefill_cap(ds4_session *s) {
+int lgn2_session_prefill_cap(lgn2_session *s) {
     return s ? (int)s->prefill_cap : 0;
 }
 
-#ifdef DS4_TEST_HOOKS
-#ifndef DS4_NO_GPU
-static int ds4_test_laguna_argmax_eval_stub(
-        ds4_session *s, int token, char *err, size_t errlen) {
-    if (!s || !s->logits || token != 23 || DS4_N_VOCAB <= 37u) {
+#ifdef LGN2_TEST_HOOKS
+#ifndef LGN2_NO_GPU
+static int lgn2_test_laguna_argmax_eval_stub(
+        lgn2_session *s, int token, char *err, size_t errlen) {
+    if (!s || !s->logits || token != 23 || LGN2_N_VOCAB <= 37u) {
         if (err && errlen) snprintf(err, errlen, "invalid Laguna test eval");
         return 1;
     }
-    for (uint32_t i = 0; i < DS4_N_VOCAB; i++) s->logits[i] = -2.0f;
+    for (uint32_t i = 0; i < LGN2_N_VOCAB; i++) s->logits[i] = -2.0f;
     s->logits[37] = 9.0f;
     return 0;
 }
 
-static int ds4_test_laguna_route_sync_stub(
-        ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
+static int lgn2_test_laguna_route_sync_stub(
+        lgn2_session *s, const lgn2_tokens *prompt, char *err, size_t errlen) {
     if (!s || !prompt || prompt->len <= 0) {
         if (err && errlen) snprintf(err, errlen, "invalid Laguna sync seam");
         return 1;
     }
-    ds4_tokens_copy(&s->checkpoint, prompt);
+    lgn2_tokens_copy(&s->checkpoint, prompt);
     s->checkpoint_valid = true;
     return 0;
 }
 
-static int ds4_test_laguna_route_sync_fail_stub(
-        ds4_session *s, const ds4_tokens *prompt, char *err, size_t errlen) {
+static int lgn2_test_laguna_route_sync_fail_stub(
+        lgn2_session *s, const lgn2_tokens *prompt, char *err, size_t errlen) {
     (void)s;
     (void)prompt;
     if (err && errlen) snprintf(err, errlen, "synthetic Laguna sync interruption");
-    return DS4_SESSION_SYNC_INTERRUPTED;
+    return LGN2_SESSION_SYNC_INTERRUPTED;
 }
 
-static int ds4_test_laguna_route_eval_stub(
-        ds4_session *s, int token, char *err, size_t errlen) {
-    if (!s || token < 0 || token >= (int)DS4_N_VOCAB) {
+static int lgn2_test_laguna_route_eval_stub(
+        lgn2_session *s, int token, char *err, size_t errlen) {
+    if (!s || token < 0 || token >= (int)LGN2_N_VOCAB) {
         if (err && errlen) snprintf(err, errlen, "invalid Laguna eval seam");
         return 1;
     }
@@ -10924,25 +10924,25 @@ static int ds4_test_laguna_route_eval_stub(
     return 0;
 }
 
-static int ds4_test_laguna_route_eval_fail_second_stub(
-        ds4_session *s, int token, char *err, size_t errlen) {
-    if (g_ds4_test_route_eval_calls == 2u) {
+static int lgn2_test_laguna_route_eval_fail_second_stub(
+        lgn2_session *s, int token, char *err, size_t errlen) {
+    if (g_lgn2_test_route_eval_calls == 2u) {
         (void)s;
         (void)token;
         if (err && errlen) snprintf(err, errlen, "synthetic Laguna decode failure");
         return 1;
     }
-    return ds4_test_laguna_route_eval_stub(s, token, err, errlen);
+    return lgn2_test_laguna_route_eval_stub(s, token, err, errlen);
 }
 
 /* Exercise the public mixed-prefill and argmax boundaries with model-free
  * Laguna leaves.  The route hooks replace only sync/eval after validation;
  * the raw-evaluator guard makes any accidental generic dispatch observable. */
-bool ds4_test_laguna_session_routes(void) {
-    ds4_test_laguna_shape_scope shape_scope;
-    ds4_test_laguna_shape_scope_begin(&shape_scope);
+bool lgn2_test_laguna_session_routes(void) {
+    lgn2_test_laguna_shape_scope shape_scope;
+    lgn2_test_laguna_shape_scope_begin(&shape_scope);
 
-    const char *saved_swa_env = getenv("DS4_METAL_LAGUNA_SWA_GQA9");
+    const char *saved_swa_env = getenv("LGN2_METAL_LAGUNA_SWA_GQA9");
     char *saved_swa_value = NULL;
     if (saved_swa_env) {
         const size_t n = strlen(saved_swa_env) + 1u;
@@ -10951,16 +10951,16 @@ bool ds4_test_laguna_session_routes(void) {
     }
     bool env_ready = true;
     if (!saved_swa_env || saved_swa_value) {
-        env_ready = setenv("DS4_METAL_LAGUNA_SWA_GQA9", "0", 1) == 0;
+        env_ready = setenv("LGN2_METAL_LAGUNA_SWA_GQA9", "0", 1) == 0;
     }
 
-    ds4_engine engine;
+    lgn2_engine engine;
     memset(&engine, 0, sizeof(engine));
-    engine.support_kind = DS4_SUPPORT_NONE;
+    engine.support_kind = LGN2_SUPPORT_NONE;
     engine.metal_ready = true;
 
-    ds4_session prefill;
-    ds4_session decoder;
+    lgn2_session prefill;
+    lgn2_session decoder;
     memset(&prefill, 0, sizeof(prefill));
     memset(&decoder, 0, sizeof(decoder));
     prefill.engine = &engine;
@@ -10969,85 +10969,85 @@ bool ds4_test_laguna_session_routes(void) {
     decoder.engine = &engine;
     decoder.ctx_size = 8;
     decoder.checkpoint_valid = true;
-    decoder.logits = calloc(DS4_N_VOCAB, sizeof(decoder.logits[0]));
+    decoder.logits = calloc(LGN2_N_VOCAB, sizeof(decoder.logits[0]));
 
     const int prompt_tokens[] = {11};
-    const ds4_tokens prompt = {
+    const lgn2_tokens prompt = {
         .v = (int *)(uintptr_t)prompt_tokens,
         .len = 1,
         .cap = 1,
     };
-    ds4_decode_item item = { .session = &decoder, .token = 17 };
-    const bool laguna_session = ds4_session_is_laguna(&prefill) &&
-                                ds4_session_is_laguna(&decoder);
-    g_ds4_test_argmax_eval_fn = ds4_test_laguna_argmax_eval_stub;
-    g_ds4_test_argmax_laguna_eval_calls = 0;
-    g_ds4_test_route_sync_fn = ds4_test_laguna_route_sync_stub;
-    g_ds4_test_route_eval_fn = ds4_test_laguna_route_eval_stub;
-    g_ds4_test_route_sync_calls = 0;
-    g_ds4_test_route_eval_calls = 0;
-    g_ds4_test_route_generic_eval_calls = 0;
-    g_ds4_test_route_generic_access_forbidden = true;
+    lgn2_decode_item item = { .session = &decoder, .token = 17 };
+    const bool laguna_session = lgn2_session_is_laguna(&prefill) &&
+                                lgn2_session_is_laguna(&decoder);
+    g_lgn2_test_argmax_eval_fn = lgn2_test_laguna_argmax_eval_stub;
+    g_lgn2_test_argmax_laguna_eval_calls = 0;
+    g_lgn2_test_route_sync_fn = lgn2_test_laguna_route_sync_stub;
+    g_lgn2_test_route_eval_fn = lgn2_test_laguna_route_eval_stub;
+    g_lgn2_test_route_sync_calls = 0;
+    g_lgn2_test_route_eval_calls = 0;
+    g_lgn2_test_route_generic_eval_calls = 0;
+    g_lgn2_test_route_generic_access_forbidden = true;
     char err[128] = {0};
-    const int mixed_rc = ds4_sessions_eval_batch_with_prefill(
+    const int mixed_rc = lgn2_sessions_eval_batch_with_prefill(
         &item, 1, &prefill, &prompt, err, sizeof(err));
-    const int argmax = ds4_session_eval_argmax(
+    const int argmax = lgn2_session_eval_argmax(
         &decoder, 23, err, sizeof(err));
     const bool decoder_valid_before_null_spec = decoder.checkpoint_valid;
     const int decoder_len_before_null_spec = decoder.checkpoint.len;
     const int decoder_token_before_null_spec =
         decoder.checkpoint.len > 0 ? decoder.checkpoint.v[0] : 0;
     const uint32_t route_eval_calls_before_null_spec =
-        g_ds4_test_route_eval_calls;
+        g_lgn2_test_route_eval_calls;
     const uint32_t generic_eval_calls_before_null_spec =
-        g_ds4_test_route_generic_eval_calls;
+        g_lgn2_test_route_generic_eval_calls;
     const uint64_t logits_gen_before_null_spec = decoder.logits_gen;
-    const int null_spec_rc = ds4_session_eval_speculative_argmax(
+    const int null_spec_rc = lgn2_session_eval_speculative_argmax(
         &decoder, 23, 1, -1, NULL, 1, err, sizeof(err));
     const bool route_success =
         env_ready && laguna_session && decoder.logits && mixed_rc == 0 &&
         prefill.checkpoint_valid && prefill.checkpoint.len == prompt.len &&
         decoder.checkpoint_valid && decoder.checkpoint.len == 1 &&
         argmax == 37 &&
-        g_ds4_test_route_sync_calls == 1u &&
-        g_ds4_test_route_eval_calls == 1u &&
-        g_ds4_test_argmax_laguna_eval_calls == 1u &&
-        g_ds4_test_route_generic_eval_calls == 0u &&
+        g_lgn2_test_route_sync_calls == 1u &&
+        g_lgn2_test_route_eval_calls == 1u &&
+        g_lgn2_test_argmax_laguna_eval_calls == 1u &&
+        g_lgn2_test_route_generic_eval_calls == 0u &&
         null_spec_rc == 0 && decoder.logits_gen == logits_gen_before_null_spec &&
         decoder.checkpoint_valid == decoder_valid_before_null_spec &&
         decoder.checkpoint.len == decoder_len_before_null_spec &&
         (decoder.checkpoint.len == 0 ||
          decoder.checkpoint.v[0] == decoder_token_before_null_spec) &&
-        g_ds4_test_route_eval_calls == route_eval_calls_before_null_spec &&
-        g_ds4_test_route_generic_eval_calls == generic_eval_calls_before_null_spec &&
+        g_lgn2_test_route_eval_calls == route_eval_calls_before_null_spec &&
+        g_lgn2_test_route_generic_eval_calls == generic_eval_calls_before_null_spec &&
         err[0] == '\0';
 
     /* Invalid transactions must be rejected before any member's logits
      * generation counter is dirtied.  This covers both the serialized batch
      * validator and the mixed-prefill prefix/context validator. */
-    ds4_session invalid_decoder;
+    lgn2_session invalid_decoder;
     memset(&invalid_decoder, 0, sizeof(invalid_decoder));
     invalid_decoder.engine = &engine;
     invalid_decoder.ctx_size = 8;
     invalid_decoder.checkpoint_valid = true;
-    ds4_decode_item invalid_items[2] = {
+    lgn2_decode_item invalid_items[2] = {
         { .session = &decoder, .token = 18 },
         { .session = &invalid_decoder, .token = -1 },
     };
     const uint64_t decoder_gen_before_invalid_batch = decoder.logits_gen;
     const uint64_t invalid_gen_before_invalid_batch = invalid_decoder.logits_gen;
     char invalid_err[128] = {0};
-    const int invalid_batch_rc = ds4_sessions_eval_batch(
+    const int invalid_batch_rc = lgn2_sessions_eval_batch(
         invalid_items, 2, invalid_err, sizeof(invalid_err));
     const int bad_prompt_tokens[] = {99, 12};
-    const ds4_tokens bad_prompt = {
+    const lgn2_tokens bad_prompt = {
         .v = (int *)(uintptr_t)bad_prompt_tokens,
         .len = 2,
         .cap = 2,
     };
     const uint64_t prefill_gen_before_invalid_mixed = prefill.logits_gen;
     const uint64_t decoder_gen_before_invalid_mixed = decoder.logits_gen;
-    const int invalid_mixed_rc = ds4_sessions_eval_batch_with_prefill(
+    const int invalid_mixed_rc = lgn2_sessions_eval_batch_with_prefill(
         &item, 1, &prefill, &bad_prompt, invalid_err, sizeof(invalid_err));
     const bool invalid_input_ok =
         invalid_batch_rc != 0 && invalid_mixed_rc != 0 &&
@@ -11058,8 +11058,8 @@ bool ds4_test_laguna_session_routes(void) {
 
     /* A real serialized decode failure after one member has advanced must
      * invalidate every member, so no caller can resume from a partial batch. */
-    ds4_session batch_a;
-    ds4_session batch_b;
+    lgn2_session batch_a;
+    lgn2_session batch_b;
     memset(&batch_a, 0, sizeof(batch_a));
     memset(&batch_b, 0, sizeof(batch_b));
     batch_a.engine = &engine;
@@ -11068,18 +11068,18 @@ bool ds4_test_laguna_session_routes(void) {
     batch_b.ctx_size = 8;
     batch_a.checkpoint_valid = true;
     batch_b.checkpoint_valid = true;
-    ds4_decode_item failing_items[2] = {
+    lgn2_decode_item failing_items[2] = {
         { .session = &batch_a, .token = 18 },
         { .session = &batch_b, .token = 19 },
     };
-    g_ds4_test_route_eval_fn = ds4_test_laguna_route_eval_fail_second_stub;
-    g_ds4_test_route_eval_calls = 0;
+    g_lgn2_test_route_eval_fn = lgn2_test_laguna_route_eval_fail_second_stub;
+    g_lgn2_test_route_eval_calls = 0;
     memset(invalid_err, 0, sizeof(invalid_err));
-    const int decode_fail_rc = ds4_sessions_eval_batch(
+    const int decode_fail_rc = lgn2_sessions_eval_batch(
         failing_items, 2, invalid_err, sizeof(invalid_err));
     const bool decode_failure_ok =
         decode_fail_rc != 0 &&
-        g_ds4_test_route_eval_calls == 2u &&
+        g_lgn2_test_route_eval_calls == 2u &&
         !batch_a.checkpoint_valid && batch_a.checkpoint.len == 0 &&
         !batch_b.checkpoint_valid && batch_b.checkpoint.len == 0;
 
@@ -11087,7 +11087,7 @@ bool ds4_test_laguna_session_routes(void) {
      * checkpoint validity/positions, invokes no decoder, and does not trigger
      * the all-members invalidation reserved for a decode failure. */
     const int sync_fail_prompt_tokens[] = {11, 12};
-    const ds4_tokens sync_fail_prompt = {
+    const lgn2_tokens sync_fail_prompt = {
         .v = (int *)(uintptr_t)sync_fail_prompt_tokens,
         .len = 2,
         .cap = 2,
@@ -11100,19 +11100,19 @@ bool ds4_test_laguna_session_routes(void) {
     const int decoder_len_before_sync_fail = decoder.checkpoint.len;
     const int decoder_token_before_sync_fail =
         decoder.checkpoint.len > 0 ? decoder.checkpoint.v[0] : 0;
-    g_ds4_test_route_sync_fn = ds4_test_laguna_route_sync_fail_stub;
-    g_ds4_test_route_eval_fn = ds4_test_laguna_route_eval_stub;
-    g_ds4_test_route_sync_calls = 0;
-    g_ds4_test_route_eval_calls = 0;
+    g_lgn2_test_route_sync_fn = lgn2_test_laguna_route_sync_fail_stub;
+    g_lgn2_test_route_eval_fn = lgn2_test_laguna_route_eval_stub;
+    g_lgn2_test_route_sync_calls = 0;
+    g_lgn2_test_route_eval_calls = 0;
     memset(invalid_err, 0, sizeof(invalid_err));
-    const int sync_fail_rc = ds4_sessions_eval_batch_with_prefill(
+    const int sync_fail_rc = lgn2_sessions_eval_batch_with_prefill(
         &item, 1, &prefill, &sync_fail_prompt,
         invalid_err, sizeof(invalid_err));
     const bool sync_failure_ok =
-        sync_fail_rc == DS4_SESSION_SYNC_INTERRUPTED &&
-        g_ds4_test_route_sync_calls == 1u &&
-        g_ds4_test_route_eval_calls == 0u &&
-        g_ds4_test_route_generic_eval_calls == 0u &&
+        sync_fail_rc == LGN2_SESSION_SYNC_INTERRUPTED &&
+        g_lgn2_test_route_sync_calls == 1u &&
+        g_lgn2_test_route_eval_calls == 0u &&
+        g_lgn2_test_route_generic_eval_calls == 0u &&
         prefill.checkpoint_valid == prefill_valid_before_sync_fail &&
         prefill.checkpoint.len == prefill_len_before_sync_fail &&
         (prefill.checkpoint.len == 0 ||
@@ -11124,63 +11124,63 @@ bool ds4_test_laguna_session_routes(void) {
     const bool route_ok = route_success && invalid_input_ok &&
                           decode_failure_ok && sync_failure_ok;
 
-    g_ds4_test_argmax_eval_fn = NULL;
-    g_ds4_test_argmax_laguna_eval_calls = 0;
-    g_ds4_test_route_sync_fn = NULL;
-    g_ds4_test_route_eval_fn = NULL;
-    g_ds4_test_route_sync_calls = 0;
-    g_ds4_test_route_eval_calls = 0;
-    g_ds4_test_route_generic_eval_calls = 0;
-    g_ds4_test_route_generic_access_forbidden = false;
+    g_lgn2_test_argmax_eval_fn = NULL;
+    g_lgn2_test_argmax_laguna_eval_calls = 0;
+    g_lgn2_test_route_sync_fn = NULL;
+    g_lgn2_test_route_eval_fn = NULL;
+    g_lgn2_test_route_sync_calls = 0;
+    g_lgn2_test_route_eval_calls = 0;
+    g_lgn2_test_route_generic_eval_calls = 0;
+    g_lgn2_test_route_generic_access_forbidden = false;
     token_vec_free(&prefill.checkpoint);
     token_vec_free(&decoder.checkpoint);
     free(decoder.logits);
     if (saved_swa_value) {
-        (void)setenv("DS4_METAL_LAGUNA_SWA_GQA9", saved_swa_value, 1);
+        (void)setenv("LGN2_METAL_LAGUNA_SWA_GQA9", saved_swa_value, 1);
     } else if (!saved_swa_env) {
-        (void)unsetenv("DS4_METAL_LAGUNA_SWA_GQA9");
+        (void)unsetenv("LGN2_METAL_LAGUNA_SWA_GQA9");
     }
     free(saved_swa_value);
 
-    ds4_test_laguna_shape_scope_end(&shape_scope);
+    lgn2_test_laguna_shape_scope_end(&shape_scope);
     return route_ok;
 }
 
 /* Exercise both sides of the storage boundary.  The direct lgn_* leg proves
  * that base storage teardown leaves extension/diagnostic state alone; the
  * wrapper leg proves the complete owner still gets an idempotent full free. */
-bool ds4_test_laguna_graph_lifecycle(void) {
+bool lgn2_test_laguna_graph_lifecycle(void) {
     _Static_assert(sizeof(lgn_gpu_graph) == 2128u,
                    "Laguna graph layout changed after capacity contraction");
-    const ds4_shape saved_shape = g_ds4_shape;
-    g_ds4_shape = *lgn_model_shape();
+    const lgn2_shape saved_shape = g_lgn2_shape;
+    g_lgn2_shape = *lgn_model_shape();
 
     uint64_t handles_before = 0;
     uint64_t bytes_before = 0;
-    if (!ds4_gpu_test_tensor_tracking_state(&handles_before,
+    if (!lgn2_gpu_test_tensor_tracking_state(&handles_before,
                                             &bytes_before)) {
-        g_ds4_shape = saved_shape;
+        g_lgn2_shape = saved_shape;
         return false;
     }
 
     bool ok = true;
     lgn_gpu_graph direct = {0};
-    ds4_shape wrong_family = g_ds4_shape;
-    wrong_family.family = DS4_MODEL_FAMILY_DEEPSEEK4;
+    lgn2_shape wrong_family = g_lgn2_shape;
+    wrong_family.family = LGN2_MODEL_FAMILY_DEEPSEEK4;
     direct.dense_q8_fusion_enabled = true;
     direct.dense_q8_pending.decode_mid_fused = 77u;
     int32_t shared_id = -1;
     float shared_weight = 0.0f;
-    if (lgn_graph_alloc(&direct, 0u, &g_ds4_shape) ||
+    if (lgn_graph_alloc(&direct, 0u, &g_lgn2_shape) ||
         lgn_graph_alloc(&direct, 1u, &wrong_family) ||
-        !lgn_graph_alloc(&direct, 1u, &g_ds4_shape) ||
+        !lgn_graph_alloc(&direct, 1u, &g_lgn2_shape) ||
         !direct.tokens || !direct.cur || !direct.logits ||
         direct.cache_cap[0] != 1u || direct.cache_cap[1] != 1u ||
         direct.cache_cap[47] != 1u || !direct.dense_q8_fusion_enabled ||
         direct.dense_q8_pending.decode_mid_fused != 77u ||
-        !ds4_gpu_tensor_read(direct.shared_selected, 0, &shared_id,
+        !lgn2_gpu_tensor_read(direct.shared_selected, 0, &shared_id,
                              sizeof(shared_id)) ||
-        !ds4_gpu_tensor_read(direct.shared_weight, 0, &shared_weight,
+        !lgn2_gpu_tensor_read(direct.shared_weight, 0, &shared_weight,
                              sizeof(shared_weight)) ||
         shared_id != 0 || shared_weight != 1.0f) {
         ok = false;
@@ -11190,7 +11190,7 @@ bool ds4_test_laguna_graph_lifecycle(void) {
          direct.dense_q8_pending.decode_mid_fused == 77u;
     memset(&direct, 0, sizeof(direct));
 
-    ds4_laguna_gpu_graph wrapped = {0};
+    lgn2_laguna_gpu_graph wrapped = {0};
     if (!laguna_graph_alloc(&wrapped, 1u) ||
         !wrapped.tokens || !wrapped.cur || !wrapped.logits ||
         wrapped.cache_cap[0] != 1u || wrapped.cache_cap[1] != 1u ||
@@ -11207,33 +11207,33 @@ bool ds4_test_laguna_graph_lifecycle(void) {
 
     uint64_t handles_after = 0;
     uint64_t bytes_after = 0;
-    ok = ok && ds4_gpu_test_tensor_tracking_state(&handles_after,
+    ok = ok && lgn2_gpu_test_tensor_tracking_state(&handles_after,
                                                     &bytes_after) &&
          handles_after == handles_before && bytes_after == bytes_before;
-    g_ds4_shape = saved_shape;
+    g_lgn2_shape = saved_shape;
     return ok;
 }
 
 /* Verify the DFlash module owns a complete storage-only owner while the
- * ds4.c wrapper still owns admission and failure diagnostics. */
-bool ds4_test_laguna_dflash_graph_lifecycle(void) {
+ * lgn2_engine.c wrapper still owns admission and failure diagnostics. */
+bool lgn2_test_laguna_dflash_graph_lifecycle(void) {
     _Static_assert(sizeof(lgn_dflash_graph) == 328u,
                    "DFlash graph layout changed on Apple");
-    const ds4_shape saved_shape = g_ds4_shape;
-    g_ds4_shape = *lgn_model_shape();
+    const lgn2_shape saved_shape = g_lgn2_shape;
+    g_lgn2_shape = *lgn_model_shape();
     const lgn_dflash_profile *profile = lgn_dflash_profile_get();
 
     uint64_t handles_before = 0;
     uint64_t bytes_before = 0;
     if (!profile ||
-        !ds4_gpu_test_tensor_tracking_state(&handles_before, &bytes_before)) {
-        g_ds4_shape = saved_shape;
+        !lgn2_gpu_test_tensor_tracking_state(&handles_before, &bytes_before)) {
+        g_lgn2_shape = saved_shape;
         return false;
     }
 
     bool ok = true;
     lgn_dflash_graph partial = {0};
-    partial.key_cache[0] = ds4_gpu_tensor_alloc(16u);
+    partial.key_cache[0] = lgn2_gpu_tensor_alloc(16u);
     if (!partial.key_cache[0]) ok = false;
     lgn_dflash_graph_free(&partial);
     lgn_dflash_graph_free(&partial);
@@ -11278,7 +11278,7 @@ bool ds4_test_laguna_dflash_graph_lifecycle(void) {
 #undef LGN_DFLASH_TEST_REQUIRED
     uint64_t scratch_sum = 0;
 #define LGN_DFLASH_TEST_SUM(name) \
-    do { scratch_sum += ds4_gpu_tensor_bytes(direct.name); } while (0)
+    do { scratch_sum += lgn2_gpu_tensor_bytes(direct.name); } while (0)
     LGN_DFLASH_TEST_SUM(features);
     LGN_DFLASH_TEST_SUM(encoder);
     LGN_DFLASH_TEST_SUM(encoder_norm);
@@ -11308,14 +11308,14 @@ bool ds4_test_laguna_dflash_graph_lifecycle(void) {
     uint64_t kv_sum = 0;
     for (uint32_t il = 0; il < LGN_DFLASH_N_LAYER; il++) {
         if (!direct.key_cache[il] || !direct.value_cache[il]) ok = false;
-        kv_sum += ds4_gpu_tensor_bytes(direct.key_cache[il]);
-        kv_sum += ds4_gpu_tensor_bytes(direct.value_cache[il]);
+        kv_sum += lgn2_gpu_tensor_bytes(direct.key_cache[il]);
+        kv_sum += lgn2_gpu_tensor_bytes(direct.value_cache[il]);
     }
     if (direct.scratch_bytes != scratch_sum ||
         direct.kv_bytes != kv_sum ||
         direct.scratch_bytes == 0u || direct.kv_bytes == 0u ||
         direct.features == NULL || direct.key_cache[0] == NULL ||
-        ds4_gpu_commands_active() != 0) {
+        lgn2_gpu_commands_active() != 0) {
         ok = false;
     }
     lgn_dflash_graph_free(&direct);
@@ -11324,15 +11324,15 @@ bool ds4_test_laguna_dflash_graph_lifecycle(void) {
         if (((const unsigned char *)&direct)[i] != 0u) ok = false;
     }
 
-    ds4_dflash_gpu_graph wrapped = {0};
-    ds4_shape wrong_family = g_ds4_shape;
-    wrong_family.family = DS4_MODEL_FAMILY_DEEPSEEK4;
-    g_ds4_shape = wrong_family;
+    lgn2_dflash_gpu_graph wrapped = {0};
+    lgn2_shape wrong_family = g_lgn2_shape;
+    wrong_family.family = LGN2_MODEL_FAMILY_DEEPSEEK4;
+    g_lgn2_shape = wrong_family;
     if (dflash_graph_alloc(&wrapped)) ok = false;
     for (size_t i = 0; i < sizeof(wrapped); i++) {
         if (((const unsigned char *)&wrapped)[i] != 0u) ok = false;
     }
-    g_ds4_shape = *lgn_model_shape();
+    g_lgn2_shape = *lgn_model_shape();
     if (!dflash_graph_alloc(&wrapped) ||
         wrapped.feature_cap != LGN_DFLASH_CACHE_CAP ||
         wrapped.block_cap != LGN_DFLASH_BLOCK_SIZE ||
@@ -11350,10 +11350,10 @@ bool ds4_test_laguna_dflash_graph_lifecycle(void) {
 
     uint64_t handles_after = 0;
     uint64_t bytes_after = 0;
-    ok = ok && ds4_gpu_test_tensor_tracking_state(&handles_after,
+    ok = ok && lgn2_gpu_test_tensor_tracking_state(&handles_after,
                                                     &bytes_after) &&
          handles_after == handles_before && bytes_after == bytes_before;
-    g_ds4_shape = saved_shape;
+    g_lgn2_shape = saved_shape;
     return ok;
 }
 #ifdef __APPLE__
@@ -11367,11 +11367,11 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
         TEST_CACHE_CAP = 2u,
     };
     const size_t test_row_bytes =
-        (size_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
-    ds4_laguna_gpu_graph target;
+        (size_t)LGN2_N_HEAD_KV * LGN2_N_HEAD_DIM * sizeof(uint16_t);
+    lgn2_laguna_gpu_graph target;
     memset(&target, 0, sizeof(target));
-    ds4_gpu_tensor *mutation_key = NULL;
-    ds4_gpu_tensor *mutation_value = NULL;
+    lgn2_gpu_tensor *mutation_key = NULL;
+    lgn2_gpu_tensor *mutation_value = NULL;
     uint8_t cache_host[TEST_CACHE_CAP * test_row_bytes];
     uint8_t value_host[TEST_CACHE_CAP * test_row_bytes];
     uint8_t current_key[test_row_bytes];
@@ -11392,16 +11392,16 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
         mutated_key[i] = 0x91u;
         mutated_value[i] = 0xa2u;
     }
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        if (!ds4_laguna_layer_is_swa(il)) continue;
+    for (uint32_t il = 0; il < LGN2_N_LAYER; il++) {
+        if (!lgn2_laguna_layer_is_swa(il)) continue;
         if (chosen == UINT32_MAX) chosen = il;
         target.cache_cap[il] = TEST_CACHE_CAP;
-        target.key_cache[il] = ds4_gpu_tensor_alloc(sizeof(cache_host));
-        target.value_cache[il] = ds4_gpu_tensor_alloc(sizeof(value_host));
+        target.key_cache[il] = lgn2_gpu_tensor_alloc(sizeof(cache_host));
+        target.value_cache[il] = lgn2_gpu_tensor_alloc(sizeof(value_host));
         if (!target.key_cache[il] || !target.value_cache[il] ||
-            !ds4_gpu_tensor_write(target.key_cache[il], 0,
+            !lgn2_gpu_tensor_write(target.key_cache[il], 0,
                                    cache_host, sizeof(cache_host)) ||
-            !ds4_gpu_tensor_write(target.value_cache[il], 0,
+            !lgn2_gpu_tensor_write(target.value_cache[il], 0,
                                    value_host, sizeof(value_host))) {
             goto cleanup;
         }
@@ -11409,47 +11409,47 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
     if (chosen == UINT32_MAX || !laguna_graph_ensure_spec_scratch(&target)) {
         goto cleanup;
     }
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        if (!ds4_laguna_layer_is_swa(il)) continue;
+    for (uint32_t il = 0; il < LGN2_N_LAYER; il++) {
+        if (!lgn2_laguna_layer_is_swa(il)) continue;
         if (!target.spec_key_backup[il] ||
             !target.spec_value_backup[il] ||
-            !ds4_gpu_tensor_write(target.spec_key_backup[il],
+            !lgn2_gpu_tensor_write(target.spec_key_backup[il],
                                   0, mutated_key, test_row_bytes) ||
-            !ds4_gpu_tensor_write(target.spec_value_backup[il],
+            !lgn2_gpu_tensor_write(target.spec_value_backup[il],
                                   0, mutated_value, test_row_bytes)) {
             goto cleanup;
         }
     }
-    mutation_key = ds4_gpu_tensor_alloc(test_row_bytes);
-    mutation_value = ds4_gpu_tensor_alloc(test_row_bytes);
+    mutation_key = lgn2_gpu_tensor_alloc(test_row_bytes);
+    mutation_value = lgn2_gpu_tensor_alloc(test_row_bytes);
     if (!mutation_key || !mutation_value ||
-        !ds4_gpu_tensor_write(mutation_key, 0, mutated_key, test_row_bytes) ||
-        !ds4_gpu_tensor_write(mutation_value, 0, mutated_value, test_row_bytes)) {
+        !lgn2_gpu_tensor_write(mutation_key, 0, mutated_key, test_row_bytes) ||
+        !lgn2_gpu_tensor_write(mutation_value, 0, mutated_value, test_row_bytes)) {
         goto cleanup;
     }
 
     if (!laguna_graph_spec_snapshot(&target, 1u, 1u) ||
-        !ds4_gpu_commands_active() ||
-        ds4_gpu_flush_commands() != 1 ||
-        !ds4_gpu_commands_active() ||
-        !ds4_gpu_tensor_copy(target.key_cache[chosen], test_row_bytes,
+        !lgn2_gpu_commands_active() ||
+        lgn2_gpu_flush_commands() != 1 ||
+        !lgn2_gpu_commands_active() ||
+        !lgn2_gpu_tensor_copy(target.key_cache[chosen], test_row_bytes,
                              mutation_key, 0, test_row_bytes) ||
-        !ds4_gpu_tensor_copy(target.value_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_copy(target.value_cache[chosen], test_row_bytes,
                              mutation_value, 0, test_row_bytes) ||
-        ds4_gpu_discard_commands() != 1 ||
-        ds4_gpu_commands_active() != 0 ||
+        lgn2_gpu_discard_commands() != 1 ||
+        lgn2_gpu_commands_active() != 0 ||
         !laguna_graph_spec_restore(&target, 1u, 0u, 1u) ||
-        ds4_gpu_wait_submitted_commands() != 1 ||
-        !ds4_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
+        lgn2_gpu_wait_submitted_commands() != 1 ||
+        !lgn2_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
                              readback, test_row_bytes) ||
         memcmp(readback, current_key, test_row_bytes) != 0 ||
-        !ds4_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
                              readback, test_row_bytes) ||
         memcmp(readback, current_value, test_row_bytes) != 0 ||
-        !ds4_gpu_tensor_read(target.key_cache[chosen], 0,
+        !lgn2_gpu_tensor_read(target.key_cache[chosen], 0,
                              readback, test_row_bytes) ||
         memcmp(readback, cache_host, test_row_bytes) != 0 ||
-        !ds4_gpu_tensor_read(target.value_cache[chosen], 0,
+        !lgn2_gpu_tensor_read(target.value_cache[chosen], 0,
                              readback, test_row_bytes) ||
         memcmp(readback, value_host, test_row_bytes) != 0) {
         goto cleanup;
@@ -11460,17 +11460,17 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
         cache_host[test_row_bytes + i] = 0x73u;
         value_host[test_row_bytes + i] = 0x83u;
     }
-    if (!ds4_gpu_tensor_write(target.key_cache[chosen], 0,
+    if (!lgn2_gpu_tensor_write(target.key_cache[chosen], 0,
                               cache_host, sizeof(cache_host)) ||
-        !ds4_gpu_tensor_write(target.value_cache[chosen], 0,
+        !lgn2_gpu_tensor_write(target.value_cache[chosen], 0,
                               value_host, sizeof(value_host)) ||
         !laguna_graph_spec_snapshot(&target, 1u, 1u) ||
-        ds4_gpu_discard_commands() != 1 ||
-        ds4_gpu_commands_active() != 0 ||
-        !ds4_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
+        lgn2_gpu_discard_commands() != 1 ||
+        lgn2_gpu_commands_active() != 0 ||
+        !lgn2_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
                              readback, test_row_bytes) ||
         memcmp(readback, cache_host + test_row_bytes, test_row_bytes) != 0 ||
-        !ds4_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
                              readback, test_row_bytes) ||
         memcmp(readback, value_host + test_row_bytes, test_row_bytes) != 0) {
         goto cleanup;
@@ -11485,73 +11485,73 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
         cache_host[test_row_bytes + i] = 0x73u;
         value_host[test_row_bytes + i] = 0x83u;
     }
-    if (!ds4_gpu_tensor_write(target.key_cache[chosen], 0,
+    if (!lgn2_gpu_tensor_write(target.key_cache[chosen], 0,
                               cache_host, sizeof(cache_host)) ||
-        !ds4_gpu_tensor_write(target.value_cache[chosen], 0,
+        !lgn2_gpu_tensor_write(target.value_cache[chosen], 0,
                               value_host, sizeof(value_host))) {
         goto cleanup;
     }
     const uint64_t wait_target_generated_before =
-        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count();
     const uint64_t wait_target_consumed_before =
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
     const uint64_t wait_target_family0_before =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u);
     const uint64_t wait_target_family1_before =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u);
     const uint64_t wait_support_generated_before =
-        ds4_gpu_laguna_rope_support_atlas_completed_generated_count();
+        lgn2_gpu_laguna_rope_support_atlas_completed_generated_count();
     const uint64_t wait_support_consumed_before =
-        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
+        lgn2_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
     if (!laguna_graph_spec_snapshot(&target, 1u, 1u) ||
-        !ds4_gpu_commands_active() ||
-        !ds4_gpu_laguna_rope_atlas_generate(1u, 1u) ||
-        ds4_gpu_flush_commands() != 1 ||
-        !ds4_gpu_commands_active()) {
+        !lgn2_gpu_commands_active() ||
+        !lgn2_gpu_laguna_rope_atlas_generate(1u, 1u) ||
+        lgn2_gpu_flush_commands() != 1 ||
+        !lgn2_gpu_commands_active()) {
         goto cleanup;
     }
-    ds4_gpu_test_inject_wait_submitted_failure();
-    const bool snapshot_wait_ok = ds4_gpu_wait_submitted_commands() != 0;
-    ds4_session failed_wait_state;
+    lgn2_gpu_test_inject_wait_submitted_failure();
+    const bool snapshot_wait_ok = lgn2_gpu_wait_submitted_commands() != 0;
+    lgn2_session failed_wait_state;
     memset(&failed_wait_state, 0, sizeof(failed_wait_state));
     failed_wait_state.checkpoint_valid = true;
     failed_wait_state.dflash_synced = true;
     if (snapshot_wait_ok ||
-        !ds4_gpu_commands_active() ||
-        ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+        !lgn2_gpu_commands_active() ||
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count() !=
             wait_target_generated_before ||
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
             wait_target_consumed_before ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u) !=
             wait_target_family0_before ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u) !=
             wait_target_family1_before ||
-        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_generated_count() !=
             wait_support_generated_before ||
-        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
             wait_support_consumed_before) {
         goto cleanup;
     }
-    ds4_session_dflash_quarantine(&failed_wait_state);
+    lgn2_session_dflash_quarantine(&failed_wait_state);
     if (failed_wait_state.checkpoint_valid || failed_wait_state.dflash_synced ||
-        !ds4_gpu_tensor_copy(target.key_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_copy(target.key_cache[chosen], test_row_bytes,
                              mutation_key, 0, test_row_bytes) ||
-        !ds4_gpu_tensor_copy(target.value_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_copy(target.value_cache[chosen], test_row_bytes,
                              mutation_value, 0, test_row_bytes) ||
-        ds4_gpu_end_commands() != 1 ||
-        ds4_gpu_commands_active() ||
-        !ds4_session_dflash_restore_snapshot(
+        lgn2_gpu_end_commands() != 1 ||
+        lgn2_gpu_commands_active() ||
+        !lgn2_session_dflash_restore_snapshot(
             &failed_wait_state, snapshot_wait_ok, 1u, 0u, 1u) ||
-        !ds4_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
                              readback, test_row_bytes) ||
         memcmp(readback, mutated_key, test_row_bytes) != 0 ||
-        !ds4_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
                              readback, test_row_bytes) ||
         memcmp(readback, mutated_value, test_row_bytes) != 0 ||
-        !ds4_gpu_tensor_read(target.key_cache[chosen], 0,
+        !lgn2_gpu_tensor_read(target.key_cache[chosen], 0,
                              readback, test_row_bytes) ||
         memcmp(readback, cache_host, test_row_bytes) != 0 ||
-        !ds4_gpu_tensor_read(target.value_cache[chosen], 0,
+        !lgn2_gpu_tensor_read(target.value_cache[chosen], 0,
                              readback, test_row_bytes) ||
         memcmp(readback, value_host, test_row_bytes) != 0) {
         goto cleanup;
@@ -11561,77 +11561,77 @@ static bool dflash_graph_test_spec_snapshot_restore(void) {
      * before it publishes checkpoint/DFlash state.  Put real atlas evidence
      * in an earlier pending CB, then inject a post-completion wait failure
      * while the accepted-prefix restore is submitted behind it. */
-    if (!ds4_gpu_tensor_write(target.key_cache[chosen], 0,
+    if (!lgn2_gpu_tensor_write(target.key_cache[chosen], 0,
                               cache_host, sizeof(cache_host)) ||
-        !ds4_gpu_tensor_write(target.value_cache[chosen], 0,
+        !lgn2_gpu_tensor_write(target.value_cache[chosen], 0,
                               value_host, sizeof(value_host)) ||
         !laguna_graph_spec_snapshot(&target, 1u, 1u) ||
-        !ds4_gpu_commands_active() ||
-        ds4_gpu_flush_commands() != 1 ||
-        !ds4_gpu_commands_active() ||
-        ds4_gpu_discard_commands() != 1 ||
-        ds4_gpu_commands_active() ||
-        ds4_gpu_wait_submitted_commands() != 1 ||
-        !ds4_gpu_tensor_write(target.key_cache[chosen], test_row_bytes,
+        !lgn2_gpu_commands_active() ||
+        lgn2_gpu_flush_commands() != 1 ||
+        !lgn2_gpu_commands_active() ||
+        lgn2_gpu_discard_commands() != 1 ||
+        lgn2_gpu_commands_active() ||
+        lgn2_gpu_wait_submitted_commands() != 1 ||
+        !lgn2_gpu_tensor_write(target.key_cache[chosen], test_row_bytes,
                               mutated_key, test_row_bytes) ||
-        !ds4_gpu_tensor_write(target.value_cache[chosen], test_row_bytes,
+        !lgn2_gpu_tensor_write(target.value_cache[chosen], test_row_bytes,
                               mutated_value, test_row_bytes)) {
         goto cleanup;
     }
     const uint64_t restore_target_generated_before =
-        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count();
     const uint64_t restore_target_consumed_before =
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
     const uint64_t restore_target_family0_before =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u);
     const uint64_t restore_target_family1_before =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u);
     const uint64_t restore_support_generated_before =
-        ds4_gpu_laguna_rope_support_atlas_completed_generated_count();
+        lgn2_gpu_laguna_rope_support_atlas_completed_generated_count();
     const uint64_t restore_support_consumed_before =
-        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
-    if (ds4_gpu_begin_commands() != 1 ||
-        !ds4_gpu_laguna_rope_atlas_generate(1u, 1u) ||
-        ds4_gpu_submit_commands() != 1 ||
-        ds4_gpu_commands_active()) {
+        lgn2_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
+    if (lgn2_gpu_begin_commands() != 1 ||
+        !lgn2_gpu_laguna_rope_atlas_generate(1u, 1u) ||
+        lgn2_gpu_submit_commands() != 1 ||
+        lgn2_gpu_commands_active()) {
         goto cleanup;
     }
-    ds4_session accepted_wait_state;
+    lgn2_session accepted_wait_state;
     memset(&accepted_wait_state, 0, sizeof(accepted_wait_state));
     accepted_wait_state.laguna_graph = target;
     accepted_wait_state.checkpoint_valid = true;
     accepted_wait_state.dflash_synced = true;
-    ds4_gpu_test_inject_wait_submitted_failure();
+    lgn2_gpu_test_inject_wait_submitted_failure();
     const bool accepted_restore_ok =
-        ds4_session_dflash_restore_snapshot(
+        lgn2_session_dflash_restore_snapshot(
             &accepted_wait_state, true, 1u, 0u, 1u);
     if (accepted_restore_ok) goto cleanup;
-    ds4_session_dflash_quarantine(&accepted_wait_state);
+    lgn2_session_dflash_quarantine(&accepted_wait_state);
     if (accepted_wait_state.checkpoint_valid ||
         accepted_wait_state.dflash_synced ||
-        ds4_gpu_commands_active() ||
-        ds4_gpu_wait_submitted_commands() != 1 ||
-        ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+        lgn2_gpu_commands_active() ||
+        lgn2_gpu_wait_submitted_commands() != 1 ||
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count() !=
             restore_target_generated_before ||
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
             restore_target_consumed_before ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u) !=
             restore_target_family0_before ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u) !=
             restore_target_family1_before ||
-        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_generated_count() !=
             restore_support_generated_before ||
-        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
             restore_support_consumed_before) {
         goto cleanup;
     }
     ok = true;
 
 cleanup:
-    if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
-    (void)ds4_gpu_wait_submitted_commands();
-    ds4_gpu_tensor_free(mutation_value);
-    ds4_gpu_tensor_free(mutation_key);
+    if (lgn2_gpu_commands_active()) (void)lgn2_gpu_discard_commands();
+    (void)lgn2_gpu_wait_submitted_commands();
+    lgn2_gpu_tensor_free(mutation_value);
+    lgn2_gpu_tensor_free(mutation_key);
     laguna_graph_free(&target);
     return ok;
 }
@@ -11643,16 +11643,16 @@ cleanup:
  * queued writes without fabricating a model graph or moving scheduler policy
  * into the storage module. */
 static bool dflash_graph_test_record_layers(
-        ds4_dflash_gpu_graph *g,
-        ds4_gpu_tensor       *source,
+        lgn2_dflash_gpu_graph *g,
+        lgn2_gpu_tensor       *source,
         const void           *model_map,
         uint64_t              model_size,
         uint64_t              k_weight_offset,
-        ds4_gpu_tensor       *key_cache,
-        ds4_gpu_tensor       *value_cache,
+        lgn2_gpu_tensor       *key_cache,
+        lgn2_gpu_tensor       *value_cache,
         uint32_t              cache_cap,
-        ds4_gpu_tensor       *target_q,
-        ds4_gpu_tensor       *target_k,
+        lgn2_gpu_tensor       *target_q,
+        lgn2_gpu_tensor       *target_k,
         uint32_t              fail_after_layer) {
     const uint32_t n_tokens = 1u;
     const uint32_t n_head = 8u;
@@ -11669,17 +11669,17 @@ static bool dflash_graph_test_record_layers(
         !key_cache || !value_cache || !target_q || !target_k ||
         cache_cap == 0u ||
         !dflash_graph_commands_active() ||
-        ds4_gpu_tensor_bytes(source) < support_row_bytes ||
-        ds4_gpu_tensor_bytes(g->cur) < support_row_bytes ||
-        ds4_gpu_tensor_bytes(g->next) < support_row_bytes ||
-        ds4_gpu_tensor_bytes(key_cache) < cache_bytes ||
-        ds4_gpu_tensor_bytes(value_cache) < cache_bytes ||
-        ds4_gpu_tensor_bytes(target_q) < target_q_bytes ||
-        ds4_gpu_tensor_bytes(target_k) < target_k_bytes) {
+        lgn2_gpu_tensor_bytes(source) < support_row_bytes ||
+        lgn2_gpu_tensor_bytes(g->cur) < support_row_bytes ||
+        lgn2_gpu_tensor_bytes(g->next) < support_row_bytes ||
+        lgn2_gpu_tensor_bytes(key_cache) < cache_bytes ||
+        lgn2_gpu_tensor_bytes(value_cache) < cache_bytes ||
+        lgn2_gpu_tensor_bytes(target_q) < target_q_bytes ||
+        lgn2_gpu_tensor_bytes(target_k) < target_k_bytes) {
         return false;
     }
-    ds4_gpu_tensor *saved_cur = g->cur;
-    ds4_gpu_tensor *saved_next = g->next;
+    lgn2_gpu_tensor *saved_cur = g->cur;
+    lgn2_gpu_tensor *saved_next = g->next;
     const uint32_t rope_pos0 = 1u;
     for (uint32_t il = 0; il < 2u; il++) {
         if (il == fail_after_layer) {
@@ -11687,9 +11687,9 @@ static bool dflash_graph_test_record_layers(
             return false;
         }
         const uint32_t pos0 = il + 1u;
-        if (!ds4_gpu_tensor_copy(
+        if (!lgn2_gpu_tensor_copy(
                 g->cur, 0, source, 0, support_row_bytes) ||
-            !ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
+            !lgn2_gpu_laguna_head_rms_norm_rope_support_tensor(
                 g->cur,
                 model_map,
                 model_size,
@@ -11707,7 +11707,7 @@ static bool dflash_graph_test_record_layers(
                 0.0f,
                 0.0f,
                 1e-6f) ||
-            !ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+            !lgn2_gpu_laguna_qk_head_rms_norm_rope_tensor(
                 target_q,
                 target_k,
                 model_map,
@@ -11730,7 +11730,7 @@ static bool dflash_graph_test_record_layers(
                 0.0f,
                 0.0f,
                 1e-6f) ||
-            !ds4_gpu_dflash_commit_kv_tensor(
+            !lgn2_gpu_dflash_commit_kv_tensor(
                 key_cache,
                 value_cache,
                 g->cur,
@@ -11743,26 +11743,26 @@ static bool dflash_graph_test_record_layers(
             dflash_graph_restore_cursors(g, saved_cur, saved_next);
             return false;
         }
-        ds4_gpu_tensor *tmp = g->cur;
+        lgn2_gpu_tensor *tmp = g->cur;
         g->cur = g->next;
         g->next = tmp;
     }
     return true;
 }
 
-bool ds4_test_laguna_dflash_command_ownership(void) {
-    const char *atlas_env_name = "DS4_METAL_LAGUNA_ROPE_ATLAS";
-    const char *simd_env_name = "DS4_METAL_LAGUNA_QK_NORM_ROPE_SIMD32";
+bool lgn2_test_laguna_dflash_command_ownership(void) {
+    const char *atlas_env_name = "LGN2_METAL_LAGUNA_ROPE_ATLAS";
+    const char *simd_env_name = "LGN2_METAL_LAGUNA_QK_NORM_ROPE_SIMD32";
     const char *saved_atlas_value = getenv(atlas_env_name);
     const char *saved_simd_value = getenv(simd_env_name);
     char *saved_atlas = NULL;
     char *saved_simd = NULL;
     if (saved_atlas_value) {
-        saved_atlas = ds4_strdup(saved_atlas_value);
+        saved_atlas = lgn2_strdup(saved_atlas_value);
         if (!saved_atlas) return false;
     }
     if (saved_simd_value) {
-        saved_simd = ds4_strdup(saved_simd_value);
+        saved_simd = lgn2_strdup(saved_simd_value);
         if (!saved_simd) {
             free(saved_atlas);
             return false;
@@ -11770,17 +11770,17 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
     }
 
     bool ok = false;
-    const ds4_shape saved_shape = g_ds4_shape;
-    g_ds4_shape = *lgn_model_shape();
+    const lgn2_shape saved_shape = g_lgn2_shape;
+    g_lgn2_shape = *lgn_model_shape();
     void *model_raw = NULL;
-    ds4_gpu_tensor *source = NULL;
-    ds4_gpu_tensor *cache = NULL;
-    ds4_gpu_tensor *next = NULL;
-    ds4_gpu_tensor *key_cache = NULL;
-    ds4_gpu_tensor *value_cache = NULL;
-    ds4_gpu_tensor *target_q = NULL;
-    ds4_gpu_tensor *target_k = NULL;
-    ds4_dflash_gpu_graph graph;
+    lgn2_gpu_tensor *source = NULL;
+    lgn2_gpu_tensor *cache = NULL;
+    lgn2_gpu_tensor *next = NULL;
+    lgn2_gpu_tensor *key_cache = NULL;
+    lgn2_gpu_tensor *value_cache = NULL;
+    lgn2_gpu_tensor *target_q = NULL;
+    lgn2_gpu_tensor *target_k = NULL;
+    lgn2_dflash_gpu_graph graph;
     memset(&graph, 0, sizeof(graph));
     enum {
         TEST_VALUES = 8 * 128,
@@ -11810,11 +11810,11 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
 
     if (setenv(atlas_env_name, "1", 1) != 0 ||
         setenv(simd_env_name, "0", 1) != 0 ||
-        ds4_gpu_laguna_rope_atlas_plan_reset_for_test() != 1 ||
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test() != 1 ||
-        ds4_gpu_laguna_qk_head_norm_rope_simd32_preflight(
+        lgn2_gpu_laguna_rope_atlas_plan_reset_for_test() != 1 ||
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test() != 1 ||
+        lgn2_gpu_laguna_qk_head_norm_rope_simd32_preflight(
             48u, 8u, 128u, 64u) != 0 ||
-        ds4_gpu_laguna_rope_atlas_preflight(
+        lgn2_gpu_laguna_rope_atlas_preflight(
             72u, 8u, 128u, 128u) != 1) {
         goto cleanup;
     }
@@ -11835,27 +11835,27 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
     float *k_weight = (float *)((uint8_t *)model_raw + k_weight_offset);
     for (size_t i = 0; i < TARGET_Q_VALUES; i++) q_weight[i] = 1.0f;
     for (size_t i = 0; i < TEST_VALUES; i++) k_weight[i] = 1.0f;
-    if (!ds4_gpu_set_model_map(model_raw, model_size)) goto cleanup;
+    if (!lgn2_gpu_set_model_map(model_raw, model_size)) goto cleanup;
 
     const uint64_t tensor_bytes = sizeof(source_host);
     const uint64_t cache_bytes = sizeof(key_poison);
     const uint64_t target_q_bytes = sizeof(target_q_host);
-    source = ds4_gpu_tensor_alloc(tensor_bytes);
-    cache = ds4_gpu_tensor_alloc(tensor_bytes);
-    next = ds4_gpu_tensor_alloc(tensor_bytes);
-    key_cache = ds4_gpu_tensor_alloc(cache_bytes);
-    value_cache = ds4_gpu_tensor_alloc(cache_bytes);
-    target_q = ds4_gpu_tensor_alloc(target_q_bytes);
-    target_k = ds4_gpu_tensor_alloc(tensor_bytes);
+    source = lgn2_gpu_tensor_alloc(tensor_bytes);
+    cache = lgn2_gpu_tensor_alloc(tensor_bytes);
+    next = lgn2_gpu_tensor_alloc(tensor_bytes);
+    key_cache = lgn2_gpu_tensor_alloc(cache_bytes);
+    value_cache = lgn2_gpu_tensor_alloc(cache_bytes);
+    target_q = lgn2_gpu_tensor_alloc(target_q_bytes);
+    target_k = lgn2_gpu_tensor_alloc(tensor_bytes);
     if (!source || !cache || !next || !key_cache || !value_cache ||
         !target_q || !target_k ||
-        !ds4_gpu_tensor_write(source, 0, source_host, tensor_bytes) ||
-        !ds4_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
-        !ds4_gpu_tensor_write(next, 0, poison_host, tensor_bytes) ||
-        !ds4_gpu_tensor_write(key_cache, 0, key_poison, cache_bytes) ||
-        !ds4_gpu_tensor_write(value_cache, 0, value_poison, cache_bytes) ||
-        !ds4_gpu_tensor_write(target_q, 0, target_q_host, target_q_bytes) ||
-        !ds4_gpu_tensor_write(target_k, 0, source_host, tensor_bytes)) {
+        !lgn2_gpu_tensor_write(source, 0, source_host, tensor_bytes) ||
+        !lgn2_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
+        !lgn2_gpu_tensor_write(next, 0, poison_host, tensor_bytes) ||
+        !lgn2_gpu_tensor_write(key_cache, 0, key_poison, cache_bytes) ||
+        !lgn2_gpu_tensor_write(value_cache, 0, value_poison, cache_bytes) ||
+        !lgn2_gpu_tensor_write(target_q, 0, target_q_host, target_q_bytes) ||
+        !lgn2_gpu_tensor_write(target_k, 0, source_host, tensor_bytes)) {
         goto cleanup;
     }
     graph.cur = cache;
@@ -11871,72 +11871,72 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
     }
 
     const uint64_t target_generated_before =
-        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count();
     const uint64_t target_consumed_before =
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
     const uint64_t target_family0_before =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u);
     const uint64_t target_family1_before =
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u);
     const uint64_t support_generated_before =
-        ds4_gpu_laguna_rope_support_atlas_completed_generated_count();
+        lgn2_gpu_laguna_rope_support_atlas_completed_generated_count();
     const uint64_t support_consumed_before =
-        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
-    if (ds4_gpu_begin_commands() != 1 ||
+        lgn2_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
+    if (lgn2_gpu_begin_commands() != 1 ||
         dflash_graph_test_record_layers(
             &graph, source, model_raw, model_size, k_weight_offset,
             key_cache, value_cache, TEST_CACHE_CAP, target_q, target_k, 1u) ||
         graph.cur != cache || graph.next != next ||
-        ds4_gpu_discard_commands() != 1 ||
-        ds4_gpu_commands_active() != 0 ||
-        ds4_gpu_tensor_read(cache, 0, readback, tensor_bytes) == 0 ||
+        lgn2_gpu_discard_commands() != 1 ||
+        lgn2_gpu_commands_active() != 0 ||
+        lgn2_gpu_tensor_read(cache, 0, readback, tensor_bytes) == 0 ||
         memcmp(readback, poison_host, tensor_bytes) != 0 ||
-        ds4_gpu_tensor_read(next, 0, readback, tensor_bytes) == 0 ||
+        lgn2_gpu_tensor_read(next, 0, readback, tensor_bytes) == 0 ||
         memcmp(readback, poison_host, tensor_bytes) != 0 ||
-        ds4_gpu_tensor_read(key_cache, 0, key_readback, cache_bytes) == 0 ||
+        lgn2_gpu_tensor_read(key_cache, 0, key_readback, cache_bytes) == 0 ||
         memcmp(key_readback, key_poison, cache_bytes) != 0 ||
-        ds4_gpu_tensor_read(value_cache, 0, value_readback, cache_bytes) == 0 ||
+        lgn2_gpu_tensor_read(value_cache, 0, value_readback, cache_bytes) == 0 ||
         memcmp(value_readback, value_poison, cache_bytes) != 0 ||
-        ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+        lgn2_gpu_laguna_rope_atlas_completed_generated_count() !=
             target_generated_before ||
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
             target_consumed_before ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u) !=
             target_family0_before ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u) !=
             target_family1_before ||
-        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_generated_count() !=
             support_generated_before ||
-        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
             support_consumed_before) {
         goto cleanup;
     }
 
-    if (!ds4_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
-        !ds4_gpu_tensor_write(next, 0, poison_host, tensor_bytes) ||
-        !ds4_gpu_tensor_write(key_cache, 0, key_poison, cache_bytes) ||
-        !ds4_gpu_tensor_write(value_cache, 0, value_poison, cache_bytes) ||
-        ds4_gpu_begin_commands() != 1 ||
+    if (!lgn2_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
+        !lgn2_gpu_tensor_write(next, 0, poison_host, tensor_bytes) ||
+        !lgn2_gpu_tensor_write(key_cache, 0, key_poison, cache_bytes) ||
+        !lgn2_gpu_tensor_write(value_cache, 0, value_poison, cache_bytes) ||
+        lgn2_gpu_begin_commands() != 1 ||
         !dflash_graph_test_record_layers(
             &graph, source, model_raw, model_size, k_weight_offset,
             key_cache, value_cache, TEST_CACHE_CAP, target_q, target_k,
             UINT32_MAX) ||
         !dflash_graph_commands_active() ||
-        ds4_gpu_flush_commands() != 1 ||
+        lgn2_gpu_flush_commands() != 1 ||
         !dflash_graph_commands_active() ||
-        ds4_gpu_wait_submitted_commands() != 1 ||
-        ds4_gpu_discard_commands() != 1 ||
-        ds4_gpu_commands_active() != 0 ||
+        lgn2_gpu_wait_submitted_commands() != 1 ||
+        lgn2_gpu_discard_commands() != 1 ||
+        lgn2_gpu_commands_active() != 0 ||
         graph.cur != cache || graph.next != next ||
-        ds4_gpu_tensor_read(cache, 0, readback, tensor_bytes) == 0 ||
+        lgn2_gpu_tensor_read(cache, 0, readback, tensor_bytes) == 0 ||
         memcmp(readback, poison_host, tensor_bytes) == 0) {
         goto cleanup;
     }
     float next_readback[TEST_VALUES];
-    if (ds4_gpu_tensor_read(next, 0, next_readback, tensor_bytes) == 0 ||
+    if (lgn2_gpu_tensor_read(next, 0, next_readback, tensor_bytes) == 0 ||
         memcmp(next_readback, poison_host, tensor_bytes) == 0 ||
-        ds4_gpu_tensor_read(key_cache, 0, key_readback, cache_bytes) == 0 ||
-        ds4_gpu_tensor_read(value_cache, 0, value_readback, cache_bytes) == 0) {
+        lgn2_gpu_tensor_read(key_cache, 0, key_readback, cache_bytes) == 0 ||
+        lgn2_gpu_tensor_read(value_cache, 0, value_readback, cache_bytes) == 0) {
         goto cleanup;
     }
     for (uint32_t row = 0; row < TEST_CACHE_CAP; row++) {
@@ -11950,34 +11950,34 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
             TEST_VALUES * sizeof(uint16_t)) != 0;
         if (intended != key_changed || intended != value_changed) goto cleanup;
     }
-    if (ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+    if (lgn2_gpu_laguna_rope_atlas_completed_generated_count() !=
             target_generated_before + 1u ||
-        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
             target_consumed_before + 2u ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(0u) !=
             target_family0_before ||
-        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+        lgn2_gpu_laguna_rope_atlas_completed_family_count(1u) !=
             target_family1_before + 2u ||
-        ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_generated_count() !=
             support_generated_before + 1u ||
-        ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
+        lgn2_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
             support_consumed_before + 2u) {
         goto cleanup;
     }
     ok = true;
 
 cleanup:
-    if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
-    (void)ds4_gpu_wait_submitted_commands();
-    (void)ds4_gpu_laguna_rope_atlas_plan_reset_for_test();
-    (void)ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
-    ds4_gpu_tensor_free(target_k);
-    ds4_gpu_tensor_free(target_q);
-    ds4_gpu_tensor_free(value_cache);
-    ds4_gpu_tensor_free(key_cache);
-    ds4_gpu_tensor_free(next);
-    ds4_gpu_tensor_free(cache);
-    ds4_gpu_tensor_free(source);
+    if (lgn2_gpu_commands_active()) (void)lgn2_gpu_discard_commands();
+    (void)lgn2_gpu_wait_submitted_commands();
+    (void)lgn2_gpu_laguna_rope_atlas_plan_reset_for_test();
+    (void)lgn2_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+    lgn2_gpu_tensor_free(target_k);
+    lgn2_gpu_tensor_free(target_q);
+    lgn2_gpu_tensor_free(value_cache);
+    lgn2_gpu_tensor_free(key_cache);
+    lgn2_gpu_tensor_free(next);
+    lgn2_gpu_tensor_free(cache);
+    lgn2_gpu_tensor_free(source);
     free(model_raw);
     if (saved_atlas) {
         (void)setenv(atlas_env_name, saved_atlas, 1);
@@ -11991,7 +11991,7 @@ cleanup:
     } else {
         (void)unsetenv(simd_env_name);
     }
-    g_ds4_shape = saved_shape;
+    g_lgn2_shape = saved_shape;
     return ok;
 }
 #endif

@@ -1,4 +1,4 @@
-struct ds4_metal_args_dsv4_router_select_one {
+struct lgn2_metal_args_dsv4_router_select_one {
     uint32_t has_bias;
     uint32_t hash_mode;
     uint32_t use_token_buffer;
@@ -6,7 +6,7 @@ struct ds4_metal_args_dsv4_router_select_one {
     uint32_t hash_rows;
 };
 
-struct ds4_metal_args_glm_router_select_one {
+struct lgn2_metal_args_glm_router_select_one {
     uint32_t n_expert;
     uint32_t n_expert_used;
     float    expert_weight_scale;
@@ -33,7 +33,7 @@ kernel void kernel_dsv4_router_weights_one(
     w[tid] = p[s[tid]] / sum * 1.5f;
 }
 
-static inline float ds4_glm_router_sigmoid(float x) {
+static inline float lgn2_glm_router_sigmoid(float x) {
     if (x >= 0.0f) {
         const float e = exp(-x);
         return 1.0f / (1.0f + e);
@@ -43,7 +43,7 @@ static inline float ds4_glm_router_sigmoid(float x) {
     }
 }
 
-static inline bool ds4_glm_router_better(
+static inline bool lgn2_glm_router_better(
         threadgroup const float *scores,
         int32_t                  a,
         int32_t                  b) {
@@ -52,7 +52,7 @@ static inline bool ds4_glm_router_better(
     return sa > sb || (sa == sb && a < b);
 }
 
-static inline bool ds4_glm_router_better_values(
+static inline bool lgn2_glm_router_better_values(
         float   sa,
         int32_t a,
         float   sb,
@@ -61,7 +61,7 @@ static inline bool ds4_glm_router_better_values(
 }
 
 kernel void kernel_glm_router_select_one(
-        constant ds4_metal_args_glm_router_select_one & args,
+        constant lgn2_metal_args_glm_router_select_one & args,
         device const float *logits,
         device const float *bias,
         device int32_t *selected,
@@ -79,7 +79,7 @@ kernel void kernel_glm_router_select_one(
 
     const uint n_expert = min(args.n_expert, 256u);
     const bool active = tid < n_expert;
-    const float p = active ? ds4_glm_router_sigmoid(token_logits[tid]) : 0.0f;
+    const float p = active ? lgn2_glm_router_sigmoid(token_logits[tid]) : 0.0f;
     if (active) token_probs[tid] = p;
     sel_scores[tid] = active ? p + bias[tid] : -INFINITY;
     idx[tid] = (int32_t)tid;
@@ -93,8 +93,8 @@ kernel void kernel_glm_router_select_one(
                 const int32_t b = idx[other];
                 const bool descending = (tid & k) == 0;
                 const bool swap = descending
-                    ? ds4_glm_router_better(sel_scores, b, a)
-                    : ds4_glm_router_better(sel_scores, a, b);
+                    ? lgn2_glm_router_better(sel_scores, b, a)
+                    : lgn2_glm_router_better(sel_scores, a, b);
                 if (swap) {
                     idx[tid] = b;
                     idx[other] = a;
@@ -152,7 +152,7 @@ static void glm_router_select_one_simd_body(
     const uint n_expert = min(n_expert_arg, 256u);
     const bool active = tid < n_expert;
 
-    const float p = active ? ds4_glm_router_sigmoid(token_logits[tid]) : 0.0f;
+    const float p = active ? lgn2_glm_router_sigmoid(token_logits[tid]) : 0.0f;
     const float score = active ? p + bias[tid] : -INFINITY;
     if (active) token_probs[tid] = p;
     sel_scores[tid] = score;
@@ -187,8 +187,8 @@ static void glm_router_select_one_simd_body(
                     const int32_t b = idx[other];
                     const bool descending = (tid & k) == 0;
                     const bool swap = descending
-                        ? ds4_glm_router_better(sel_scores, b, a)
-                        : ds4_glm_router_better(sel_scores, a, b);
+                        ? lgn2_glm_router_better(sel_scores, b, a)
+                        : lgn2_glm_router_better(sel_scores, a, b);
                     if (swap) {
                         idx[tid] = b;
                         idx[other] = a;
@@ -232,7 +232,7 @@ static void glm_router_select_one_simd_body(
         float winner_score = local_scores[0];
         int32_t winner_id = local_ids[0];
         for (uint j = 1; j < 8u; j++) {
-            if (ds4_glm_router_better_values(
+            if (lgn2_glm_router_better_values(
                     local_scores[j], local_ids[j], winner_score, winner_id)) {
                 winner_score = local_scores[j];
                 winner_id = local_ids[j];
@@ -242,7 +242,7 @@ static void glm_router_select_one_simd_body(
         for (ushort step = 16; step > 0; step >>= 1) {
             const float peer_score = simd_shuffle_xor(winner_score, step);
             const int32_t peer_id = simd_shuffle_xor(winner_id, step);
-            if (ds4_glm_router_better_values(
+            if (lgn2_glm_router_better_values(
                     peer_score, peer_id, winner_score, winner_id)) {
                 winner_score = peer_score;
                 winner_id = peer_id;
@@ -271,7 +271,7 @@ static void glm_router_select_one_simd_body(
 }
 
 kernel void kernel_glm_router_select_one_simd(
-        constant ds4_metal_args_glm_router_select_one & args,
+        constant lgn2_metal_args_glm_router_select_one & args,
         device const float *logits,
         device const float *bias,
         device int32_t *selected,
@@ -294,7 +294,7 @@ kernel void kernel_glm_router_select_one_simd(
         stats, scratch, tid);
 }
 
-struct ds4_metal_args_laguna_router_fused {
+struct lgn2_metal_args_laguna_router_fused {
     uint32_t in_dim;
     uint32_t n_expert;
     uint32_t n_expert_used;
@@ -311,7 +311,7 @@ struct ds4_metal_args_laguna_router_fused {
 // shared selection body sees exactly the same inputs.  The device logits row
 // is still written for downstream debug dumps.
 kernel void kernel_laguna_router_decode_fused(
-        constant ds4_metal_args_laguna_router_fused & args,
+        constant lgn2_metal_args_laguna_router_fused & args,
         device const float *weight,
         device const float *x,
         device const float *bias,
@@ -437,7 +437,7 @@ kernel void kernel_dsv4_router_weights_batch(
 #define OP_LAGUNA_SUM_ROWS_NUM_SUM_ROWS 10
 #define OP_LAGUNA_SUM_ROWS_NUM_MEAN     11
 
-struct ds4_metal_args_laguna_sum_rows {
+struct lgn2_metal_args_laguna_sum_rows {
     int64_t  ne00;
     int64_t  ne01;
     int64_t  ne02;
@@ -464,7 +464,7 @@ constant short FC_laguna_sum_rows_op [[function_constant(FC_LAGUNA_SUM_ROWS + 0)
 
 template <typename T0, typename T>
 kernel void kernel_laguna_sum_rows_impl(
-        constant ds4_metal_args_laguna_sum_rows & args,
+        constant lgn2_metal_args_laguna_sum_rows & args,
         device const char * src0,
         device       char * dst,
         threadgroup  char * shmem [[threadgroup(0)]],
@@ -519,7 +519,7 @@ template [[host_name("kernel_sum_rows_f32_f32")]] kernel
 // kernel: even tiny denominator-order changes here are amplified by 43 MoE
 // layers, so this kernel only replaces the selection work.
 kernel void kernel_dsv4_router_finalize_one(
-        constant ds4_metal_args_dsv4_router_select_one & args,
+        constant lgn2_metal_args_dsv4_router_select_one & args,
         device const float *probs,
         device const float *bias,
         device const int32_t *hash,
@@ -580,7 +580,7 @@ kernel void kernel_dsv4_router_finalize_one(
 // banks. The next bank's publish barrier proves every prior-bank read finished;
 // by the time a bank is reused two cross stages later, no reader can remain.
 kernel void kernel_dsv4_router_finalize_one_simd(
-        constant ds4_metal_args_dsv4_router_select_one & args,
+        constant lgn2_metal_args_dsv4_router_select_one & args,
         device const float *probs,
         device const float *bias,
         device const int32_t *hash,
@@ -655,7 +655,7 @@ kernel void kernel_dsv4_router_finalize_one_simd(
 // cross the same device-memory boundary as the standalone weight kernel;
 // volatile TG stores pin its left-fold and scaled-reciprocal rounding points.
 kernel void kernel_dsv4_router_finalize_weights_one_simd(
-        constant ds4_metal_args_dsv4_router_select_one & args,
+        constant lgn2_metal_args_dsv4_router_select_one & args,
         device const float *probs,
         device const float *bias,
         device const int32_t *hash,
@@ -749,7 +749,7 @@ kernel void kernel_dsv4_router_finalize_weights_one_simd(
 // weight normalization above. The volatile reload after the device barrier
 // pins the same float store/load boundary as the standalone transform dispatch.
 kernel void kernel_dsv4_router_transform_finalize_weights_one_simd(
-        constant ds4_metal_args_dsv4_router_select_one & args,
+        constant lgn2_metal_args_dsv4_router_select_one & args,
         device const float *logits,
         device float *probs,
         device const float *bias,

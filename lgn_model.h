@@ -4,9 +4,9 @@
 /* Private Laguna model boundary.
  *
  * This header is intentionally not included by lgn.h.  It is the temporary
- * facade shared by the GGUF loader in ds4.c and the Laguna S2.1 model module;
+ * facade shared by the GGUF loader in lgn2_engine.c and the Laguna S2.1 model module;
  * keeping these declarations private prevents tensor/GGUF details from
- * becoming part of the public Laguna API.  The ds4_* names remain as
+ * becoming part of the public Laguna API.  The lgn2_* names remain as
  * compatibility aliases for the existing engine structures while the
  * model-specific policy lives in lgn_model.c.
  */
@@ -76,22 +76,22 @@ enum {
 typedef enum {
     /* Keep the historical numeric space stable for private callers that
      * inspect rejected model identities.  Admission accepts Laguna only. */
-    DS4_MODEL_FAMILY_DEEPSEEK4 = 0,
-    DS4_MODEL_FAMILY_LAGUNA    = 2,
-} ds4_model_family;
+    LGN2_MODEL_FAMILY_DEEPSEEK4 = 0,
+    LGN2_MODEL_FAMILY_LAGUNA    = 2,
+} lgn2_model_family;
 
 typedef enum {
     /* The legacy values remain reserved so Laguna's KVC identity stays the
      * explicit value 3 rather than being renumbered during the fork. */
-    DS4_VARIANT_FLASH = 0,
-    DS4_VARIANT_PRO   = 1,
-    DS4_VARIANT_LAGUNA_S21 = 3,
-} ds4_variant;
+    LGN2_VARIANT_FLASH = 0,
+    LGN2_VARIANT_PRO   = 1,
+    LGN2_VARIANT_LAGUNA_S21 = 3,
+} lgn2_variant;
 
 typedef struct {
     const char *name;
-    ds4_model_family family;
-    ds4_variant variant;
+    lgn2_model_family family;
+    lgn2_variant variant;
     uint32_t n_layer;
     uint32_t n_embd;
     uint32_t n_vocab;
@@ -119,7 +119,7 @@ typedef struct {
     float rope_freq_base_swa;
     uint64_t context_length;
     uint64_t rope_orig_ctx;
-} ds4_shape;
+} lgn2_shape;
 
 /* Stable, validated fields used by the user-facing model summary.  Laguna's
  * attention head count is layer-varying in GGUF, so n_head is the profile's
@@ -138,13 +138,13 @@ typedef struct {
 typedef struct {
     const char *ptr;
     uint64_t len;
-} ds4_str;
+} lgn2_str;
 
 typedef struct {
-    ds4_str key;
+    lgn2_str key;
     uint32_t type;
     uint64_t value_pos;
-} ds4_kv;
+} lgn2_kv;
 
 typedef struct {
     uint32_t type;
@@ -152,8 +152,8 @@ typedef struct {
     uint64_t data_pos;
 } lgn_model_array;
 
-typedef struct ds4_tensor {
-    ds4_str name;
+typedef struct lgn2_tensor {
+    lgn2_str name;
     uint32_t ndim;
     uint64_t dim[LGN_MODEL_MAX_DIMS];
     uint32_t type;
@@ -161,9 +161,9 @@ typedef struct ds4_tensor {
     uint64_t abs_offset;
     uint64_t elements;
     uint64_t bytes;
-} ds4_tensor;
+} lgn2_tensor;
 
-typedef struct ds4_model {
+typedef struct lgn2_model {
     int fd;
     const uint8_t *map;
     uint64_t size;
@@ -175,44 +175,44 @@ typedef struct ds4_model {
     uint64_t tensor_data_pos;
     uint64_t max_tensor_bytes;
 
-    ds4_kv *kv;
-    ds4_tensor *tensors;
-} ds4_model;
+    lgn2_kv *kv;
+    lgn2_tensor *tensors;
+} lgn2_model;
 
-typedef struct ds4_layer_weights {
-    ds4_tensor *attn_norm;
-    ds4_tensor *attn_q;
-    ds4_tensor *attn_k;
-    ds4_tensor *attn_v;
-    ds4_tensor *attn_gate;
-    ds4_tensor *attn_q_norm;
-    ds4_tensor *attn_k_norm;
-    ds4_tensor *attn_output;
-    ds4_tensor *ffn_norm;
-    ds4_tensor *ffn_gate;
-    ds4_tensor *ffn_up;
-    ds4_tensor *ffn_down;
-    ds4_tensor *ffn_gate_inp;
-    ds4_tensor *ffn_exp_probs_b;
-    ds4_tensor *ffn_gate_exps;
-    ds4_tensor *ffn_up_exps;
-    ds4_tensor *ffn_down_exps;
-    ds4_tensor *ffn_gate_shexp;
-    ds4_tensor *ffn_up_shexp;
-    ds4_tensor *ffn_down_shexp;
-} ds4_layer_weights;
+typedef struct lgn2_layer_weights {
+    lgn2_tensor *attn_norm;
+    lgn2_tensor *attn_q;
+    lgn2_tensor *attn_k;
+    lgn2_tensor *attn_v;
+    lgn2_tensor *attn_gate;
+    lgn2_tensor *attn_q_norm;
+    lgn2_tensor *attn_k_norm;
+    lgn2_tensor *attn_output;
+    lgn2_tensor *ffn_norm;
+    lgn2_tensor *ffn_gate;
+    lgn2_tensor *ffn_up;
+    lgn2_tensor *ffn_down;
+    lgn2_tensor *ffn_gate_inp;
+    lgn2_tensor *ffn_exp_probs_b;
+    lgn2_tensor *ffn_gate_exps;
+    lgn2_tensor *ffn_up_exps;
+    lgn2_tensor *ffn_down_exps;
+    lgn2_tensor *ffn_gate_shexp;
+    lgn2_tensor *ffn_up_shexp;
+    lgn2_tensor *ffn_down_shexp;
+} lgn2_layer_weights;
 
-typedef struct ds4_weights {
-    ds4_tensor *token_embd;
-    ds4_tensor *output_norm;
-    ds4_tensor *output;
-    ds4_layer_weights layer[LGN_MODEL_MAX_LAYER];
-} ds4_weights;
+typedef struct lgn2_weights {
+    lgn2_tensor *token_embd;
+    lgn2_tensor *output_norm;
+    lgn2_tensor *output;
+    lgn2_layer_weights layer[LGN_MODEL_MAX_LAYER];
+} lgn2_weights;
 
 /* The engine's model shape is mutable only while validating a GGUF.  Laguna
  * owns the immutable S2.1 profile and returns it through this private accessor
- * so ds4.c can retain its existing shape macros during the transition. */
-const ds4_shape *lgn_model_shape(void);
+ * so lgn2_engine.c can retain its existing shape macros during the transition. */
+const lgn2_shape *lgn_model_shape(void);
 /* The caller must have admitted and validated the Laguna target before
  * requesting this profile summary. */
 void lgn_model_get_validated_summary(lgn_model_summary_fields *out);
@@ -221,64 +221,64 @@ bool lgn_model_layer_is_swa(uint32_t il);
 
 /* Read-only GGUF metadata/tensor accessors for private model binders.  The
  * returned strings and tensors borrow the model mapping and remain valid until
- * the owning ds4_model is closed. */
-bool lgn_model_get_string(const ds4_model *m,
+ * the owning lgn2_model is closed. */
+bool lgn_model_get_string(const lgn2_model *m,
                           const char *key,
-                          ds4_str *out);
-bool lgn_model_get_u32(const ds4_model *m,
+                          lgn2_str *out);
+bool lgn_model_get_u32(const lgn2_model *m,
                        const char *key,
                        uint32_t *out);
-bool lgn_model_get_token_id(const ds4_model *m,
+bool lgn_model_get_token_id(const lgn2_model *m,
                             const char *key,
                             int *out);
-bool lgn_model_get_u64_compat(const ds4_model *m,
+bool lgn_model_get_u64_compat(const lgn2_model *m,
                               const char *key,
                               uint64_t *out);
-bool lgn_model_get_f32_compat(const ds4_model *m,
+bool lgn_model_get_f32_compat(const lgn2_model *m,
                               const char *key,
                               float *out);
-bool lgn_model_get_bool(const ds4_model *m,
+bool lgn_model_get_bool(const lgn2_model *m,
                         const char *key,
                         bool *out);
-bool lgn_model_get_array(const ds4_model *m,
+bool lgn_model_get_array(const lgn2_model *m,
                          const char *key,
                          lgn_model_array *out);
-bool lgn_model_get_u32_array(const ds4_model *m,
+bool lgn_model_get_u32_array(const lgn2_model *m,
                              const char *key,
                              uint32_t *out,
                              uint32_t cap,
                              uint32_t *n_out);
 
-ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name);
-ds4_tensor *lgn_model_required_tensor(const ds4_model *m, const char *name);
-ds4_tensor *lgn_model_required_tensorf(const ds4_model *m,
+lgn2_tensor *lgn_model_find_tensor(const lgn2_model *m, const char *name);
+lgn2_tensor *lgn_model_required_tensor(const lgn2_model *m, const char *name);
+lgn2_tensor *lgn_model_required_tensorf(const lgn2_model *m,
                                        const char *format,
                                        uint32_t layer);
 const char *lgn_model_tensor_type_name(uint32_t type);
 bool lgn_model_tensor_type_is_dense_quant(uint32_t type);
-void lgn_model_validate_tensor_layout(const ds4_tensor *tensor,
+void lgn_model_validate_tensor_layout(const lgn2_tensor *tensor,
                                       uint32_t type,
                                       uint32_t ndim,
                                       uint64_t d0,
                                       uint64_t d1,
                                       uint64_t d2);
 
-bool lgn_model_is_laguna(const ds4_model *m, ds4_str *arch_out);
-void lgn_model_require_laguna_architecture(const ds4_model *m);
-void lgn_model_validate_config(const ds4_model *m);
+bool lgn_model_is_laguna(const lgn2_model *m, lgn2_str *arch_out);
+void lgn_model_require_laguna_architecture(const lgn2_model *m);
+void lgn_model_validate_config(const lgn2_model *m);
 
-bool lgn_weights_have_output_head(const ds4_weights *w);
-bool lgn_weights_have_partial_output_head(const ds4_weights *w);
-bool lgn_weights_laguna_layer_has_required(const ds4_layer_weights *l,
+bool lgn_weights_have_output_head(const lgn2_weights *w);
+bool lgn_weights_have_partial_output_head(const lgn2_weights *w);
+bool lgn_weights_laguna_layer_has_required(const lgn2_layer_weights *l,
                                            uint32_t il);
 
-void lgn_weights_validate_layout(const ds4_weights *w,
+void lgn_weights_validate_layout(const lgn2_weights *w,
                                  uint32_t layer_start,
                                  uint32_t layer_end,
                                  bool require_token_embd,
                                  bool require_output);
 
-void lgn_weights_bind(ds4_weights *w,
-                      const ds4_model *m);
+void lgn_weights_bind(lgn2_weights *w,
+                      const lgn2_model *m);
 
 #endif /* LGN_MODEL_H */

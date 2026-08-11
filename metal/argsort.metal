@@ -1,4 +1,4 @@
-struct ds4_metal_args_argsort {
+struct lgn2_metal_args_argsort {
     int32_t  ne00;
     int32_t  ne01;
     int32_t  ne02;
@@ -14,7 +14,7 @@ struct ds4_metal_args_argsort {
     int32_t  top_k;
 };
 
-struct ds4_metal_args_argsort_merge {
+struct lgn2_metal_args_argsort_merge {
     int64_t  ne00;
     int64_t  ne01;
     int64_t  ne02;
@@ -32,7 +32,7 @@ struct ds4_metal_args_argsort_merge {
 };
 
 typedef void (argsort_t)(
-        constant   ds4_metal_args_argsort & args,
+        constant   lgn2_metal_args_argsort & args,
         device   const char * src0,
         device      int32_t * dst,
         threadgroup int32_t * shmem_i32 [[threadgroup(0)]],
@@ -40,11 +40,11 @@ typedef void (argsort_t)(
         ushort3 tpitg[[thread_position_in_threadgroup]],
         ushort3   ntg[[threads_per_threadgroup]]);
 
-// Sort one float row into an index row. DS4 only exports the descending
+// Sort one float row into an index row. LGN2 only exports the descending
 // instance because router and indexer selection both need top-k order.
-template<ds4_sort_order order>
+template<lgn2_sort_order order>
 kernel void kernel_argsort_f32_i32(
-        constant   ds4_metal_args_argsort & args,
+        constant   lgn2_metal_args_argsort & args,
         device   const char * src0,
         device      int32_t * dst,
         threadgroup int32_t * shmem_i32 [[threadgroup(0)]],
@@ -82,7 +82,7 @@ kernel void kernel_argsort_f32_i32(
             if (ixj > col) {
                 if ((col & k) == 0) {
                     if (shmem_i32[col] >= args.ne00 ||
-                       (shmem_i32[ixj] <  args.ne00 && (order == DS4_SORT_ORDER_ASC ?
+                       (shmem_i32[ixj] <  args.ne00 && (order == LGN2_SORT_ORDER_ASC ?
                             shmem_f32[shmem_i32[col] - i00] > shmem_f32[shmem_i32[ixj] - i00] :
                             shmem_f32[shmem_i32[col] - i00] < shmem_f32[shmem_i32[ixj] - i00]))
                     ) {
@@ -90,7 +90,7 @@ kernel void kernel_argsort_f32_i32(
                     }
                 } else {
                     if (shmem_i32[ixj] >= args.ne00 ||
-                       (shmem_i32[col] <  args.ne00 && (order == DS4_SORT_ORDER_ASC ?
+                       (shmem_i32[col] <  args.ne00 && (order == LGN2_SORT_ORDER_ASC ?
                             shmem_f32[shmem_i32[col] - i00] < shmem_f32[shmem_i32[ixj] - i00] :
                             shmem_f32[shmem_i32[col] - i00] > shmem_f32[shmem_i32[ixj] - i00]))
                     ) {
@@ -113,11 +113,11 @@ kernel void kernel_argsort_f32_i32(
     }
 }
 
-// Host-visible sort variant used by DS4 top-k selection.
-template [[host_name("kernel_argsort_f32_i32_desc")]] kernel argsort_t kernel_argsort_f32_i32<DS4_SORT_ORDER_DESC>;
+// Host-visible sort variant used by LGN2 top-k selection.
+template [[host_name("kernel_argsort_f32_i32_desc")]] kernel argsort_t kernel_argsort_f32_i32<LGN2_SORT_ORDER_DESC>;
 
 typedef void (argsort_merge_t)(
-        constant   ds4_metal_args_argsort_merge & args,
+        constant   lgn2_metal_args_argsort_merge & args,
         device const char    * src0,
         device const int32_t * tmp,
         device       int32_t * dst,
@@ -125,11 +125,11 @@ typedef void (argsort_merge_t)(
         ushort3 tpitg[[thread_position_in_threadgroup]],
         ushort3   ntg[[threads_per_threadgroup]]);
 
-// Merges sorted index runs produced by kernel_argsort_f32_i32. In the DS4 graph
+// Merges sorted index runs produced by kernel_argsort_f32_i32. In the LGN2 graph
 // this finishes top-k over router or compressed-attention score rows.
-template<ds4_sort_order order>
+template<lgn2_sort_order order>
 kernel void kernel_argsort_merge_f32_i32(
-        constant   ds4_metal_args_argsort_merge & args,
+        constant   lgn2_metal_args_argsort_merge & args,
         device const char    * src0,
         device const int32_t * tmp,
         device       int32_t * dst,
@@ -197,7 +197,7 @@ kernel void kernel_argsort_merge_f32_i32(
         const float val1 = src0_row[idx1];
 
         bool take_left;
-        if (order == DS4_SORT_ORDER_ASC) {
+        if (order == LGN2_SORT_ORDER_ASC) {
             take_left = (val0 <= val1);
         } else {
             take_left = (val0 >= val1);
@@ -244,7 +244,7 @@ kernel void kernel_argsort_merge_f32_i32(
         } else {
             bool take_left;
 
-            if (order == DS4_SORT_ORDER_ASC) {
+            if (order == LGN2_SORT_ORDER_ASC) {
                 take_left = (val0 <= val1);
             } else {
                 take_left = (val0 >= val1);
@@ -271,5 +271,5 @@ kernel void kernel_argsort_merge_f32_i32(
     }
 }
 
-// Host-visible merge variant used by DS4 top-k selection.
-template [[host_name("kernel_argsort_merge_f32_i32_desc")]] kernel argsort_merge_t kernel_argsort_merge_f32_i32<DS4_SORT_ORDER_DESC>;
+// Host-visible merge variant used by LGN2 top-k selection.
+template [[host_name("kernel_argsort_merge_f32_i32_desc")]] kernel argsort_merge_t kernel_argsort_merge_f32_i32<LGN2_SORT_ORDER_DESC>;

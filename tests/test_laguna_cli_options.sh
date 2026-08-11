@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ds4-laguna-cli.XXXXXX")
+test_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/lgn2-laguna-cli.XXXXXX")
 trap 'rm -rf "$test_tmp_dir"' EXIT
 
 pass_count=0
@@ -88,46 +88,53 @@ assert_help_contract() {
     done
 }
 
-assert_help_contract ds4 ./ds4
-assert_help_contract ds4-server ./ds4-server
+assert_help_contract lgn2 ./lgn2
+assert_help_contract lgn2-server ./lgn2-server
 
 # Public engine selection is intentionally DFlash-only in this product slice.
 # Check the linked CLI surface as well as the source-level environment contract;
 # this keeps an old MTP spelling from silently returning through a frontend.
-for symbol in _ds4_engine_has_dflash _ds4_engine_dflash_draft_tokens; do
-    if nm -gU ./ds4 | grep -F -- "$symbol" >/dev/null &&
-       nm -gU ./ds4-server | grep -F -- "$symbol" >/dev/null; then
+for symbol in _lgn2_engine_has_dflash _lgn2_engine_dflash_draft_tokens; do
+    if nm -gU ./lgn2 | grep -F -- "$symbol" >/dev/null &&
+       nm -gU ./lgn2-server | grep -F -- "$symbol" >/dev/null; then
         pass "public DFlash symbol $symbol"
     else
         fail "missing public DFlash symbol $symbol"
     fi
 done
 legacy_symbols=(
-    "_ds4_engine_has_""mtp"
-    "_ds4_engine_""mtp_draft_tokens"
+    "_lgn2_engine_has_""mtp"
+    "_lgn2_engine_""mtp_draft_tokens"
+)
+legacy_namespace="d""s4"
+legacy_symbols+=(
+    "_${legacy_namespace}_engine_has_dflash"
+    "_${legacy_namespace}_engine_dflash_draft_tokens"
+    "_${legacy_namespace}_engine_has_""mtp"
+    "_${legacy_namespace}_engine_""mtp_draft_tokens"
 )
 for symbol in "${legacy_symbols[@]}"; do
-    if nm -gU ./ds4 | grep -F -- "$symbol" >/dev/null ||
-       nm -gU ./ds4-server | grep -F -- "$symbol" >/dev/null; then
+    if nm -gU ./lgn2 | grep -F -- "$symbol" >/dev/null ||
+       nm -gU ./lgn2-server | grep -F -- "$symbol" >/dev/null; then
         fail "legacy public symbol $symbol is still exported"
     else
         pass "legacy public symbol $symbol absent"
     fi
 done
-legacy_spec_disable_env="DS4""_MTP""_SPEC_DISABLE"
-if grep -Fq -- 'DS4_DFLASH_SPEC_DISABLE' ds4_cli.c ds4_server.c &&
-   ! grep -Fq -- "$legacy_spec_disable_env" ds4_cli.c ds4_server.c; then
+legacy_spec_disable_env="LGN2""_MTP""_SPEC_DISABLE"
+if grep -Fq -- 'LGN2_DFLASH_SPEC_DISABLE' lgn2_cli.c lgn2_server.c &&
+   ! grep -Fq -- "$legacy_spec_disable_env" lgn2_cli.c lgn2_server.c; then
     pass "DFlash speculative disable environment contract"
 else
     fail "DFlash speculative disable environment contract"
 fi
 contains_option "server preserves HTTP batching" "--mixed-prefill-quantum" \
-    "$test_tmp_dir/ds4-server.help"
+    "$test_tmp_dir/lgn2-server.help"
 contains_option "server preserves disk KV" "--kv-disk-dir" \
-    "$test_tmp_dir/ds4-server.help"
+    "$test_tmp_dir/lgn2-server.help"
 
-server_parser_out="$test_tmp_dir/ds4-server.retained"
-if ./ds4-server --host 127.0.0.1 --port 8000 --cors \
+server_parser_out="$test_tmp_dir/lgn2-server.retained"
+if ./lgn2-server --host 127.0.0.1 --port 8000 --cors \
     --trace /tmp/laguna-trace --batched-session 2 --mixed-prefill-quantum 64 \
     --kv-disk-dir /tmp/laguna-kv --kv-disk-space-mb 64 \
     --kv-cache-min-tokens 1 --kv-cache-cold-max-tokens 1 \
@@ -144,7 +151,7 @@ fi
 # The executable is Metal-only, so there is no backend selector.  The explicit
 # --metal spelling remains a harmless product assertion.  DFlash options must
 # likewise parse through their normal value checks before --help exits.
-for spec_name in ds4 ds4-server; do
+for spec_name in lgn2 lgn2-server; do
     bin=./$spec_name
     out="$test_tmp_dir/${spec_name}.positive"
     if "$bin" --metal \
@@ -197,7 +204,7 @@ unsupported=(
     "--first-token-test"
 )
 
-for spec_name in ds4 ds4-server; do
+for spec_name in lgn2 lgn2-server; do
     bin=./$spec_name
     for spec in "${unsupported[@]}"; do
         read -r -a argv <<< "$spec"
@@ -215,7 +222,7 @@ for spec_name in ds4 ds4-server; do
     done
 done
 
-for spec_name in ds4-bench ds4-eval; do
+for spec_name in lgn2-bench lgn2-eval; do
     bin=./$spec_name
     out="$test_tmp_dir/${spec_name}.expert-profile.negative"
     if "$bin" --expert-profile profile.json -m /dev/null >"$out" 2>&1; then
@@ -242,7 +249,7 @@ retired_options=(
     "--ssd-streaming-preload-experts 1"
     "--simulate-used-memory 1GB"
 )
-for spec_name in ds4 ds4-server ds4-bench ds4-eval; do
+for spec_name in lgn2 lgn2-server lgn2-bench lgn2-eval; do
     bin=./$spec_name
     for spec in "${retired_options[@]}"; do
         read -r -a argv <<< "$spec"
@@ -276,16 +283,16 @@ removed_options=(
 )
 for spec in "${removed_options[@]}"; do
     read -r -a argv <<< "$spec"
-    out="$test_tmp_dir/ds4.removed"
-    if ./ds4 "${argv[@]}" -m /dev/null >"$out" 2>&1; then
-        fail "ds4 accepts removed raw diagnostic option: $spec"
+    out="$test_tmp_dir/lgn2.removed"
+    if ./lgn2 "${argv[@]}" -m /dev/null >"$out" 2>&1; then
+        fail "lgn2 accepts removed raw diagnostic option: $spec"
         continue
     fi
-    if grep -Fq -- "ds4: unknown option: ${argv[0]}" "$out" &&
+    if grep -Fq -- "lgn2: unknown option: ${argv[0]}" "$out" &&
        ! grep -Eq -- "failed to open|unsupported model|architecture" "$out"; then
-        pass "ds4 rejects removed option before model work: $spec"
+        pass "lgn2 rejects removed option before model work: $spec"
     else
-        fail "ds4 dispatches removed option or gives wrong diagnostic: $spec"
+        fail "lgn2 dispatches removed option or gives wrong diagnostic: $spec"
         sed -n '1,40p' "$out" >&2
     fi
 done

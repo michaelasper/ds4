@@ -1,4 +1,4 @@
-struct ds4_metal_args_bin {
+struct lgn2_metal_args_bin {
     int32_t  ne00;
     int32_t  ne01;
     int32_t  ne02;
@@ -27,7 +27,7 @@ struct ds4_metal_args_bin {
     uint64_t o1[8];
 };
 
-struct ds4_metal_args_add3 {
+struct lgn2_metal_args_add3 {
     uint32_t n;
 };
 
@@ -37,11 +37,11 @@ constant bool  FC_bin_rb [[function_constant(FC_BIN + 2)]];
 constant bool  FC_bin_cb [[function_constant(FC_BIN + 3)]];
 
 // Generic binary elementwise op with compile-time operation and broadcast
-// modes. DS4 currently instantiates this as add, multiply, scalar multiply, and
+// modes. LGN2 currently instantiates this as add, multiply, scalar multiply, and
 // row division in the static graph.
 template <typename T0, typename T1, typename T>
 kernel void kernel_bin_fuse_impl(
-        constant ds4_metal_args_bin & args,
+        constant lgn2_metal_args_bin & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
@@ -196,7 +196,7 @@ typedef decltype(kernel_bin_fuse_impl<float, float, float>) kernel_bin_fuse_t;
 template [[host_name("kernel_bin_fuse_f32_f32_f32")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float, float, float>;
 
 kernel void kernel_add2_f32(
-        constant ds4_metal_args_add3 &args,
+        constant lgn2_metal_args_add3 &args,
         device const float *a,
         device const float *b,
         device float *out,
@@ -206,7 +206,7 @@ kernel void kernel_add2_f32(
 }
 
 kernel void kernel_add3_f32(
-        constant ds4_metal_args_add3 &args,
+        constant lgn2_metal_args_add3 &args,
         device const float *a,
         device const float *b,
         device const float *c,

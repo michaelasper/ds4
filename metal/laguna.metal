@@ -108,19 +108,19 @@ kernel void kernel_laguna_argmax_f32(
  * raw byte q, u = (high_nibble(q) xor 8), and q0 = 16*u - 120.5.  Therefore
  * |q-q0| <= 7.5 for every possible int8 q.
  */
-struct ds4_metal_args_laguna_q8_lmhead_pack {
+struct lgn2_metal_args_laguna_q8_lmhead_pack {
     uint32_t n_blocks;
     uint32_t packed_block_bytes;
 };
 
-struct ds4_metal_args_laguna_q8_lmhead_coarse {
+struct lgn2_metal_args_laguna_q8_lmhead_coarse {
     uint32_t n_blocks;
     uint32_t n_rows;
     uint32_t packed_block_bytes;
     uint32_t pad0;
 };
 
-struct ds4_metal_laguna_q8_lmhead_screen_stats {
+struct lgn2_metal_laguna_q8_lmhead_screen_stats {
     atomic_uint candidate_rows;
     atomic_uint candidate_row_blocks;
     atomic_uint coarse_nonfinite;
@@ -171,7 +171,7 @@ static inline uchar laguna_q8_screen_nibble(uchar raw) {
 kernel void kernel_laguna_q8_lmhead_pack(
         device const block_q8_0 *src [[buffer(1)]],
         device uchar            *dst [[buffer(2)]],
-        constant ds4_metal_args_laguna_q8_lmhead_pack &args [[buffer(0)]],
+        constant lgn2_metal_args_laguna_q8_lmhead_pack &args [[buffer(0)]],
         uint gid [[thread_position_in_grid]]) {
     if (gid >= args.n_blocks) return;
 
@@ -187,7 +187,7 @@ kernel void kernel_laguna_q8_lmhead_pack(
 }
 
 kernel void kernel_laguna_q8_lmhead_coarse(
-        constant ds4_metal_args_laguna_q8_lmhead_coarse &args [[buffer(0)]],
+        constant lgn2_metal_args_laguna_q8_lmhead_coarse &args [[buffer(0)]],
         device const uchar *packed [[buffer(1)]],
         device const float *x [[buffer(2)]],
         device float *coarse [[buffer(3)]],
@@ -295,7 +295,7 @@ kernel void kernel_laguna_q8_lmhead_coarse(
  * selects the coarse winner dynamically, then calls that helper verbatim so
  * the exact seed follows the production reduction tree. */
 kernel void kernel_laguna_q8_lmhead_seed_exact(
-        constant ds4_metal_args_mul_mv &args [[buffer(0)]],
+        constant lgn2_metal_args_mul_mv &args [[buffer(0)]],
         device const char *src0 [[buffer(1)]],
         device const char *src1 [[buffer(2)]],
         device char *dst [[buffer(3)]],
@@ -306,7 +306,7 @@ kernel void kernel_laguna_q8_lmhead_seed_exact(
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
     const int row = seed_idx[0];
     if (row < 0 || row >= args.ne01) return;
-    kernel_mul_mv_q8_0_f32_impl<2, constant ds4_metal_args_mul_mv &>(
+    kernel_mul_mv_q8_0_f32_impl<2, constant lgn2_metal_args_mul_mv &>(
         args, src0, src1, dst, shmem,
         uint3((uint)row / 2u, 0u, 0u), tiisg, sgitg);
 }
@@ -319,7 +319,7 @@ kernel void kernel_laguna_q8_lmhead_candidates(
         device const float *exact_values [[buffer(4)]],
         device const int32_t *seed_idx [[buffer(5)]],
         device uchar *candidate [[buffer(6)]],
-        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(7)]],
+        device lgn2_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(7)]],
         constant uint &collect_stats [[buffer(8)]],
         uint gid [[thread_position_in_grid]]) {
     if (gid >= n_rows) return;
@@ -367,18 +367,18 @@ kernel void kernel_laguna_q8_lmhead_candidates(
  * candidate pass already did the expensive per-row proof, and a bounded
  * 50,176-pair scan avoids introducing a trace-independent atomic hot spot.
  * The same pass writes Metal's three-u32 indirect-dispatch argument. */
-struct ds4_metal_args_laguna_q8_lmhead_compact {
+struct lgn2_metal_args_laguna_q8_lmhead_compact {
     uint32_t n_rows;
     uint32_t n_blocks;
     uint32_t pair_capacity;
 };
 
 kernel void kernel_laguna_q8_lmhead_compact_pairs(
-        constant ds4_metal_args_laguna_q8_lmhead_compact &args [[buffer(0)]],
+        constant lgn2_metal_args_laguna_q8_lmhead_compact &args [[buffer(0)]],
         device const uchar *candidate [[buffer(1)]],
         device uint *pair_ids [[buffer(2)]],
         device uint *dispatch_args [[buffer(3)]],
-        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(4)]],
+        device lgn2_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(4)]],
         constant uint &collect_stats [[buffer(5)]],
         uint gid [[thread_position_in_grid]]) {
     if (gid != 0u) return;
@@ -425,13 +425,13 @@ kernel void kernel_laguna_q8_lmhead_compact_pairs(
  * Calling the shared helper is intentional: it preserves the stock Q8
  * accumulation and simd/workgroup reduction order. */
 kernel void kernel_laguna_q8_lmhead_exact_candidates(
-        constant ds4_metal_args_mul_mv &args [[buffer(0)]],
+        constant lgn2_metal_args_mul_mv &args [[buffer(0)]],
         device const char *src0 [[buffer(1)]],
         device const char *src1 [[buffer(2)]],
         device char *dst [[buffer(3)]],
         device const uchar *candidate [[buffer(4)]],
         device const int32_t *seed_idx [[buffer(5)]],
-        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(6)]],
+        device lgn2_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(6)]],
         constant uint &collect_stats [[buffer(7)]],
         threadgroup char *shmem [[threadgroup(0)]],
         uint3 tgpig [[threadgroup_position_in_grid]],
@@ -454,7 +454,7 @@ kernel void kernel_laguna_q8_lmhead_exact_candidates(
                                   rows * ((uint)args.ne00 / 32u),
                                   memory_order_relaxed);
     }
-    kernel_mul_mv_q8_0_f32_impl<2, constant ds4_metal_args_mul_mv &>(
+    kernel_mul_mv_q8_0_f32_impl<2, constant lgn2_metal_args_mul_mv &>(
         args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 }
 
@@ -462,13 +462,13 @@ kernel void kernel_laguna_q8_lmhead_exact_candidates(
  * the compact list so the indirect group count is the logical compact pair
  * count; its exact value was already produced by seed_exact and is reused. */
 kernel void kernel_laguna_q8_lmhead_exact_compacted(
-        constant ds4_metal_args_mul_mv &args [[buffer(0)]],
+        constant lgn2_metal_args_mul_mv &args [[buffer(0)]],
         device const char *src0 [[buffer(1)]],
         device const char *src1 [[buffer(2)]],
         device char *dst [[buffer(3)]],
         device const uint *pair_ids [[buffer(4)]],
         device const int32_t *seed_idx [[buffer(5)]],
-        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(6)]],
+        device lgn2_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(6)]],
         constant uint &collect_stats [[buffer(7)]],
         threadgroup char *shmem [[threadgroup(0)]],
         uint3 tgpig [[threadgroup_position_in_grid]],
@@ -488,7 +488,7 @@ kernel void kernel_laguna_q8_lmhead_exact_compacted(
         return;
     }
 
-    kernel_mul_mv_q8_0_f32_impl<2, constant ds4_metal_args_mul_mv &>(
+    kernel_mul_mv_q8_0_f32_impl<2, constant lgn2_metal_args_mul_mv &>(
         args, src0, src1, dst, shmem,
         uint3(pair, 0u, 0u), tiisg, sgitg);
     if (collect_stats && tiisg == 0u && sgitg == 0u) {
@@ -505,7 +505,7 @@ kernel void kernel_laguna_q8_lmhead_argmax_candidates(
         device const uchar *candidate [[buffer(1)]],
         device int32_t *out_idx [[buffer(2)]],
         device float *out_value [[buffer(3)]],
-        device ds4_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(4)]],
+        device lgn2_metal_laguna_q8_lmhead_screen_stats *stats [[buffer(4)]],
         constant uint &n_rows [[buffer(5)]],
         constant uint &collect_stats [[buffer(6)]],
         threadgroup float *best_values [[threadgroup(0)]],
@@ -559,7 +559,7 @@ kernel void kernel_laguna_q8_lmhead_argmax_candidates(
     }
 }
 
-struct ds4_metal_args_laguna_norm_rope {
+struct lgn2_metal_args_laguna_norm_rope {
     uint32_t n_tokens;
     uint32_t n_head;
     uint32_t head_dim;
@@ -582,7 +582,7 @@ struct ds4_metal_args_laguna_norm_rope {
  * only its first 32 pairs.  Keeping the stride fixed makes the Q/K kernels a
  * single integer add and leaves the unused global tail harmlessly untouched.
  */
-struct ds4_metal_args_laguna_rope_atlas {
+struct lgn2_metal_args_laguna_rope_atlas {
     uint32_t n_tokens;
     uint32_t pos0;
     uint32_t n_families;
@@ -620,7 +620,7 @@ static inline float2 laguna_rope_angle_coeff(
     }
     const int rel_i0 = (int)(pair * 2u);
     const float inv_ndims = -1.0f / (float)n_rot;
-#ifdef DS4_METAL_ROPE_EXP2_LOG2
+#ifdef LGN2_METAL_ROPE_EXP2_LOG2
     const float theta = (float)position *
         exp2(inv_ndims * (float)rel_i0 * log2(freq_base));
 #else
@@ -639,7 +639,7 @@ static inline float2 laguna_rope_angle_coeff(
  * opt-in exp2/log2), YaRN correction, and cos/sin calls are used, then the
  * resulting float bits are stored for all 48 layer Q/K consumers. */
 kernel void kernel_laguna_rope_atlas(
-        constant ds4_metal_args_laguna_rope_atlas &args,
+        constant lgn2_metal_args_laguna_rope_atlas &args,
         device float2 *atlas,
         ushort lane [[thread_index_in_threadgroup]],
         uint3 tgpig [[threadgroup_position_in_grid]]) {
@@ -672,7 +672,7 @@ kernel void kernel_laguna_rope_atlas(
  * same argument arithmetic as the target generator, but never aliases the
  * target two-plane allocation. */
 kernel void kernel_laguna_rope_support_atlas(
-        constant ds4_metal_args_laguna_rope_atlas &args,
+        constant lgn2_metal_args_laguna_rope_atlas &args,
         device float2 *atlas,
         ushort lane [[thread_index_in_threadgroup]],
         uint3 tgpig [[threadgroup_position_in_grid]]) {
@@ -696,7 +696,7 @@ kernel void kernel_laguna_rope_support_atlas(
 }
 
 static inline void laguna_head_rms_norm_rope_neox(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *row,
         device const float *weight,
         threadgroup float  *scratch [[threadgroup(0)]],
@@ -738,7 +738,7 @@ static inline void laguna_head_rms_norm_rope_neox(
  * equivalent to the stock helper; only the expensive angle construction is
  * replaced with a float2 load from the precomputed family plane. */
 static inline void laguna_head_rms_norm_rope_neox_atlas(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *row,
         device const float *weight,
         device const float2 *atlas,
@@ -791,7 +791,7 @@ static inline void laguna_head_rms_norm_rope_neox_atlas(
  * numerically different kernel.
  */
 static inline void laguna_head_rms_norm_rope_neox_simd32(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *row,
         device const float *weight,
         threadgroup float  *scratch,
@@ -873,7 +873,7 @@ static inline void laguna_head_rms_norm_rope_neox_simd32(
  * above so enabling the atlas never changes the SIMD32 RMSNorm arithmetic or
  * its exact A/B contract. */
 static inline void laguna_head_rms_norm_rope_neox_simd32_atlas(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *row,
         device const float *weight,
         device const float2 *atlas,
@@ -945,7 +945,7 @@ static inline void laguna_head_rms_norm_rope_neox_simd32_atlas(
 // dimensions occupy the prefix of each head; any remaining dimensions are
 // normalized but left unrotated.
 kernel void kernel_laguna_head_rms_norm_rope_neox(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *x,
         device const float *weight,
         threadgroup float  *scratch [[threadgroup(0)]],
@@ -970,7 +970,7 @@ kernel void kernel_laguna_head_rms_norm_rope_neox(
 // in one grid removes a small Metal dispatch without changing the per-head
 // reduction order.
 kernel void kernel_laguna_qk_head_rms_norm_rope_neox(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *q,
         device float       *k,
         device const float *q_weight,
@@ -1002,7 +1002,7 @@ kernel void kernel_laguna_qk_head_rms_norm_rope_neox(
  * function (and therefore a separate PSO) so callers can prove that the
  * experiment dispatched instead of merely observing output parity. */
 kernel void kernel_laguna_qk_head_rms_norm_rope_neox_simd32(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *q,
         device float       *k,
         device const float *q_weight,
@@ -1033,7 +1033,7 @@ kernel void kernel_laguna_qk_head_rms_norm_rope_neox_simd32(
 /* Atlas single-tensor route.  It is used by the ordinary Laguna graph when
  * paired Q/K is not selected and by DFlash's support-only K staging. */
 kernel void kernel_laguna_head_rms_norm_rope_neox_atlas(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *x,
         device const float *weight,
         device const float2 *atlas,
@@ -1058,7 +1058,7 @@ kernel void kernel_laguna_head_rms_norm_rope_neox_atlas(
 
 /* Paired stock-topology atlas route. */
 kernel void kernel_laguna_qk_head_rms_norm_rope_neox_atlas(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *q,
         device float       *k,
         device const float *q_weight,
@@ -1091,7 +1091,7 @@ kernel void kernel_laguna_qk_head_rms_norm_rope_neox_atlas(
 
 /* Paired SIMD32 atlas route. */
 kernel void kernel_laguna_qk_head_rms_norm_rope_neox_simd32_atlas(
-        constant ds4_metal_args_laguna_norm_rope &args,
+        constant lgn2_metal_args_laguna_norm_rope &args,
         device float       *q,
         device float       *k,
         device const float *q_weight,
@@ -1121,7 +1121,7 @@ kernel void kernel_laguna_qk_head_rms_norm_rope_neox_simd32_atlas(
         args.rope_atlas_stride);
 }
 
-struct ds4_metal_args_laguna_kv_store {
+struct lgn2_metal_args_laguna_kv_store {
     uint32_t cache_cap;
     uint32_t cache_row;
     uint32_t n_head_kv;
@@ -1129,7 +1129,7 @@ struct ds4_metal_args_laguna_kv_store {
 };
 
 kernel void kernel_laguna_store_kv_f16(
-        constant ds4_metal_args_laguna_kv_store &args,
+        constant lgn2_metal_args_laguna_kv_store &args,
         device const float *k,
         device const float *v,
         device half *key_cache,
@@ -1142,7 +1142,7 @@ kernel void kernel_laguna_store_kv_f16(
     value_cache[dst] = (half)v[gid];
 }
 
-struct ds4_metal_args_laguna_prefill_attention {
+struct lgn2_metal_args_laguna_prefill_attention {
     uint32_t n_tokens;
     uint32_t pos0;
     uint32_t cache_cap;
@@ -1157,7 +1157,7 @@ struct ds4_metal_args_laguna_prefill_attention {
 // Store the complete speculative block at once; each query still limits its
 // key count, so later rows cannot become visible to earlier queries.
 kernel void kernel_laguna_store_kv_rows_f16(
-        constant ds4_metal_args_laguna_prefill_attention &args,
+        constant lgn2_metal_args_laguna_prefill_attention &args,
         device const float *k,
         device const float *v,
         device half *key_cache,
@@ -1178,7 +1178,7 @@ kernel void kernel_laguna_store_kv_rows_f16(
 // precision as decode without overwriting sliding-window rows that early
 // queries in the chunk still need.
 kernel void kernel_laguna_stage_kv_f16(
-        constant ds4_metal_args_laguna_prefill_attention &args,
+        constant lgn2_metal_args_laguna_prefill_attention &args,
         device const float *k,
         device const float *v,
         device half *staged_key,
@@ -1195,7 +1195,7 @@ kernel void kernel_laguna_stage_kv_f16(
 // parallel, while each query visits keys in causal order. Keys from the current
 // chunk come from the staging buffer; older keys come from the persistent ring.
 kernel void kernel_laguna_attention_prefill_gqa_f16(
-        constant ds4_metal_args_laguna_prefill_attention &args,
+        constant lgn2_metal_args_laguna_prefill_attention &args,
         device const float *q,
         device const float *gate,
         device const half  *key_cache,
@@ -1276,7 +1276,7 @@ kernel void kernel_laguna_attention_prefill_gqa_f16(
 // The per-head reduction and causal key order are unchanged, while each K/V
 // value is fetched only once for the group.
 kernel void kernel_laguna_attention_prefill_gqa3_f16(
-        constant ds4_metal_args_laguna_prefill_attention &args,
+        constant lgn2_metal_args_laguna_prefill_attention &args,
         device const float *q,
         device const float *gate,
         device const half  *key_cache,
@@ -1406,7 +1406,7 @@ kernel void kernel_laguna_attention_prefill_gqa3_f16(
 // one SIMD group preserves each head's reduction order while halving K/V
 // traffic relative to the three-head kernel.
 kernel void kernel_laguna_attention_prefill_gqa6_f16(
-        constant ds4_metal_args_laguna_prefill_attention &args,
+        constant lgn2_metal_args_laguna_prefill_attention &args,
         device const float *q,
         device const float *gate,
         device const half  *key_cache,
@@ -1601,7 +1601,7 @@ kernel void kernel_laguna_attention_prefill_gqa6_f16(
 }
 
 kernel void kernel_laguna_commit_kv_f16(
-        constant ds4_metal_args_laguna_prefill_attention &args,
+        constant lgn2_metal_args_laguna_prefill_attention &args,
         device const half *staged_key,
         device const half *staged_value,
         device half *key_cache,
@@ -1618,7 +1618,7 @@ kernel void kernel_laguna_commit_kv_f16(
     value_cache[dst] = staged_value[gid];
 }
 
-struct ds4_metal_args_laguna_attention {
+struct lgn2_metal_args_laguna_attention {
     uint32_t n_head;
     uint32_t n_head_kv;
     uint32_t head_dim;
@@ -1629,7 +1629,7 @@ struct ds4_metal_args_laguna_attention {
     uint32_t pad0;
 };
 
-struct ds4_metal_args_laguna_gqa3_decode {
+struct lgn2_metal_args_laguna_gqa3_decode {
     uint32_t n_head;
     uint32_t n_head_kv;
     uint32_t head_dim;
@@ -1645,7 +1645,7 @@ struct ds4_metal_args_laguna_gqa3_decode {
 // times. DFlash verifier rows use the second grid dimension while retaining
 // the exact one-row arithmetic and established gated reduction.
 kernel void kernel_laguna_attention_decode_gqa3_split_f16(
-        constant ds4_metal_args_laguna_gqa3_decode &args,
+        constant lgn2_metal_args_laguna_gqa3_decode &args,
         device const float *q,
         device const half  *key_cache,
         device const half  *value_cache,
@@ -1810,7 +1810,7 @@ kernel void kernel_laguna_attention_decode_gqa3_split_f16(
 // the merged output is bit-exact with the GQA3 kernel for the same shape, so
 // the reduce/gate kernel is reused unchanged.
 kernel void kernel_laguna_attention_decode_gqa9_split_f16(
-        constant ds4_metal_args_laguna_gqa3_decode &args,
+        constant lgn2_metal_args_laguna_gqa3_decode &args,
         device const float *q,
         device const half  *key_cache,
         device const half  *value_cache,
@@ -1951,7 +1951,7 @@ kernel void kernel_laguna_attention_decode_gqa9_split_f16(
 // threadgroup memory. This keeps decode latency from growing serially with the
 // absolute context position while preserving the short-context arithmetic.
 kernel void kernel_laguna_attention_decode_gqa_f16(
-        constant ds4_metal_args_laguna_attention &args,
+        constant lgn2_metal_args_laguna_attention &args,
         device const float *q,
         device const float *gate,
         device const half  *key_cache,
@@ -2060,7 +2060,7 @@ kernel void kernel_laguna_attention_decode_gqa_f16(
 // deliberately the same per-head reduction as decode; only command encoding
 // and dispatch are shared across rows.
 kernel void kernel_laguna_attention_decode_rows_gqa_f16(
-        constant ds4_metal_args_laguna_prefill_attention &args,
+        constant lgn2_metal_args_laguna_prefill_attention &args,
         device const float *q,
         device const float *gate,
         device const half  *key_cache,
@@ -2176,7 +2176,7 @@ kernel void kernel_laguna_attention_decode_rows_gqa_f16(
 // learned gate. Apply that epilogue before the final store so decode does not
 // write and reread the complete head buffer in a second dispatch.
 kernel void kernel_laguna_flash_attn_reduce_gate_f32(
-        constant ds4_metal_args_flash_attn_ext_vec_reduce &args,
+        constant lgn2_metal_args_flash_attn_ext_vec_reduce &args,
         device const char  *htmp,
         device       char  *dst,
         device const float *gate,
@@ -2221,7 +2221,7 @@ kernel void kernel_laguna_flash_attn_reduce_gate_f32(
 #undef DV
 }
 
-struct ds4_metal_args_laguna_q6_matmul {
+struct lgn2_metal_args_laguna_q6_matmul {
     uint32_t in_dim;
     uint32_t out_dim;
     uint32_t n_tokens;
@@ -2233,7 +2233,7 @@ struct ds4_metal_args_laguna_q6_matmul {
 // The quantized arithmetic follows the existing Q6_K routed-down
 // implementation, but addresses a single dense matrix directly.
 kernel void kernel_laguna_q6_K_matmul_f32(
-        constant ds4_metal_args_laguna_q6_matmul &args,
+        constant lgn2_metal_args_laguna_q6_matmul &args,
         device const char  *weight,
         device const float *x,
         device float       *out,

@@ -16,10 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const ds4_shape LGN_SHAPE_LAGUNA_S21 = {
+static const lgn2_shape LGN_SHAPE_LAGUNA_S21 = {
     .name = "Laguna S 2.1",
-    .family = DS4_MODEL_FAMILY_LAGUNA,
-    .variant = DS4_VARIANT_LAGUNA_S21,
+    .family = LGN2_MODEL_FAMILY_LAGUNA,
+    .variant = LGN2_VARIANT_LAGUNA_S21,
     .n_layer = 48,
     .n_embd = 3072,
     .n_vocab = 100352,
@@ -49,7 +49,7 @@ static const ds4_shape LGN_SHAPE_LAGUNA_S21 = {
     .rope_orig_ctx = 8192,
 };
 
-const ds4_shape *lgn_model_shape(void) {
+const lgn2_shape *lgn_model_shape(void) {
     return &LGN_SHAPE_LAGUNA_S21;
 }
 
@@ -68,12 +68,12 @@ typedef struct {
 } lgn_cursor;
 
 static void lgn_die(const char *message) {
-    fprintf(stderr, "ds4: %s\n", message);
+    fprintf(stderr, "lgn2: %s\n", message);
     exit(1);
 }
 
 static void lgn_die_missing(const char *kind, const char *name) {
-    fprintf(stderr, "ds4: required %s is missing: %s\n", kind, name);
+    fprintf(stderr, "lgn2: required %s is missing: %s\n", kind, name);
     exit(1);
 }
 
@@ -96,7 +96,7 @@ static bool lgn_cursor_u64(lgn_cursor *c, uint64_t *out) {
     return lgn_cursor_read(c, out, sizeof(*out));
 }
 
-static bool lgn_cursor_string(lgn_cursor *c, ds4_str *out) {
+static bool lgn_cursor_string(lgn_cursor *c, lgn2_str *out) {
     uint64_t len = 0;
     if (!out || !lgn_cursor_u64(c, &len) || !lgn_cursor_has(c, len)) {
         return false;
@@ -107,7 +107,7 @@ static bool lgn_cursor_string(lgn_cursor *c, ds4_str *out) {
     return true;
 }
 
-static lgn_cursor lgn_cursor_at(const ds4_model *m, uint64_t pos) {
+static lgn_cursor lgn_cursor_at(const lgn2_model *m, uint64_t pos) {
     lgn_cursor c = {
         .base = m ? m->map : NULL,
         .size = m ? m->size : 0,
@@ -116,12 +116,12 @@ static lgn_cursor lgn_cursor_at(const ds4_model *m, uint64_t pos) {
     return c;
 }
 
-static bool lgn_streq(ds4_str value, const char *literal) {
+static bool lgn_streq(lgn2_str value, const char *literal) {
     const size_t n = strlen(literal);
     return value.ptr && value.len == n && memcmp(value.ptr, literal, n) == 0;
 }
 
-static ds4_kv *lgn_model_find_kv(const ds4_model *m, const char *key) {
+static lgn2_kv *lgn_model_find_kv(const lgn2_model *m, const char *key) {
     if (!m || !key || (m->n_kv != 0 && !m->kv)) return NULL;
     for (uint64_t i = 0; i < m->n_kv; i++) {
         if (lgn_streq(m->kv[i].key, key)) return &m->kv[i];
@@ -129,30 +129,30 @@ static ds4_kv *lgn_model_find_kv(const ds4_model *m, const char *key) {
     return NULL;
 }
 
-bool lgn_model_get_string(const ds4_model *m,
+bool lgn_model_get_string(const lgn2_model *m,
                           const char *key,
-                          ds4_str *out) {
+                          lgn2_str *out) {
     if (!out) return false;
-    ds4_kv *kv = lgn_model_find_kv(m, key);
+    lgn2_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_STRING) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     return lgn_cursor_string(&c, out);
 }
 
-bool lgn_model_get_u32(const ds4_model *m,
+bool lgn_model_get_u32(const lgn2_model *m,
                        const char *key,
                        uint32_t *out) {
     if (!out) return false;
-    ds4_kv *kv = lgn_model_find_kv(m, key);
+    lgn2_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_UINT32) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     return lgn_cursor_u32(&c, out);
 }
 
-bool lgn_model_get_token_id(const ds4_model *m,
+bool lgn_model_get_token_id(const lgn2_model *m,
                             const char *key,
                             int *out) {
-    ds4_kv *kv = lgn_model_find_kv(m, key);
+    lgn2_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || !out) return false;
 
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -195,11 +195,11 @@ bool lgn_model_get_token_id(const ds4_model *m,
     }
 }
 
-bool lgn_model_get_u64_compat(const ds4_model *m,
+bool lgn_model_get_u64_compat(const lgn2_model *m,
                               const char *key,
                               uint64_t *out) {
     if (!out) return false;
-    ds4_kv *kv = lgn_model_find_kv(m, key);
+    lgn2_kv *kv = lgn_model_find_kv(m, key);
     if (!kv) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     if (kv->type == LGN_GGUF_VALUE_UINT64) return lgn_cursor_u64(&c, out);
@@ -212,11 +212,11 @@ bool lgn_model_get_u64_compat(const ds4_model *m,
     return false;
 }
 
-bool lgn_model_get_f32_compat(const ds4_model *m,
+bool lgn_model_get_f32_compat(const lgn2_model *m,
                               const char *key,
                               float *out) {
     if (!out) return false;
-    ds4_kv *kv = lgn_model_find_kv(m, key);
+    lgn2_kv *kv = lgn_model_find_kv(m, key);
     if (!kv) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     if (kv->type == LGN_GGUF_VALUE_FLOAT32) {
@@ -243,11 +243,11 @@ bool lgn_model_get_f32_compat(const ds4_model *m,
     return false;
 }
 
-bool lgn_model_get_bool(const ds4_model *m,
+bool lgn_model_get_bool(const lgn2_model *m,
                         const char *key,
                         bool *out) {
     if (!out) return false;
-    ds4_kv *kv = lgn_model_find_kv(m, key);
+    lgn2_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_BOOL) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     uint8_t value = 0;
@@ -256,10 +256,10 @@ bool lgn_model_get_bool(const ds4_model *m,
     return true;
 }
 
-bool lgn_model_get_array(const ds4_model *m,
+bool lgn_model_get_array(const lgn2_model *m,
                          const char *key,
                          lgn_model_array *out) {
-    ds4_kv *kv = lgn_model_find_kv(m, key);
+    lgn2_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_ARRAY || !out) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
     if (!lgn_cursor_u32(&c, &out->type) || !lgn_cursor_u64(&c, &out->len)) {
@@ -269,7 +269,7 @@ bool lgn_model_get_array(const ds4_model *m,
     return true;
 }
 
-bool lgn_model_get_u32_array(const ds4_model *m,
+bool lgn_model_get_u32_array(const lgn2_model *m,
                              const char *key,
                              uint32_t *out,
                              uint32_t cap,
@@ -301,7 +301,7 @@ bool lgn_model_get_u32_array(const ds4_model *m,
     return true;
 }
 
-ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name) {
+lgn2_tensor *lgn_model_find_tensor(const lgn2_model *m, const char *name) {
     if (!m || !name || (m->n_tensors != 0 && !m->tensors)) return NULL;
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         if (lgn_streq(m->tensors[i].name, name)) return &m->tensors[i];
@@ -309,14 +309,14 @@ ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name) {
     return NULL;
 }
 
-ds4_tensor *lgn_model_required_tensor(const ds4_model *m, const char *name) {
+lgn2_tensor *lgn_model_required_tensor(const lgn2_model *m, const char *name) {
     if (!name) lgn_die("required tensor name is missing");
-    ds4_tensor *tensor = lgn_model_find_tensor(m, name);
+    lgn2_tensor *tensor = lgn_model_find_tensor(m, name);
     if (!tensor) lgn_die_missing("tensor", name);
     return tensor;
 }
 
-ds4_tensor *lgn_model_required_tensorf(const ds4_model *m,
+lgn2_tensor *lgn_model_required_tensorf(const lgn2_model *m,
                                        const char *format,
                                        uint32_t layer) {
     if (!format) lgn_die("required tensor format is missing");
@@ -328,13 +328,13 @@ ds4_tensor *lgn_model_required_tensorf(const ds4_model *m,
     return lgn_model_required_tensor(m, name);
 }
 
-static ds4_tensor *lgn_required_tensor(const ds4_model *m, const char *name) {
-    ds4_tensor *tensor = lgn_model_find_tensor(m, name);
+static lgn2_tensor *lgn_required_tensor(const lgn2_model *m, const char *name) {
+    lgn2_tensor *tensor = lgn_model_find_tensor(m, name);
     if (!tensor) lgn_die_missing("tensor", name);
     return tensor;
 }
 
-static ds4_tensor *lgn_required_tensorf(const ds4_model *m,
+static lgn2_tensor *lgn_required_tensorf(const lgn2_model *m,
                                         const char *format,
                                         uint32_t layer) {
     char name[128];
@@ -396,7 +396,7 @@ bool lgn_model_tensor_type_is_dense_quant(uint32_t type) {
            type == LGN_TENSOR_Q4_0;
 }
 
-static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
+static void lgn_tensor_expect_layout(const lgn2_tensor *tensor,
                                      uint32_t type,
                                      uint32_t ndim,
                                      uint64_t d0,
@@ -405,7 +405,7 @@ static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
     if (!tensor) lgn_die("internal error: missing tensor while validating layout");
     if (tensor->type != type) {
         fprintf(stderr,
-                "ds4: tensor %.*s has type %s, expected %s\n",
+                "lgn2: tensor %.*s has type %s, expected %s\n",
                 (int)tensor->name.len,
                 tensor->name.ptr,
                 lgn_model_tensor_type_name(tensor->type),
@@ -414,7 +414,7 @@ static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
     }
     if (tensor->ndim != ndim) {
         fprintf(stderr,
-                "ds4: tensor %.*s has %u dimensions, expected %u\n",
+                "lgn2: tensor %.*s has %u dimensions, expected %u\n",
                 (int)tensor->name.len,
                 tensor->name.ptr,
                 tensor->ndim,
@@ -425,7 +425,7 @@ static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
     for (uint32_t i = 0; i < ndim; i++) {
         if (i < 3u && tensor->dim[i] == want[i]) continue;
         fprintf(stderr,
-                "ds4: tensor %.*s has dim[%u]=%" PRIu64 ", expected %" PRIu64 "\n",
+                "lgn2: tensor %.*s has dim[%u]=%" PRIu64 ", expected %" PRIu64 "\n",
                 (int)tensor->name.len,
                 tensor->name.ptr,
                 i,
@@ -435,7 +435,7 @@ static void lgn_tensor_expect_layout(const ds4_tensor *tensor,
     }
 }
 
-void lgn_model_validate_tensor_layout(const ds4_tensor *tensor,
+void lgn_model_validate_tensor_layout(const lgn2_tensor *tensor,
                                       uint32_t type,
                                       uint32_t ndim,
                                       uint64_t d0,
@@ -448,7 +448,7 @@ static void lgn_config_expect_u32(const char *name,
                                   uint32_t got,
                                   uint32_t expected) {
     if (got == expected) return;
-    fprintf(stderr, "ds4: expected %s=%u for %s, got %u\n",
+    fprintf(stderr, "lgn2: expected %s=%u for %s, got %u\n",
             name, expected, LGN_SHAPE_LAGUNA_S21.name, got);
     exit(1);
 }
@@ -457,7 +457,7 @@ static void lgn_config_expect_u64(const char *name,
                                   uint64_t got,
                                   uint64_t expected) {
     if (got == expected) return;
-    fprintf(stderr, "ds4: expected %s=%" PRIu64 " for %s, got %" PRIu64 "\n",
+    fprintf(stderr, "lgn2: expected %s=%" PRIu64 " for %s, got %" PRIu64 "\n",
             name, expected, LGN_SHAPE_LAGUNA_S21.name, got);
     exit(1);
 }
@@ -467,7 +467,7 @@ static void lgn_config_expect_f32(const char *name,
                                   float expected) {
     const float scale = fabsf(expected) > 1.0f ? fabsf(expected) : 1.0f;
     if (fabsf(got - expected) <= scale * 1.0e-6f) return;
-    fprintf(stderr, "ds4: expected %s=%.9g for %s, got %.9g\n",
+    fprintf(stderr, "lgn2: expected %s=%.9g for %s, got %.9g\n",
             name,
             (double)expected,
             LGN_SHAPE_LAGUNA_S21.name,
@@ -479,7 +479,7 @@ static void lgn_config_expect_bool(const char *name,
                                    bool got,
                                    bool expected) {
     if (got == expected) return;
-    fprintf(stderr, "ds4: expected %s=%s for %s, got %s\n",
+    fprintf(stderr, "lgn2: expected %s=%s for %s, got %s\n",
             name,
             expected ? "true" : "false",
             LGN_SHAPE_LAGUNA_S21.name,
@@ -487,44 +487,44 @@ static void lgn_config_expect_bool(const char *name,
     exit(1);
 }
 
-static uint32_t lgn_required_u32(const ds4_model *m, const char *key) {
+static uint32_t lgn_required_u32(const lgn2_model *m, const char *key) {
     uint32_t value = 0;
     if (!lgn_model_get_u32(m, key, &value)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
+        fprintf(stderr, "lgn2: required metadata key is missing: %s\n", key);
         exit(1);
     }
     return value;
 }
 
-static uint64_t lgn_required_u64(const ds4_model *m, const char *key) {
+static uint64_t lgn_required_u64(const lgn2_model *m, const char *key) {
     uint64_t value = 0;
     if (!lgn_model_get_u64_compat(m, key, &value)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
+        fprintf(stderr, "lgn2: required metadata key is missing: %s\n", key);
         exit(1);
     }
     return value;
 }
 
-static float lgn_required_f32(const ds4_model *m, const char *key) {
+static float lgn_required_f32(const lgn2_model *m, const char *key) {
     float value = 0.0f;
     if (!lgn_model_get_f32_compat(m, key, &value)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
+        fprintf(stderr, "lgn2: required metadata key is missing: %s\n", key);
         exit(1);
     }
     return value;
 }
 
-static bool lgn_required_bool(const ds4_model *m, const char *key) {
+static bool lgn_required_bool(const lgn2_model *m, const char *key) {
     bool value = false;
     if (!lgn_model_get_bool(m, key, &value)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
+        fprintf(stderr, "lgn2: required metadata key is missing: %s\n", key);
         exit(1);
     }
     return value;
 }
 
-bool lgn_model_is_laguna(const ds4_model *m, ds4_str *arch_out) {
-    ds4_str arch = {0};
+bool lgn_model_is_laguna(const lgn2_model *m, lgn2_str *arch_out) {
+    lgn2_str arch = {0};
     if (!m || !lgn_model_get_string(m, "general.architecture", &arch)) {
         return false;
     }
@@ -533,15 +533,15 @@ bool lgn_model_is_laguna(const ds4_model *m, ds4_str *arch_out) {
     return lgn_architecture_is_supported(arch.ptr, (size_t)arch.len);
 }
 
-void lgn_model_require_laguna_architecture(const ds4_model *m) {
-    ds4_str arch = {0};
+void lgn_model_require_laguna_architecture(const lgn2_model *m) {
+    lgn2_str arch = {0};
     if (lgn_model_is_laguna(m, &arch)) return;
     if (!arch.ptr) {
         lgn_die("GGUF general.architecture is required and must be literal laguna");
     }
     const int shown = arch.len > 128u ? 128 : (int)arch.len;
     fprintf(stderr,
-            "ds4: unsupported GGUF general.architecture '%.*s%s'; "
+            "lgn2: unsupported GGUF general.architecture '%.*s%s'; "
             "only literal laguna is supported\n",
             shown,
             arch.ptr,
@@ -556,7 +556,7 @@ void lgn_model_get_validated_summary(lgn_model_summary_fields *out) {
     /* lgn_model_validate_config() admits only this exact profile before the
      * runtime can print a target summary.  Read the immutable profile rather
      * than stale family-prefixed metadata from the removed model families. */
-    const ds4_shape *s = lgn_model_shape();
+    const lgn2_shape *s = lgn_model_shape();
     out->n_layer = s->n_layer;
     out->context_length = s->context_length;
     out->n_head = s->n_head;
@@ -567,8 +567,8 @@ void lgn_model_get_validated_summary(lgn_model_summary_fields *out) {
     out->n_expert_used = s->n_expert_used;
 }
 
-void lgn_model_validate_config(const ds4_model *m) {
-    const ds4_shape *s = &LGN_SHAPE_LAGUNA_S21;
+void lgn_model_validate_config(const lgn2_model *m) {
+    const lgn2_shape *s = &LGN_SHAPE_LAGUNA_S21;
     const uint32_t n_layer = lgn_required_u32(m, "laguna.block_count");
     const uint64_t n_ctx = lgn_required_u64(m, "laguna.context_length");
     const uint32_t n_embd = lgn_required_u32(m, "laguna.embedding_length");
@@ -629,13 +629,13 @@ void lgn_model_validate_config(const ds4_model *m) {
         const uint32_t expected = lgn_layer_head_count(il);
         if (got != expected) {
             fprintf(stderr,
-                    "ds4: unexpected Laguna head count at layer %u: got %u, expected %u\n",
+                    "lgn2: unexpected Laguna head count at layer %u: got %u, expected %u\n",
                     il, got, expected);
             exit(1);
         }
     }
 
-    ds4_str rope_type = {0};
+    lgn2_str rope_type = {0};
     if (!lgn_model_get_string(m, "laguna.rope.scaling.type", &rope_type) ||
         !lgn_streq(rope_type, "yarn")) {
         lgn_die("Laguna requires rope.scaling.type=yarn");
@@ -672,15 +672,15 @@ void lgn_model_validate_config(const ds4_model *m) {
                            true);
 }
 
-bool lgn_weights_have_output_head(const ds4_weights *w) {
+bool lgn_weights_have_output_head(const lgn2_weights *w) {
     return w && w->output_norm && w->output;
 }
 
-bool lgn_weights_have_partial_output_head(const ds4_weights *w) {
+bool lgn_weights_have_partial_output_head(const lgn2_weights *w) {
     return w && (w->output_norm || w->output);
 }
 
-bool lgn_weights_laguna_layer_has_required(const ds4_layer_weights *l,
+bool lgn_weights_laguna_layer_has_required(const lgn2_layer_weights *l,
                                            uint32_t il) {
     if (!l ||
         !l->attn_norm ||
@@ -707,12 +707,12 @@ bool lgn_weights_laguna_layer_has_required(const ds4_layer_weights *l,
            l->ffn_down_shexp;
 }
 
-void lgn_weights_validate_layout(const ds4_weights *w,
+void lgn_weights_validate_layout(const lgn2_weights *w,
                                  uint32_t layer_start,
                                  uint32_t layer_end,
                                  bool require_token_embd,
                                  bool require_output) {
-    const ds4_shape *s = &LGN_SHAPE_LAGUNA_S21;
+    const lgn2_shape *s = &LGN_SHAPE_LAGUNA_S21;
     if (!w) lgn_die("internal error: missing weights while validating Laguna layout");
     if (layer_start >= s->n_layer) lgn_die("invalid first layer in Laguna weight layout validation");
     if (layer_end == UINT32_MAX) layer_end = s->n_layer - 1u;
@@ -723,7 +723,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
     /* Poolside published two coherent recipes under the same Q4_K_M
      * filename. The embedding type identifies full models; attention Q is
      * the equivalent marker for layer-only weight views. */
-    const ds4_tensor *layout_marker = w->token_embd;
+    const lgn2_tensor *layout_marker = w->token_embd;
     if (!layout_marker) layout_marker = w->layer[layer_start].attn_q;
     if (!layout_marker) lgn_die("cannot identify Laguna quantization layout");
     const bool signal_q8 = layout_marker->type == LGN_TENSOR_Q8_0;
@@ -732,7 +732,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
         (!w->token_embd && layout_marker->type == LGN_TENSOR_F16);
     if (!signal_q8 && !legacy_layout) {
         fprintf(stderr,
-                "ds4: unsupported Laguna quantization layout marker %s; "
+                "lgn2: unsupported Laguna quantization layout marker %s; "
                 "expected legacy Q4_K/F16 or Q8_0 signal weights\n",
                 lgn_model_tensor_type_name(layout_marker->type));
         exit(1);
@@ -761,9 +761,9 @@ void lgn_weights_validate_layout(const ds4_weights *w,
     }
 
     for (uint32_t il = layer_start; il <= layer_end; il++) {
-        const ds4_layer_weights *l = &w->layer[il];
+        const lgn2_layer_weights *l = &w->layer[il];
         if (!lgn_weights_laguna_layer_has_required(l, il)) {
-            fprintf(stderr, "ds4: required Laguna tensors for layer %u are missing\n", il);
+            fprintf(stderr, "lgn2: required Laguna tensors for layer %u are missing\n", il);
             exit(1);
         }
         const uint32_t n_head = lgn_layer_head_count(il);
@@ -810,7 +810,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
             layer_routed_type != LGN_TENSOR_Q3_K &&
             layer_routed_type != LGN_TENSOR_Q2_K) {
             fprintf(stderr,
-                    "ds4: Laguna routed experts for layer %u have unsupported type %s\n",
+                    "lgn2: Laguna routed experts for layer %u have unsupported type %s\n",
                     il, lgn_model_tensor_type_name(layer_routed_type));
             exit(1);
         }
@@ -827,7 +827,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
              !signal_q8 && l->ffn_down_exps->type == LGN_TENSOR_Q6_K);
         if (!down_supported) {
             fprintf(stderr,
-                    "ds4: Laguna routed down tensor for layer %u has type %s, "
+                    "lgn2: Laguna routed down tensor for layer %u has type %s, "
                     "incompatible with %s gate/up experts\n",
                     il,
                     lgn_model_tensor_type_name(l->ffn_down_exps->type),
@@ -848,7 +848,7 @@ void lgn_weights_validate_layout(const ds4_weights *w,
             shared_down_type != LGN_TENSOR_Q4_K &&
             shared_down_type != LGN_TENSOR_Q6_K) {
             fprintf(stderr,
-                    "ds4: Laguna shared down tensor for layer %u has unsupported type %s\n",
+                    "lgn2: Laguna shared down tensor for layer %u has unsupported type %s\n",
                     il, lgn_model_tensor_type_name(shared_down_type));
             exit(1);
         }
@@ -857,8 +857,8 @@ void lgn_weights_validate_layout(const ds4_weights *w,
     }
 }
 
-static void lgn_weights_bind_output(ds4_weights *w,
-                                    const ds4_model *m,
+static void lgn_weights_bind_output(lgn2_weights *w,
+                                    const lgn2_model *m,
                                     bool required,
                                     bool optional) {
     if (required) {
@@ -875,8 +875,8 @@ static void lgn_weights_bind_output(ds4_weights *w,
     }
 }
 
-static void lgn_weights_bind_layer(ds4_layer_weights *l,
-                                   const ds4_model *m,
+static void lgn_weights_bind_layer(lgn2_layer_weights *l,
+                                   const lgn2_model *m,
                                    uint32_t il) {
     l->attn_norm = lgn_required_tensorf(m, "blk.%u.attn_norm.weight", il);
     l->attn_q = lgn_required_tensorf(m, "blk.%u.attn_q.weight", il);
@@ -905,8 +905,8 @@ static void lgn_weights_bind_layer(ds4_layer_weights *l,
     l->ffn_down_shexp = lgn_required_tensorf(m, "blk.%u.ffn_down_shexp.weight", il);
 }
 
-void lgn_weights_bind(ds4_weights *w,
-                      const ds4_model *m) {
+void lgn_weights_bind(lgn2_weights *w,
+                      const lgn2_model *m) {
     const uint32_t executable_layers = LGN_SHAPE_LAGUNA_S21.n_layer;
     if (executable_layers != LGN_MODEL_MAX_LAYER) {
         lgn_die("Laguna weight-table capacity does not match the immutable profile");

@@ -1,10 +1,10 @@
-#include "ds4.h"
-#include "ds4_help.h"
+#include "lgn2.h"
+#include "lgn2_help.h"
 
-/* ds4-eval: small built-in benchmark integration test.
+/* lgn2-eval: small built-in benchmark integration test.
  *
  * This program is deliberately not a unit test.  It loads the real model,
- * renders chat prompts, prefills them through ds4_session_sync(), samples the
+ * renders chat prompts, prefills them through lgn2_session_sync(), samples the
  * continuation token by token, and grades the final answer.  The terminal UI is
  * also intentionally simple: no ncurses, just ANSI cursor movement, colors, and
  * a fixed two-pane layout.
@@ -12,7 +12,7 @@
  * The embedded questions are small fixed subsets of GPQA Diamond, SuperGPQA,
  * AIME 2025, and COMPSEC.  The SuperGPQA slice is intentionally audited: rows
  * with wrong keys, missing figures, or underspecified prompts are replaced
- * instead of being locally re-keyed, because ds4-eval is a regression harness
+ * instead of being locally re-keyed, because lgn2-eval is a regression harness
  * and a bad target is worse than a merely hard target.  COMPSEC contains a
  * small audited subset of reduced C/C++ single-function vulnerability
  * localization questions derived from public CVE writeups; the CVE anchors and
@@ -1209,7 +1209,7 @@ typedef struct {
     int soft_limit_reply_budget;
     int hard_limit_reply_budget;
     int soft_limit_think_close_rank;
-    ds4_think_mode think_mode;
+    lgn2_think_mode think_mode;
     bool plain;
     bool warm_weights;
     bool quality;
@@ -1330,7 +1330,7 @@ static void buf_append(byte_buf *b, const char *p, size_t n) {
         while (cap < b->len + n + 1) cap *= 2;
         char *v = realloc(b->v, cap);
         if (!v) {
-            fprintf(stderr, "ds4-eval: out of memory\n");
+            fprintf(stderr, "lgn2-eval: out of memory\n");
             exit(1);
         }
         b->v = v;
@@ -1354,7 +1354,7 @@ static void buf_appendf(byte_buf *b, const char *fmt, ...) {
     }
     char *tmp = malloc((size_t)n + 1);
     if (!tmp) {
-        fprintf(stderr, "ds4-eval: out of memory\n");
+        fprintf(stderr, "lgn2-eval: out of memory\n");
         exit(1);
     }
     vsnprintf(tmp, (size_t)n + 1, fmt, ap);
@@ -1384,7 +1384,7 @@ static void style_append(style_buf *b, unsigned char style, size_t n) {
         while (cap < b->len + n) cap *= 2;
         unsigned char *v = realloc(b->v, cap);
         if (!v) {
-            fprintf(stderr, "ds4-eval: out of memory\n");
+            fprintf(stderr, "lgn2-eval: out of memory\n");
             exit(1);
         }
         b->v = v;
@@ -1426,7 +1426,7 @@ static int parse_int_arg(const char *s, const char *opt) {
     char *end = NULL;
     long v = strtol(s, &end, 10);
     if (s[0] == '\0' || *end != '\0' || v <= 0 || v > INT_MAX) {
-        fprintf(stderr, "ds4-eval: invalid value for %s: %s\n", opt, s);
+        fprintf(stderr, "lgn2-eval: invalid value for %s: %s\n", opt, s);
         exit(2);
     }
     return (int)v;
@@ -1436,7 +1436,7 @@ static uint64_t parse_u64_arg(const char *s, const char *opt) {
     char *end = NULL;
     unsigned long long v = strtoull(s, &end, 10);
     if (s[0] == '\0' || *end != '\0' || v == 0) {
-        fprintf(stderr, "ds4-eval: invalid value for %s: %s\n", opt, s);
+        fprintf(stderr, "lgn2-eval: invalid value for %s: %s\n", opt, s);
         exit(2);
     }
     return (uint64_t)v;
@@ -1446,7 +1446,7 @@ static float parse_float_arg(const char *s, const char *opt, float min, float ma
     char *end = NULL;
     float v = strtof(s, &end);
     if (s[0] == '\0' || *end != '\0' || !isfinite(v) || v < min || v > max) {
-        fprintf(stderr, "ds4-eval: invalid value for %s: %s\n", opt, s);
+        fprintf(stderr, "lgn2-eval: invalid value for %s: %s\n", opt, s);
         exit(2);
     }
     return v;
@@ -1454,7 +1454,7 @@ static float parse_float_arg(const char *s, const char *opt, float min, float ma
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
     if (*i + 1 >= argc) {
-        fprintf(stderr, "ds4-eval: %s requires an argument\n", opt);
+        fprintf(stderr, "lgn2-eval: %s requires an argument\n", opt);
         exit(2);
     }
     return argv[++*i];
@@ -1484,26 +1484,26 @@ static bool eval_option_is_unsupported(const char *arg) {
 
 static void eval_reject_unsupported_option(const char *arg) {
     fprintf(stderr,
-            "ds4-eval: unsupported option %s; this product supports Laguna S2.1 on Apple Metal only\n",
+            "lgn2-eval: unsupported option %s; this product supports Laguna S2.1 on Apple Metal only\n",
             arg);
     exit(2);
 }
 
 static void usage(FILE *fp, const char *topic) {
-    ds4_help_print(fp, DS4_HELP_EVAL, topic);
+    lgn2_help_print(fp, LGN2_HELP_EVAL, topic);
 }
 
 static eval_config parse_options(int argc, char **argv) {
     eval_config c = {
-        .model_path = "ds4flash.gguf",
+        .model_path = "lgn2.gguf",
         .max_tokens = 16000,
-        .top_p = DS4_DEFAULT_TOP_P,
-        .min_p = DS4_DEFAULT_MIN_P,
+        .top_p = LGN2_DEFAULT_TOP_P,
+        .min_p = LGN2_DEFAULT_MIN_P,
         .pause_ms = 350,
         .soft_limit_reply_budget = 1024,
         .hard_limit_reply_budget = 512,
         .soft_limit_think_close_rank = 3,
-        .think_mode = DS4_THINK_HIGH,
+        .think_mode = LGN2_THINK_HIGH,
     };
 
     for (int i = 1; i < argc; i++) {
@@ -1567,17 +1567,17 @@ static eval_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--warm-weights")) {
             c.warm_weights = true;
         } else if (!strcmp(arg, "--think")) {
-            c.think_mode = DS4_THINK_HIGH;
+            c.think_mode = LGN2_THINK_HIGH;
         } else if (!strcmp(arg, "--think-max")) {
-            c.think_mode = DS4_THINK_MAX;
+            c.think_mode = LGN2_THINK_MAX;
         } else if (!strcmp(arg, "--nothink")) {
-            c.think_mode = DS4_THINK_NONE;
+            c.think_mode = LGN2_THINK_NONE;
         } else if (!strcmp(arg, "--plain")) {
             c.plain = true;
         } else if (!strcmp(arg, "--self-test-extractors")) {
             c.self_test_extractors = true;
         } else {
-            fprintf(stderr, "ds4-eval: unknown option: %s\n", arg);
+            fprintf(stderr, "lgn2-eval: unknown option: %s\n", arg);
             usage(stderr, NULL);
             exit(2);
         }
@@ -1586,27 +1586,27 @@ static eval_config parse_options(int argc, char **argv) {
 
     if (c.max_tokens > EVAL_MAX_CONTEXT) {
         fprintf(stderr,
-                "ds4-eval: --tokens (%d) exceeds the %d token context cap\n",
+                "lgn2-eval: --tokens (%d) exceeds the %d token context cap\n",
                 c.max_tokens, EVAL_MAX_CONTEXT);
         exit(2);
     }
     if (c.ctx_size > EVAL_MAX_CONTEXT) {
         fprintf(stderr,
-                "ds4-eval: --ctx (%d) exceeds the %d token context cap\n",
+                "lgn2-eval: --ctx (%d) exceeds the %d token context cap\n",
                 c.ctx_size, EVAL_MAX_CONTEXT);
         exit(2);
     }
-    if (ds4_think_mode_enabled(c.think_mode) &&
+    if (lgn2_think_mode_enabled(c.think_mode) &&
         c.hard_limit_reply_budget >= c.max_tokens) {
         fprintf(stderr,
-                "ds4-eval: --hard-limit-reply-budget (%d) must be smaller than --tokens (%d)\n",
+                "lgn2-eval: --hard-limit-reply-budget (%d) must be smaller than --tokens (%d)\n",
                 c.hard_limit_reply_budget, c.max_tokens);
         exit(2);
     }
-    if (ds4_think_mode_enabled(c.think_mode) &&
+    if (lgn2_think_mode_enabled(c.think_mode) &&
         c.soft_limit_reply_budget < c.hard_limit_reply_budget) {
         fprintf(stderr,
-                "ds4-eval: --soft-limit-reply-budget (%d) must be >= --hard-limit-reply-budget (%d)\n",
+                "lgn2-eval: --soft-limit-reply-budget (%d) must be >= --hard-limit-reply-budget (%d)\n",
                 c.soft_limit_reply_budget, c.hard_limit_reply_budget);
         exit(2);
     }
@@ -1904,7 +1904,7 @@ static void tui_draw_title(eval_ui *ui) {
     tui_clear_left_line(ui, 1);
     char elapsed[32];
     format_run_elapsed(elapsed, sizeof(elapsed), tui_run_clock_visible_sec(ui));
-    fputs("ds4-eval (" ANSI_BOLD "p" ANSI_RESET ")ause (" ANSI_BOLD "q" ANSI_RESET ")uit", stdout);
+    fputs("lgn2-eval (" ANSI_BOLD "p" ANSI_RESET ")ause (" ANSI_BOLD "q" ANSI_RESET ")uit", stdout);
     printf(" %s", elapsed);
     if (ui->paused) {
         fputs(" " ANSI_RED ANSI_BOLD "PAUSED" ANSI_RESET, stdout);
@@ -2032,7 +2032,7 @@ static void stream_append_token_text(eval_ui *ui, const char *text, size_t len, 
     size_t total = ui->pending_tag_len + len;
     char *tmp = malloc(total ? total : 1);
     if (!tmp) {
-        fprintf(stderr, "ds4-eval: out of memory\n");
+        fprintf(stderr, "lgn2-eval: out of memory\n");
         exit(1);
     }
     if (ui->pending_tag_len) memcpy(tmp, ui->pending_tag, ui->pending_tag_len);
@@ -2104,7 +2104,7 @@ static void tui_draw_stream(eval_ui *ui) {
                 line_cap = line_cap ? line_cap * 2 : 64;
                 line_span *v = realloc(lines, (size_t)line_cap * sizeof(*lines));
                 if (!v) {
-                    fprintf(stderr, "ds4-eval: out of memory\n");
+                    fprintf(stderr, "lgn2-eval: out of memory\n");
                     exit(1);
                 }
                 lines = v;
@@ -2119,7 +2119,7 @@ static void tui_draw_stream(eval_ui *ui) {
             line_cap = line_cap ? line_cap * 2 : 64;
             line_span *v = realloc(lines, (size_t)line_cap * sizeof(*lines));
             if (!v) {
-                fprintf(stderr, "ds4-eval: out of memory\n");
+                fprintf(stderr, "lgn2-eval: out of memory\n");
                 exit(1);
             }
             lines = v;
@@ -2225,7 +2225,7 @@ static void tui_start(eval_ui *ui, const eval_case *cases, int ncases, int max_t
     ui->prompt_tokens = calloc((size_t)ncases, sizeof(*ui->prompt_tokens));
     ui->generated_tokens = calloc((size_t)ncases, sizeof(*ui->generated_tokens));
     if (!ui->status || !ui->guess || !ui->prompt_tokens || !ui->generated_tokens) {
-        fprintf(stderr, "ds4-eval: out of memory\n");
+        fprintf(stderr, "lgn2-eval: out of memory\n");
         exit(1);
     }
     if (!enabled) return;
@@ -2324,7 +2324,7 @@ static char *build_question_prompt(const eval_case *tc) {
     return empty;
 }
 
-static int eval_max_prompt_tokens(ds4_engine *engine,
+static int eval_max_prompt_tokens(lgn2_engine *engine,
                                   const eval_config *cfg,
                                   const eval_case *cases,
                                   int ncases,
@@ -2333,29 +2333,29 @@ static int eval_max_prompt_tokens(ds4_engine *engine,
 {
     int max_prompt = 0;
     int max_case = -1;
-    const ds4_think_mode think_mode =
-        ds4_think_mode_for_context(cfg->think_mode, ctx_for_think_mode);
+    const lgn2_think_mode think_mode =
+        lgn2_think_mode_for_context(cfg->think_mode, ctx_for_think_mode);
 
     for (int i = 0; i < ncases; i++) {
         char *question = build_question_prompt(&cases[i]);
         if (!question) {
-            fprintf(stderr, "ds4-eval: failed to allocate prompt\n");
+            fprintf(stderr, "lgn2-eval: failed to allocate prompt\n");
             exit(1);
         }
-        ds4_tokens prompt = {0};
-        ds4_encode_chat_prompt(engine, eval_system_prompt(), question, think_mode, &prompt);
+        lgn2_tokens prompt = {0};
+        lgn2_encode_chat_prompt(engine, eval_system_prompt(), question, think_mode, &prompt);
         if (prompt.len > max_prompt) {
             max_prompt = prompt.len;
             max_case = i;
         }
-        ds4_tokens_free(&prompt);
+        lgn2_tokens_free(&prompt);
         free(question);
     }
     if (max_case_out) *max_case_out = max_case;
     return max_prompt;
 }
 
-static int eval_auto_context_size(ds4_engine *engine,
+static int eval_auto_context_size(lgn2_engine *engine,
                                   eval_config *cfg,
                                   const eval_case *cases,
                                   int ncases,
@@ -2365,8 +2365,8 @@ static int eval_auto_context_size(ds4_engine *engine,
     int ctx = EVAL_MAX_CONTEXT;
     int max_prompt = 0;
     int max_case = -1;
-    const int min_ctx = cfg->think_mode == DS4_THINK_MAX ?
-                        (int)ds4_think_max_min_context() : 1;
+    const int min_ctx = cfg->think_mode == LGN2_THINK_MAX ?
+                        (int)lgn2_think_max_min_context() : 1;
 
     /* Think Max downgrades to normal thinking under its minimum context.  Size
      * the prompts iteratively so the prompt tokenizer sees the same effective
@@ -2377,7 +2377,7 @@ static int eval_auto_context_size(ds4_engine *engine,
         if (required < min_ctx) required = min_ctx;
         if (required > EVAL_MAX_CONTEXT) {
             fprintf(stderr,
-                    "ds4-eval: largest prompt (%d tokens, case %d) + --tokens (%d) exceeds the %d token context cap\n",
+                    "lgn2-eval: largest prompt (%d tokens, case %d) + --tokens (%d) exceeds the %d token context cap\n",
                     max_prompt, max_case + 1, cfg->max_tokens, EVAL_MAX_CONTEXT);
             exit(2);
         }
@@ -2391,20 +2391,20 @@ static int eval_auto_context_size(ds4_engine *engine,
 }
 
 static void eval_warn_think_max_downgraded(const eval_config *cfg) {
-    if (cfg->think_mode != DS4_THINK_MAX ||
-        ds4_think_mode_for_context(cfg->think_mode, cfg->ctx_size) == DS4_THINK_MAX) {
+    if (cfg->think_mode != LGN2_THINK_MAX ||
+        lgn2_think_mode_for_context(cfg->think_mode, cfg->ctx_size) == LGN2_THINK_MAX) {
         return;
     }
     fprintf(stderr,
-            "ds4-eval: warning: --think-max needs --ctx >= %u; ctx=%d uses normal thinking instead\n",
-            ds4_think_max_min_context(),
+            "lgn2-eval: warning: --think-max needs --ctx >= %u; ctx=%d uses normal thinking instead\n",
+            lgn2_think_max_min_context(),
             cfg->ctx_size);
 }
 
 static void eval_warn_context_budget(const eval_config *cfg, int max_prompt_tokens, int max_prompt_case) {
     if (max_prompt_tokens >= cfg->ctx_size) {
         fprintf(stderr,
-                "ds4-eval: warning: largest prompt (%d tokens, case=%d) does not fit ctx=%d\n",
+                "lgn2-eval: warning: largest prompt (%d tokens, case=%d) does not fit ctx=%d\n",
                 max_prompt_tokens,
                 max_prompt_case + 1,
                 cfg->ctx_size);
@@ -2414,7 +2414,7 @@ static void eval_warn_context_budget(const eval_config *cfg, int max_prompt_toke
     const int room = cfg->ctx_size - max_prompt_tokens;
     if (room < cfg->max_tokens) {
         fprintf(stderr,
-                "ds4-eval: warning: largest prompt (%d tokens, case=%d) leaves %d generation tokens in ctx=%d; requested %d\n",
+                "lgn2-eval: warning: largest prompt (%d tokens, case=%d) leaves %d generation tokens in ctx=%d; requested %d\n",
                 max_prompt_tokens,
                 max_prompt_case + 1,
                 room,
@@ -2446,11 +2446,11 @@ static const char *think_close_kind_name(eval_think_close_kind kind) {
     }
 }
 
-static int token_rank_in_top(ds4_session *session, int token, int max_rank) {
+static int token_rank_in_top(lgn2_session *session, int token, int max_rank) {
     if (token < 0 || max_rank <= 0) return 0;
-    ds4_token_score *top = malloc((size_t)max_rank * sizeof(*top));
+    lgn2_token_score *top = malloc((size_t)max_rank * sizeof(*top));
     if (!top) return 0;
-    int n = ds4_session_top_logprobs(session, top, max_rank);
+    int n = lgn2_session_top_logprobs(session, top, max_rank);
     int rank = 0;
     for (int i = 0; i < n; i++) {
         if (top[i].id == token) {
@@ -2468,7 +2468,7 @@ static void trace_write_header(FILE *trace, const eval_config *cfg,
                                int max_prompt_tokens) {
     if (!trace) return;
     fprintf(trace,
-            "# ds4-eval trace\n"
+            "# lgn2-eval trace\n"
             "started_unix: %lld\n"
             "model: %s\n"
             "model_shape: %s\n"
@@ -2497,7 +2497,7 @@ static void trace_write_header(FILE *trace, const eval_config *cfg,
             cfg->top_p,
             cfg->min_p,
             (unsigned long long)cfg->seed,
-            ds4_think_mode_name(cfg->think_mode),
+            lgn2_think_mode_name(cfg->think_mode),
             cfg->soft_limit_reply_budget,
             cfg->hard_limit_reply_budget,
             cfg->soft_limit_think_close_rank);
@@ -2514,7 +2514,7 @@ static void trace_write_case(FILE *trace,
                              const char *system_prompt,
                              const char *question_prompt,
                              const char *model_output,
-                             ds4_think_mode effective_think_mode,
+                             lgn2_think_mode effective_think_mode,
                              int prompt_tokens,
                              int generated_tokens,
                              double elapsed_sec,
@@ -2554,7 +2554,7 @@ static void trace_write_case(FILE *trace,
             cfg->temperature,
             cfg->top_p,
             cfg->min_p,
-            ds4_think_mode_name(effective_think_mode));
+            lgn2_think_mode_name(effective_think_mode));
     if (think_close && think_close->kind != EVAL_THINK_CLOSE_NONE) {
         fprintf(trace,
                 "think_close: %s\n"
@@ -2926,19 +2926,19 @@ static bool answer_matches(const eval_case *tc, const char *got) {
 static char *read_text_file(const char *path, size_t *len_out) {
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        fprintf(stderr, "ds4-eval: cannot open trace '%s': %s\n",
+        fprintf(stderr, "lgn2-eval: cannot open trace '%s': %s\n",
                 path, strerror(errno));
         return NULL;
     }
     if (fseek(fp, 0, SEEK_END) != 0) {
-        fprintf(stderr, "ds4-eval: cannot seek trace '%s': %s\n",
+        fprintf(stderr, "lgn2-eval: cannot seek trace '%s': %s\n",
                 path, strerror(errno));
         fclose(fp);
         return NULL;
     }
     long len_long = ftell(fp);
     if (len_long < 0) {
-        fprintf(stderr, "ds4-eval: cannot tell trace size '%s': %s\n",
+        fprintf(stderr, "lgn2-eval: cannot tell trace size '%s': %s\n",
                 path, strerror(errno));
         fclose(fp);
         return NULL;
@@ -2948,12 +2948,12 @@ static char *read_text_file(const char *path, size_t *len_out) {
     size_t len = (size_t)len_long;
     char *buf = malloc(len + 1);
     if (!buf) {
-        fprintf(stderr, "ds4-eval: out of memory\n");
+        fprintf(stderr, "lgn2-eval: out of memory\n");
         fclose(fp);
         return NULL;
     }
     if (len && fread(buf, 1, len, fp) != len) {
-        fprintf(stderr, "ds4-eval: cannot read trace '%s': %s\n",
+        fprintf(stderr, "lgn2-eval: cannot read trace '%s': %s\n",
                 path, ferror(fp) ? strerror(errno) : "short read");
         free(buf);
         fclose(fp);
@@ -3129,7 +3129,7 @@ static char *trace_copy_model_output(const char *case_start, const char *case_en
 
     char *out = malloc(len + 1);
     if (!out) {
-        fprintf(stderr, "ds4-eval: out of memory\n");
+        fprintf(stderr, "lgn2-eval: out of memory\n");
         return NULL;
     }
     memcpy(out, content, len);
@@ -3194,7 +3194,7 @@ static int regrade_trace_file(const char *path) {
         char traced_pick[EVAL_ANSWER_MAX];
         if (!trace_get_line_field(case_start, case_end, "source: ", source, sizeof(source)) ||
             !trace_get_line_field(case_start, case_end, "id: ", id, sizeof(id))) {
-            fprintf(stderr, "ds4-eval: trace case %d is missing source/id\n", total);
+            fprintf(stderr, "lgn2-eval: trace case %d is missing source/id\n", total);
             parse_errors++;
             continue;
         }
@@ -3203,7 +3203,7 @@ static int regrade_trace_file(const char *path) {
 
         const eval_case *tc = find_eval_case_by_source_id(source, id);
         if (!tc) {
-            fprintf(stderr, "ds4-eval: trace case %d not found in embedded cases: %s/%s\n",
+            fprintf(stderr, "lgn2-eval: trace case %d not found in embedded cases: %s/%s\n",
                     total, source, id);
             unknown++;
             continue;
@@ -3211,7 +3211,7 @@ static int regrade_trace_file(const char *path) {
 
         char *model_output = trace_copy_model_output(case_start, case_end);
         if (!model_output) {
-            fprintf(stderr, "ds4-eval: trace case %d is missing MODEL_OUTPUT block: %s/%s\n",
+            fprintf(stderr, "lgn2-eval: trace case %d is missing MODEL_OUTPUT block: %s/%s\n",
                     total, source, id);
             parse_errors++;
             continue;
@@ -3242,7 +3242,7 @@ static int regrade_trace_file(const char *path) {
         free(model_output);
     }
 
-    printf("ds4-eval: regraded %d cases from %s: passed=%d failed=%d changed=%d not_graded=%d unknown=%d parse_errors=%d\n",
+    printf("lgn2-eval: regraded %d cases from %s: passed=%d failed=%d changed=%d not_graded=%d unknown=%d parse_errors=%d\n",
            total, path, passed, failed, changed, not_graded, unknown, parse_errors);
     free(text);
     return (unknown || parse_errors || total == 0) ? 1 : 0;
@@ -3256,7 +3256,7 @@ static int extractor_self_test_case(const char *name, const eval_case *tc,
     if (strcmp(got, expected_extract) == 0 && answer_matches(tc, got)) return 0;
 
     fprintf(stderr,
-            "ds4-eval: extractor self-test failed: %s (got %s, expected %s, key %s)\n",
+            "lgn2-eval: extractor self-test failed: %s (got %s, expected %s, key %s)\n",
             name, got, expected_extract, tc->answer ? tc->answer : "?");
     return 1;
 }
@@ -3286,7 +3286,7 @@ static int trace_copy_self_test_case(void) {
                      strlen(prompt_output), prompt_output,
                      strlen(model_output), model_output);
     if (n < 0 || (size_t)n >= sizeof(trace_case)) {
-        fprintf(stderr, "ds4-eval: trace self-test setup failed\n");
+        fprintf(stderr, "lgn2-eval: trace self-test setup failed\n");
         return 1;
     }
 
@@ -3297,13 +3297,13 @@ static int trace_copy_self_test_case(void) {
     after_header = after_header ? after_header + 1 : trace_end;
     const char *second = first ? trace_find_next_case(after_header, trace_end) : NULL;
     if (!first || !second || !strstr(second, "===== CASE 2/2")) {
-        fprintf(stderr, "ds4-eval: trace self-test failed: embedded case marker skip\n");
+        fprintf(stderr, "lgn2-eval: trace self-test failed: embedded case marker skip\n");
         return 1;
     }
 
     char *copied = trace_copy_model_output(first, second);
     if (!copied || strcmp(copied, model_output) != 0) {
-        fprintf(stderr, "ds4-eval: trace self-test failed: MODEL_OUTPUT byte copy\n");
+        fprintf(stderr, "lgn2-eval: trace self-test failed: MODEL_OUTPUT byte copy\n");
         free(copied);
         return 1;
     }
@@ -3318,20 +3318,20 @@ static int regrade_status_self_test_case(void) {
 
     if (regrade_case_outcome(&integer, "PASSED", "</think>Answer: 82",
                              got, sizeof(got)) != REGRADE_PASSED) {
-        fprintf(stderr, "ds4-eval: regrade self-test failed: PASSED trace not regraded\n");
+        fprintf(stderr, "lgn2-eval: regrade self-test failed: PASSED trace not regraded\n");
         failed++;
     }
     /* An interrupted run whose partial output happens to look correct must not
      * be counted or flagged as drift. */
     if (regrade_case_outcome(&integer, "STOPPED", "</think>Answer: 82",
                              got, sizeof(got)) != REGRADE_NOT_GRADED) {
-        fprintf(stderr, "ds4-eval: regrade self-test failed: STOPPED trace was graded\n");
+        fprintf(stderr, "lgn2-eval: regrade self-test failed: STOPPED trace was graded\n");
         failed++;
     }
     /* Legacy traces without a status line stay gradeable. */
     if (regrade_case_outcome(&integer, "", "</think>Answer: 82",
                              got, sizeof(got)) != REGRADE_PASSED) {
-        fprintf(stderr, "ds4-eval: regrade self-test failed: legacy empty status not graded\n");
+        fprintf(stderr, "lgn2-eval: regrade self-test failed: legacy empty status not graded\n");
         failed++;
     }
     return failed;
@@ -3490,7 +3490,7 @@ static int run_extractor_self_tests(void) {
         &int_82, "</think>Answer: 82\nThe value 2025 is just the year.", "82");
 
     if (failed) return 1;
-    printf("ds4-eval: answer extractor self-tests passed\n");
+    printf("lgn2-eval: answer extractor self-tests passed\n");
     return 0;
 }
 
@@ -3542,23 +3542,23 @@ static void eval_prefill_progress(void *ud, const char *event, int current, int 
     if (paused_sec > 0.0) ui->phase_start_sec += paused_sec;
 }
 
-static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
+static eval_run_result run_one_case(lgn2_engine *engine, lgn2_session *session,
                                     const eval_config *cfg, eval_ui *ui,
                                     FILE *trace, int idx, uint64_t *rng) {
     const eval_case *tc = &eval_cases[idx];
     const bool tty = ui->enabled;
     const bool use_plain_color = !tty && isatty(STDOUT_FILENO);
-    const ds4_think_mode think_mode = ds4_think_mode_for_context(cfg->think_mode, cfg->ctx_size);
+    const lgn2_think_mode think_mode = lgn2_think_mode_for_context(cfg->think_mode, cfg->ctx_size);
     const char *system = eval_system_prompt();
 
     char *question = build_question_prompt(tc);
     if (!question) {
-        fprintf(stderr, "ds4-eval: failed to allocate prompt\n");
+        fprintf(stderr, "lgn2-eval: failed to allocate prompt\n");
         return EVAL_RUN_ERROR;
     }
 
-    ds4_tokens prompt = {0};
-    ds4_encode_chat_prompt(engine, system, question, think_mode, &prompt);
+    lgn2_tokens prompt = {0};
+    lgn2_encode_chat_prompt(engine, system, question, think_mode, &prompt);
     ui->prompt_tokens[idx] = prompt.len;
     ui->generated_tokens[idx] = 0;
 
@@ -3576,7 +3576,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
                    idx + 1, ui->ncases, tc->source, tc->id, prompt.len, cfg->ctx_size);
         }
         free(question);
-        ds4_tokens_free(&prompt);
+        lgn2_tokens_free(&prompt);
         return EVAL_RUN_OK;
     }
 
@@ -3597,7 +3597,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
                    idx + 1, ui->ncases, tc->source, tc->id, prompt.len, cfg->ctx_size);
         }
         free(question);
-        ds4_tokens_free(&prompt);
+        lgn2_tokens_free(&prompt);
         return EVAL_RUN_OK;
     }
 
@@ -3611,7 +3611,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
     if (ui->think_max_tokens < 0) ui->think_max_tokens = 0;
     tui_run_clock_start(ui);
     if (tty) {
-        tui_reset_stream(ui, tc, ds4_think_mode_enabled(think_mode));
+        tui_reset_stream(ui, tc, lgn2_think_mode_enabled(think_mode));
         tui_refresh(ui, "prefill");
     } else {
         printf("\n%s[%d/%d] %s%s%s/%s%s%s %s%s\n",
@@ -3626,24 +3626,24 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
     }
 
     char err[256];
-    ds4_session_set_progress(session, eval_prefill_progress, ui);
-    ds4_session_set_display_progress(session, eval_prefill_progress, ui);
-    if (ds4_session_sync(session, &prompt, err, sizeof(err)) != 0) {
-        ds4_session_set_progress(session, NULL, NULL);
-        ds4_session_set_display_progress(session, NULL, NULL);
+    lgn2_session_set_progress(session, eval_prefill_progress, ui);
+    lgn2_session_set_display_progress(session, eval_prefill_progress, ui);
+    if (lgn2_session_sync(session, &prompt, err, sizeof(err)) != 0) {
+        lgn2_session_set_progress(session, NULL, NULL);
+        lgn2_session_set_display_progress(session, NULL, NULL);
         tui_run_clock_stop(ui);
-        fprintf(stderr, "ds4-eval: prefill failed for %s: %s\n", tc->id, err);
+        fprintf(stderr, "lgn2-eval: prefill failed for %s: %s\n", tc->id, err);
         trace_write_case(trace, cfg, tc, idx, ui->ncases, "ERROR", err,
                          system, question, "", think_mode, prompt.len, 0, 0.0, "?", NULL);
         free(question);
-        ds4_tokens_free(&prompt);
+        lgn2_tokens_free(&prompt);
         return EVAL_RUN_ERROR;
     }
-    ds4_session_set_progress(session, NULL, NULL);
-    ds4_session_set_display_progress(session, NULL, NULL);
+    lgn2_session_set_progress(session, NULL, NULL);
+    lgn2_session_set_display_progress(session, NULL, NULL);
     int prompt_tokens = prompt.len;
     ui->prompt_tokens[idx] = prompt_tokens;
-    ds4_tokens_free(&prompt);
+    lgn2_tokens_free(&prompt);
 
     tui_consume_input(ui);
     tui_wait_if_paused(ui, "prefill");
@@ -3672,11 +3672,11 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
     ui->phase_start_sec = now_sec();
     ui->speed_tps = 0.0;
     byte_buf raw = {0};
-    bool plain_in_think = ds4_think_mode_enabled(think_mode);
-    bool generation_in_think = ds4_think_mode_enabled(think_mode);
+    bool plain_in_think = lgn2_think_mode_enabled(think_mode);
+    bool generation_in_think = lgn2_think_mode_enabled(think_mode);
     eval_think_close_info think_close = {0};
-    ds4_tokens think_close_tokens = {0};
-    if (generation_in_think) ds4_tokenize_text(engine, "</think>", &think_close_tokens);
+    lgn2_tokens think_close_tokens = {0};
+    if (generation_in_think) lgn2_tokenize_text(engine, "</think>", &think_close_tokens);
     if (!tty && plain_in_think) plain_set_thinking_color(use_plain_color);
     tui_refresh(ui, "thinking");
 
@@ -3695,7 +3695,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
                                  prompt_tokens, ui->generated, now_sec() - t0, "?",
                                  &think_close);
                 free(question);
-                ds4_tokens_free(&think_close_tokens);
+                lgn2_tokens_free(&think_close_tokens);
                 buf_free(&raw);
                 return EVAL_RUN_QUIT;
             }
@@ -3709,7 +3709,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
                                  prompt_tokens, ui->generated, now_sec() - t0, "?",
                                  &think_close);
                 free(question);
-                ds4_tokens_free(&think_close_tokens);
+                lgn2_tokens_free(&think_close_tokens);
                 buf_free(&raw);
                 return EVAL_RUN_SWITCH;
             }
@@ -3728,7 +3728,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
                                  prompt_tokens, ui->generated, now_sec() - t0, "?",
                                  &think_close);
                 free(question);
-                ds4_tokens_free(&think_close_tokens);
+                lgn2_tokens_free(&think_close_tokens);
                 buf_free(&raw);
                 return EVAL_RUN_QUIT;
             }
@@ -3742,7 +3742,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
                                  prompt_tokens, ui->generated, now_sec() - t0, "?",
                                  &think_close);
                 free(question);
-                ds4_tokens_free(&think_close_tokens);
+                lgn2_tokens_free(&think_close_tokens);
                 buf_free(&raw);
                 return EVAL_RUN_SWITCH;
             }
@@ -3779,9 +3779,9 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
             }
         }
         if (token < 0)
-            token = ds4_session_sample(session, cfg->temperature, 0,
+            token = lgn2_session_sample(session, cfg->temperature, 0,
                                        cfg->top_p, cfg->min_p, rng);
-        if (ds4_token_is_stop(engine, token)) break;
+        if (lgn2_token_is_stop(engine, token)) break;
         if (close_kind != EVAL_THINK_CLOSE_NONE &&
             think_close.kind == EVAL_THINK_CLOSE_NONE) {
             think_close.kind = close_kind;
@@ -3789,23 +3789,23 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
             think_close.remaining_budget = remaining_budget;
             think_close.rank = close_rank;
         }
-        if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
+        if (lgn2_session_eval(session, token, err, sizeof(err)) != 0) {
             plain_reset_color(use_plain_color);
             ui->generated_tokens[idx] = ui->generated;
             tui_run_clock_stop(ui);
-            fprintf(stderr, "ds4-eval: decode failed for %s: %s\n", tc->id, err);
+            fprintf(stderr, "lgn2-eval: decode failed for %s: %s\n", tc->id, err);
             trace_write_case(trace, cfg, tc, idx, ui->ncases, "ERROR", err,
                              system, question, raw.v ? raw.v : "", think_mode,
                              prompt_tokens, ui->generated, now_sec() - t0, "?",
                              &think_close);
             free(question);
-            ds4_tokens_free(&think_close_tokens);
+            lgn2_tokens_free(&think_close_tokens);
             buf_free(&raw);
             return EVAL_RUN_ERROR;
         }
 
         size_t len = 0;
-        char *text = ds4_token_text(engine, token, &len);
+        char *text = lgn2_token_text(engine, token, &len);
         buf_append(&raw, text, len);
         ui->generated++;
         ui->generated_tokens[idx] = ui->generated;
@@ -3866,7 +3866,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
 
     if (tty && cfg->pause_ms > 0) usleep((useconds_t)cfg->pause_ms * 1000);
     free(question);
-    ds4_tokens_free(&think_close_tokens);
+    lgn2_tokens_free(&think_close_tokens);
     buf_free(&raw);
     return EVAL_RUN_OK;
 }
@@ -3885,7 +3885,7 @@ static int parse_case_sequence(const char *arg, int ncases, int **seq_out, int *
     int len = 0;
     int *seq = malloc((size_t)cap * sizeof(*seq));
     if (!seq) {
-        fprintf(stderr, "ds4-eval: out of memory while parsing --case-sequence\n");
+        fprintf(stderr, "lgn2-eval: out of memory while parsing --case-sequence\n");
         return -1;
     }
 
@@ -3898,7 +3898,7 @@ static int parse_case_sequence(const char *arg, int ncases, int **seq_out, int *
         long v = strtol(p, &end, 10);
         if (end == p || errno != 0 || v < 1 || v > ncases) {
             fprintf(stderr,
-                    "ds4-eval: invalid --case-sequence entry near '%s' "
+                    "lgn2-eval: invalid --case-sequence entry near '%s' "
                     "(valid range: 1..%d)\n",
                     p, ncases);
             free(seq);
@@ -3908,7 +3908,7 @@ static int parse_case_sequence(const char *arg, int ncases, int **seq_out, int *
             cap *= 2;
             int *new_seq = realloc(seq, (size_t)cap * sizeof(*seq));
             if (!new_seq) {
-                fprintf(stderr, "ds4-eval: out of memory while parsing --case-sequence\n");
+                fprintf(stderr, "lgn2-eval: out of memory while parsing --case-sequence\n");
                 free(seq);
                 return -1;
             }
@@ -3922,13 +3922,13 @@ static int parse_case_sequence(const char *arg, int ncases, int **seq_out, int *
             continue;
         }
         if (*p) {
-            fprintf(stderr, "ds4-eval: expected comma in --case-sequence near '%s'\n", p);
+            fprintf(stderr, "lgn2-eval: expected comma in --case-sequence near '%s'\n", p);
             free(seq);
             return -1;
         }
     }
     if (len == 0) {
-        fprintf(stderr, "ds4-eval: --case-sequence cannot be empty\n");
+        fprintf(stderr, "lgn2-eval: --case-sequence cannot be empty\n");
         free(seq);
         return -1;
     }
@@ -3938,9 +3938,9 @@ static int parse_case_sequence(const char *arg, int ncases, int **seq_out, int *
 }
 
 static void log_context_memory(int ctx_size) {
-    ds4_context_memory m = ds4_context_memory_estimate(ctx_size);
+    lgn2_context_memory m = lgn2_context_memory_estimate(ctx_size);
     fprintf(stderr,
-            "ds4-eval: Metal context buffers %.2f MiB (ctx=%d, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
+            "lgn2-eval: Metal context buffers %.2f MiB (ctx=%d, raw_kv_rows=%u, compressed_kv_rows=%u)\n",
             (double)m.total_bytes / (1024.0 * 1024.0),
             ctx_size,
             m.raw_cap,
@@ -3964,7 +3964,7 @@ static void print_eval_report(const eval_ui *ui, int ncases, int passed, int fai
     char elapsed[32];
     format_run_elapsed(elapsed, sizeof(elapsed), tui_run_clock_visible_sec(ui));
 
-    printf("ds4-eval: %d/%d passed", passed, ncases);
+    printf("lgn2-eval: %d/%d passed", passed, ncases);
     if (failed) printf(", %d failed", failed);
     printf(", runtime %s\n", elapsed);
     printf("%-3s %-8s %8s %8s %8s %-8s %-8s %s\n",
@@ -3995,7 +3995,7 @@ int main(int argc, char **argv) {
     int ncases = (int)(sizeof(eval_cases) / sizeof(eval_cases[0]));
     if (cfg.question_limit > 0 && cfg.question_limit < ncases) ncases = cfg.question_limit;
     if (cfg.question_limit > (int)(sizeof(eval_cases) / sizeof(eval_cases[0]))) {
-        fprintf(stderr, "ds4-eval: only %zu questions are embedded\n",
+        fprintf(stderr, "lgn2-eval: only %zu questions are embedded\n",
                 sizeof(eval_cases) / sizeof(eval_cases[0]));
         return 2;
     }
@@ -4015,14 +4015,14 @@ int main(int argc, char **argv) {
     if (cfg.trace_path) {
         trace = fopen(cfg.trace_path, "w");
         if (!trace) {
-            fprintf(stderr, "ds4-eval: cannot open trace '%s': %s\n",
+            fprintf(stderr, "lgn2-eval: cannot open trace '%s': %s\n",
                     cfg.trace_path, strerror(errno));
             free(case_sequence);
             return 2;
         }
     }
 
-    ds4_engine_options opt = {
+    lgn2_engine_options opt = {
         .model_path = cfg.model_path,
         .dflash_path = cfg.dflash_path,
         .n_threads = cfg.threads,
@@ -4034,8 +4034,8 @@ int main(int argc, char **argv) {
         .quality = cfg.quality,
     };
 
-    ds4_engine *engine = NULL;
-    if (ds4_engine_open(&engine, &opt) != 0) {
+    lgn2_engine *engine = NULL;
+    if (lgn2_engine_open(&engine, &opt) != 0) {
         if (trace) fclose(trace);
         free(case_sequence);
         return 1;
@@ -4048,28 +4048,28 @@ int main(int argc, char **argv) {
         cfg.ctx_size = eval_auto_context_size(engine, &cfg, eval_cases, ncases,
                                               &max_prompt_tokens, &max_prompt_case);
         fprintf(stderr,
-                "ds4-eval: context auto-sized to %d tokens "
+                "lgn2-eval: context auto-sized to %d tokens "
                 "(largest prompt=%d tokens, case=%d, generation budget=%d)\n",
                 cfg.ctx_size, max_prompt_tokens, max_prompt_case + 1, cfg.max_tokens);
     } else {
         max_prompt_tokens = eval_max_prompt_tokens(engine, &cfg, eval_cases, ncases,
                                                    cfg.ctx_size, &max_prompt_case);
         fprintf(stderr,
-                "ds4-eval: context set to %d tokens "
+                "lgn2-eval: context set to %d tokens "
                 "(largest prompt=%d tokens, case=%d, generation budget=%d)\n",
                 cfg.ctx_size, max_prompt_tokens, max_prompt_case + 1, cfg.max_tokens);
         eval_warn_context_budget(&cfg, max_prompt_tokens, max_prompt_case);
     }
-    fprintf(stderr, "ds4-eval: model shape %s\n", ds4_engine_model_name(engine));
+    fprintf(stderr, "lgn2-eval: model shape %s\n", lgn2_engine_model_name(engine));
     eval_warn_think_max_downgraded(&cfg);
-    trace_write_header(trace, &cfg, ds4_engine_model_name(engine), ncases, max_prompt_tokens);
+    trace_write_header(trace, &cfg, lgn2_engine_model_name(engine), ncases, max_prompt_tokens);
     log_context_memory(cfg.ctx_size);
 
-    ds4_session *session = NULL;
-    if (ds4_session_create(&session, engine, cfg.ctx_size) != 0) {
-        fprintf(stderr, "ds4-eval: failed to create session\n");
+    lgn2_session *session = NULL;
+    if (lgn2_session_create(&session, engine, cfg.ctx_size) != 0) {
+        fprintf(stderr, "lgn2-eval: failed to create session\n");
         if (trace) fclose(trace);
-        ds4_engine_close(engine);
+        lgn2_engine_close(engine);
         free(case_sequence);
         return 1;
     }
@@ -4144,8 +4144,8 @@ int main(int argc, char **argv) {
     }
 
     tui_free(&ui);
-    ds4_session_free(session);
-    ds4_engine_close(engine);
+    lgn2_session_free(session);
+    lgn2_engine_close(engine);
     if (trace) fclose(trace);
     free(case_sequence);
     return rc || failed ? 1 : 0;

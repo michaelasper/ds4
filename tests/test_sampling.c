@@ -1,4 +1,4 @@
-#include "../ds4.h"
+#include "../lgn2.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -215,7 +215,7 @@ static void compare_case(const float *logits, float *scratch, uint32_t n,
         uint64_t opt_rng = seed;
         const int ref = reference_sample(logits, n, temperature, top_k,
                                          top_p, min_p, &ref_rng);
-        const int opt = ds4_test_sample_logits(logits, n, temperature, top_k,
+        const int opt = lgn2_test_sample_logits(logits, n, temperature, top_k,
                                                top_p, min_p, &opt_rng, scratch);
         CHECK(ref == opt,
               "%s seed=%llu token reference=%d optimized=%d",
@@ -231,15 +231,15 @@ static void check_greedy_argmax_case(const float *logits, uint32_t n,
                                      int expected, const char *label) {
     uint64_t unrolled_rng = 0x1234u;
     uint64_t scalar_rng = unrolled_rng;
-    CHECK(unsetenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
+    CHECK(unsetenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
           "%s select unrolled argmax", label);
-    const int unrolled = ds4_test_sample_logits(
+    const int unrolled = lgn2_test_sample_logits(
             logits, n, 0.0f, 0, 1.0f, 0.0f, &unrolled_rng, NULL);
-    CHECK(setenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX", "1", 1) == 0,
+    CHECK(setenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX", "1", 1) == 0,
           "%s select scalar argmax", label);
-    const int scalar = ds4_test_sample_logits(
+    const int scalar = lgn2_test_sample_logits(
             logits, n, 0.0f, 0, 1.0f, 0.0f, &scalar_rng, NULL);
-    CHECK(unsetenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
+    CHECK(unsetenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
           "%s restore unrolled argmax", label);
     CHECK(unrolled == scalar,
           "%s unrolled=%d scalar=%d", label, unrolled, scalar);
@@ -252,15 +252,15 @@ static void check_greedy_argmax_case(const float *logits, uint32_t n,
 static void check_excluding_argmax_case(const float *logits, uint32_t n,
                                         int excluded_id, int expected,
                                         const char *label) {
-    CHECK(unsetenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
+    CHECK(unsetenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
           "%s select unrolled excluding argmax", label);
-    const int unrolled = ds4_test_argmax_excluding_logits(
+    const int unrolled = lgn2_test_argmax_excluding_logits(
             logits, n, excluded_id);
-    CHECK(setenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX", "1", 1) == 0,
+    CHECK(setenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX", "1", 1) == 0,
           "%s select scalar excluding argmax", label);
-    const int scalar = ds4_test_argmax_excluding_logits(
+    const int scalar = lgn2_test_argmax_excluding_logits(
             logits, n, excluded_id);
-    CHECK(unsetenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
+    CHECK(unsetenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
           "%s restore unrolled excluding argmax", label);
     CHECK(unrolled == scalar,
           "%s excluded=%d unrolled=%d scalar=%d",
@@ -277,9 +277,9 @@ static double now_sec(void) {
 }
 
 int main(void) {
-    CHECK(ds4_test_sample_arena_lifecycle() == 0,
+    CHECK(lgn2_test_sample_arena_lifecycle() == 0,
           "sampling arena reserve/reuse/grow/free lifecycle");
-    CHECK(ds4_test_logprob_cache_probe() == 0,
+    CHECK(lgn2_test_logprob_cache_probe() == 0,
           "logprob cache scans, reuse, and mutation invalidation");
 
     const uint32_t semantic_n = 4096;
@@ -299,15 +299,15 @@ int main(void) {
                  "top-p");
     compare_case(logits, scratch, semantic_n, 0.8f, 64, 0.9f, 0.05f,
                  "top-k");
-    CHECK(unsetenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
+    CHECK(unsetenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
           "select unrolled argmax default");
     compare_case(logits, scratch, semantic_n, 0.0f, 0, 1.0f, 0.05f,
                  "greedy");
-    CHECK(setenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX", "1", 1) == 0,
+    CHECK(setenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX", "1", 1) == 0,
           "set scalar argmax control");
     compare_case(logits, scratch, semantic_n, 0.0f, 0, 1.0f, 0.05f,
                  "greedy-scalar-control");
-    CHECK(unsetenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
+    CHECK(unsetenv("LGN2_CPU_DISABLE_UNROLLED_ARGMAX") == 0,
           "restore unrolled argmax default");
 
     const float cross_lane_tie[] = {
@@ -412,7 +412,7 @@ int main(void) {
             tied_logits,
             (uint32_t)(sizeof(tied_logits) / sizeof(tied_logits[0])),
             1.0f, 0, 1.0f, 0.05f, &null_ref_rng);
-    const int null_opt = ds4_test_sample_logits(
+    const int null_opt = lgn2_test_sample_logits(
             tied_logits,
             (uint32_t)(sizeof(tied_logits) / sizeof(tied_logits[0])),
             1.0f, 0, 1.0f, 0.05f, &null_opt_rng, NULL);
@@ -450,7 +450,7 @@ int main(void) {
     uint64_t opt_rng = 1234;
     start = now_sec();
     for (int i = 0; i < iterations; i++) {
-        checksum += (uint64_t)ds4_test_sample_logits(logits, perf_n, 1.0f, 0,
+        checksum += (uint64_t)lgn2_test_sample_logits(logits, perf_n, 1.0f, 0,
                                                      1.0f, 0.05f,
                                                      &opt_rng, scratch);
     }
@@ -472,7 +472,7 @@ int main(void) {
     opt_rng = 5678;
     start = now_sec();
     for (int i = 0; i < iterations; i++) {
-        checksum += (uint64_t)ds4_test_sample_logits(logits, perf_n, 1.0f, 0,
+        checksum += (uint64_t)lgn2_test_sample_logits(logits, perf_n, 1.0f, 0,
                                                      0.9f, 0.05f,
                                                      &opt_rng, scratch);
     }

@@ -1,7 +1,7 @@
 // DFlash-specific data movement. The target and draft graphs otherwise reuse
 // Laguna's dense, normalization, RoPE, attention, and FFN kernels.
 
-struct ds4_metal_args_dflash_capture {
+struct lgn2_metal_args_dflash_capture {
     uint32_t n_rows;
     uint32_t n_embd;
     uint32_t n_aux;
@@ -11,7 +11,7 @@ struct ds4_metal_args_dflash_capture {
 };
 
 kernel void kernel_dflash_capture_rows(
-        constant ds4_metal_args_dflash_capture &args,
+        constant lgn2_metal_args_dflash_capture &args,
         device const float *src,
         device       float *features,
         uint gid [[thread_position_in_grid]]) {
@@ -33,7 +33,7 @@ kernel void kernel_dflash_capture_rows(
     features[dst] = value;
 }
 
-struct ds4_metal_args_dflash_aux_norm {
+struct lgn2_metal_args_dflash_aux_norm {
     uint32_t n_rows;
     uint32_t n_embd;
     uint32_t n_aux;
@@ -41,7 +41,7 @@ struct ds4_metal_args_dflash_aux_norm {
 };
 
 kernel void kernel_dflash_aux_rms_norm(
-        constant ds4_metal_args_dflash_aux_norm &args,
+        constant lgn2_metal_args_dflash_aux_norm &args,
         device       float *features,
         device const float *weights,
         threadgroup float *scratch [[threadgroup(0)]],
@@ -74,7 +74,7 @@ kernel void kernel_dflash_aux_rms_norm(
     }
 }
 
-struct ds4_metal_args_dflash_commit_kv {
+struct lgn2_metal_args_dflash_commit_kv {
     uint32_t n_rows;
     uint32_t pos0;
     uint32_t cache_cap;
@@ -82,7 +82,7 @@ struct ds4_metal_args_dflash_commit_kv {
 };
 
 kernel void kernel_dflash_commit_kv_f16(
-        constant ds4_metal_args_dflash_commit_kv &args,
+        constant lgn2_metal_args_dflash_commit_kv &args,
         device const float *k,
         device const float *v,
         device        half *key_cache,
@@ -100,13 +100,13 @@ kernel void kernel_dflash_commit_kv_f16(
     value_cache[dst] = (half)v[src];
 }
 
-struct ds4_metal_args_dflash_probabilities {
+struct lgn2_metal_args_dflash_probabilities {
     uint32_t n_rows;
     uint32_t n_vocab;
 };
 
 kernel void kernel_dflash_probabilities(
-        constant ds4_metal_args_dflash_probabilities &args,
+        constant lgn2_metal_args_dflash_probabilities &args,
         device const float   *logits,
         device const int32_t *argmax,
         device       float   *probabilities,

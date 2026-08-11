@@ -1,6 +1,6 @@
 /*
  * Unit test for Q4_K block layout, scale extraction, and dot product.
- * Build:  cc -O2 -Wall -DDS4_NO_GPU -DDS4_Q4K_DOT_TEST_MAIN -I. -o tests/test_q4k_dot tests/test_q4k_dot.c -lm -pthread
+ * Build:  cc -O2 -Wall -DLGN2_NO_GPU -DLGN2_Q4K_DOT_TEST_MAIN -I. -o tests/test_q4k_dot tests/test_q4k_dot.c -lm -pthread
  * Run:    ./tests/test_q4k_dot
  */
 
@@ -54,7 +54,7 @@ static inline void q4_k_get_scale_min(int j, const uint8_t *q, uint8_t *sc, uint
     }
 }
 
-/* The corrected dot product, matching ds4.c after the fix. */
+/* The corrected dot product, matching lgn2_engine.c after the fix. */
 static void vec_dot_q4_K_q8_K(int n, float *s, const block_q4_K *x, const block_q8_K *y) {
     const int nb = n / QK_K;
     float sumf = 0.0f;

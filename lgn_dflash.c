@@ -1,7 +1,7 @@
 /*
  * lgn_dflash.c - Laguna DFlash support-model profile and binding.
  *
- * DFlash graph construction and speculative verification stay in ds4.c.  This
+ * DFlash graph construction and speculative verification stay in lgn2.c.  This
  * file deliberately contains only the immutable six-layer support profile,
  * GGUF metadata/layout checks, direct tensor binding, and the BF16 shadow-map
  * conversion needed by the retained Metal graph code.
@@ -47,7 +47,7 @@ const lgn_dflash_profile *lgn_dflash_profile_get(void) {
 
 bool lgn_dflash_profile_matches_laguna(void) {
     const lgn_dflash_profile *profile = &LGN_DFLASH_PROFILE;
-    const ds4_shape *shape = lgn_model_shape();
+    const lgn2_shape *shape = lgn_model_shape();
     if (!shape) return false;
     return profile->n_embd == shape->n_embd &&
            profile->n_head == shape->n_head &&
@@ -61,40 +61,40 @@ bool lgn_dflash_profile_matches_laguna(void) {
 }
 
 static void lgn_dflash_die(const char *message) {
-    fprintf(stderr, "ds4: %s\n", message);
+    fprintf(stderr, "lgn2: %s\n", message);
     exit(1);
 }
 
-static bool lgn_dflash_streq(ds4_str value, const char *literal) {
+static bool lgn_dflash_streq(lgn2_str value, const char *literal) {
     const size_t len = strlen(literal);
     return value.ptr && value.len == len && memcmp(value.ptr, literal, len) == 0;
 }
 
-static uint32_t lgn_dflash_required_u32(const ds4_model *model,
+static uint32_t lgn_dflash_required_u32(const lgn2_model *model,
                                         const char *key) {
     uint32_t value = 0;
     if (!lgn_model_get_u32(model, key, &value)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
+        fprintf(stderr, "lgn2: required metadata key is missing: %s\n", key);
         exit(1);
     }
     return value;
 }
 
-static uint64_t lgn_dflash_required_u64(const ds4_model *model,
+static uint64_t lgn_dflash_required_u64(const lgn2_model *model,
                                         const char *key) {
     uint64_t value = 0;
     if (!lgn_model_get_u64_compat(model, key, &value)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
+        fprintf(stderr, "lgn2: required metadata key is missing: %s\n", key);
         exit(1);
     }
     return value;
 }
 
-static float lgn_dflash_required_f32(const ds4_model *model,
+static float lgn_dflash_required_f32(const lgn2_model *model,
                                      const char *key) {
     float value = 0.0f;
     if (!lgn_model_get_f32_compat(model, key, &value)) {
-        fprintf(stderr, "ds4: required metadata key is missing: %s\n", key);
+        fprintf(stderr, "lgn2: required metadata key is missing: %s\n", key);
         exit(1);
     }
     return value;
@@ -104,7 +104,7 @@ static void lgn_dflash_expect_u32(const char *name,
                                   uint32_t got,
                                   uint32_t expected) {
     if (got == expected) return;
-    fprintf(stderr, "ds4: expected %s=%u for Laguna S 2.1, got %u\n",
+    fprintf(stderr, "lgn2: expected %s=%u for Laguna S 2.1, got %u\n",
             name, expected, got);
     exit(1);
 }
@@ -114,7 +114,7 @@ static void lgn_dflash_expect_u64(const char *name,
                                   uint64_t expected) {
     if (got == expected) return;
     fprintf(stderr,
-            "ds4: expected %s=%" PRIu64 " for Laguna S 2.1, got %" PRIu64 "\n",
+            "lgn2: expected %s=%" PRIu64 " for Laguna S 2.1, got %" PRIu64 "\n",
             name, expected, got);
     exit(1);
 }
@@ -125,7 +125,7 @@ static void lgn_dflash_expect_f32(const char *name,
     const float scale = fabsf(expected) > 1.0f ? fabsf(expected) : 1.0f;
     if (fabsf(got - expected) <= scale * 1.0e-6f) return;
     fprintf(stderr,
-            "ds4: expected %s=%.9g for Laguna S 2.1, got %.9g\n",
+            "lgn2: expected %s=%.9g for Laguna S 2.1, got %.9g\n",
             name, (double)expected, (double)got);
     exit(1);
 }
@@ -181,7 +181,7 @@ void lgn_dflash_weights_validate_layout(
         lgn_dflash_die("internal error: missing DFlash weights while validating layout");
     }
 
-    const ds4_shape *shape = lgn_model_shape();
+    const lgn2_shape *shape = lgn_model_shape();
     const uint64_t q_dim = (uint64_t)shape->n_head * shape->n_head_dim;
     const uint64_t kv_dim = (uint64_t)shape->n_head_kv * shape->n_head_dim;
     const uint32_t matrix_type = weights->fc->type;
@@ -189,7 +189,7 @@ void lgn_dflash_weights_validate_layout(
     if (matrix_type != LGN_TENSOR_BF16 &&
         !lgn_model_tensor_type_is_dense_quant(matrix_type)) {
         fprintf(stderr,
-                "ds4: DFlash matrices have unsupported type %s\n",
+                "lgn2: DFlash matrices have unsupported type %s\n",
                 lgn_model_tensor_type_name(matrix_type));
         exit(1);
     }
@@ -236,9 +236,9 @@ void lgn_dflash_weights_validate_layout(
 }
 
 void lgn_dflash_weights_bind(lgn_dflash_weights *weights,
-                             const ds4_model *model) {
+                             const lgn2_model *model) {
     const lgn_dflash_profile *profile = &LGN_DFLASH_PROFILE;
-    const ds4_shape *shape = lgn_model_shape();
+    const lgn2_shape *shape = lgn_model_shape();
     if (!lgn_dflash_profile_matches_laguna()) {
         lgn_dflash_die("internal error: DFlash profile does not match Laguna S 2.1");
     }
@@ -362,18 +362,18 @@ void lgn_dflash_weights_bind(lgn_dflash_weights *weights,
     for (uint32_t i = 0; i < profile->n_aux; i++) {
         if (weights->target_layers[i] != profile->target_layers[i]) {
             fprintf(stderr,
-                    "ds4: DFlash target_layers[%u]=%u, expected %u\n",
+                    "lgn2: DFlash target_layers[%u]=%u, expected %u\n",
                     i, weights->target_layers[i], profile->target_layers[i]);
             exit(1);
         }
     }
 
-    ds4_str decoder = {0};
+    lgn2_str decoder = {0};
     if (!lgn_model_get_string(model, "dflash.decoder_arch", &decoder) ||
         !lgn_dflash_streq(decoder, "laguna")) {
         lgn_dflash_die("DFlash support model must declare decoder_arch=laguna");
     }
-    ds4_str rope_scaling = {0};
+    lgn2_str rope_scaling = {0};
     if (!lgn_model_get_string(model, "dflash.rope.scaling.type",
                               &rope_scaling) ||
         !lgn_dflash_streq(rope_scaling, "none")) {
@@ -458,7 +458,7 @@ static void lgn_dflash_convert_bf16_rows(void *opaque,
     }
 }
 
-void *lgn_dflash_prepare_f16_map(const ds4_model *model,
+void *lgn_dflash_prepare_f16_map(const lgn2_model *model,
                                  lgn_dflash_parallel_for_fn parallel_for,
                                  void *parallel_ctx) {
     if (!model || !model->map || model->size == 0 ||
@@ -479,7 +479,7 @@ void *lgn_dflash_prepare_f16_map(const ds4_model *model,
                            0);
     if (shadow == MAP_FAILED) {
         fprintf(stderr,
-                "ds4: could not allocate %.2f GiB for DFlash F16 weights: %s\n",
+                "lgn2: could not allocate %.2f GiB for DFlash F16 weights: %s\n",
                 (double)model->size / 1073741824.0,
                 strerror(errno));
         return NULL;
@@ -489,11 +489,11 @@ void *lgn_dflash_prepare_f16_map(const ds4_model *model,
     uint64_t converted = 0;
     uint64_t copied = 0;
     for (uint64_t i = 0; i < model->n_tensors; i++) {
-        const ds4_tensor *tensor = &model->tensors[i];
+        const lgn2_tensor *tensor = &model->tensors[i];
         if (tensor->abs_offset > model->size ||
             tensor->bytes > model->size - tensor->abs_offset) {
             fprintf(stderr,
-                    "ds4: DFlash tensor %.*s is outside its GGUF mapping\n",
+                    "lgn2: DFlash tensor %.*s is outside its GGUF mapping\n",
                     (int)tensor->name.len, tensor->name.ptr);
             munmap(shadow, (size_t)model->size);
             return NULL;
@@ -509,7 +509,7 @@ void *lgn_dflash_prepare_f16_map(const ds4_model *model,
             tensor->elements > UINT64_MAX / sizeof(uint16_t) ||
             tensor->bytes != tensor->elements * sizeof(uint16_t)) {
             fprintf(stderr,
-                    "ds4: DFlash tensor %.*s has unsupported type %s\n",
+                    "lgn2: DFlash tensor %.*s has unsupported type %s\n",
                     (int)tensor->name.len, tensor->name.ptr,
                     lgn_model_tensor_type_name(tensor->type));
             munmap(shadow, (size_t)model->size);
@@ -532,7 +532,7 @@ void *lgn_dflash_prepare_f16_map(const ds4_model *model,
     }
 
     fprintf(stderr,
-            "ds4: DFlash BF16 support converted to F16 in %.2f s "
+            "lgn2: DFlash BF16 support converted to F16 in %.2f s "
             "(%.2f GiB matrices + %.2f MiB F32 metadata weights)\n",
             lgn_dflash_now_sec() - t0,
             (double)converted / 1073741824.0,
@@ -546,18 +546,18 @@ void lgn_dflash_release_f16_map(void *map, uint64_t map_size) {
     }
 }
 
-const void *lgn_dflash_weight_map(const ds4_model *model,
+const void *lgn_dflash_weight_map(const lgn2_model *model,
                                   const void *f16_map) {
     return f16_map ? f16_map : (model ? model->map : NULL);
 }
 
-uint64_t lgn_dflash_weight_map_size(const ds4_model *model,
+uint64_t lgn_dflash_weight_map_size(const lgn2_model *model,
                                     const void *f16_map,
                                     uint64_t f16_map_size) {
     return f16_map ? f16_map_size : (model ? model->size : 0);
 }
 
-int lgn_dflash_weight_map_fd(const ds4_model *model,
+int lgn_dflash_weight_map_fd(const lgn2_model *model,
                              const void *f16_map) {
     return f16_map ? -1 : (model ? model->fd : -1);
 }

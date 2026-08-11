@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Concurrent API correctness/load check for ds4-server session batching.
+"""Concurrent API correctness/load check for lgn2-server session batching.
 
 Each case is submitted twice with the same non-zero seed. The pairs run in one
 cold concurrent wave and must return identical output, even though prompt sizes

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 /* The first product fork is deliberately for one exact Laguna S 2.1
- * topology.  Keep these constants independent of ds4.c so the policy can be
+ * topology.  Keep these constants independent of lgn2_engine.c so the policy can be
  * tested and used by the future lgn_* modules without pulling in the engine
  * implementation. */
 enum {
