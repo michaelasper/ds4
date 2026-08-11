@@ -43,6 +43,7 @@
 #include "ds4.h"
 #include "lgn.h"
 #include "lgn_dflash.h"
+#include "lgn_dflash_exec.h"
 #include "lgn_dflash_graph.h"
 #include "lgn_graph.h"
 #include "lgn_model.h"
@@ -47855,61 +47856,22 @@ static bool dflash_graph_alloc(ds4_dflash_gpu_graph *g) {
     return false;
 }
 
-static bool dflash_graph_matmul(
-        ds4_gpu_tensor       *out,
-        const ds4_engine     *e,
-        const ds4_tensor     *weight,
-        const ds4_gpu_tensor *x,
-        uint32_t              n_rows) {
-    if (!out || !e || !weight || !x || weight->ndim < 2) {
-        return false;
-    }
-    if (weight->type == LGN_TENSOR_BF16 && e->dflash_f16_map) {
-        return ds4_gpu_matmul_f16_tensor(out,
-                                         e->dflash_f16_map,
-                                         e->dflash_f16_map_size,
-                                         weight->abs_offset,
-                                         weight->dim[0],
-                                         weight->dim[1],
-                                         x,
-                                         n_rows) != 0;
-    }
-    if (weight->type == DS4_TENSOR_Q8_0) {
-#ifdef __APPLE__
-        return ds4_gpu_matmul_q8_0_dflash_tensor(
-                out,
-                e->dflash_model.map,
-                e->dflash_model.size,
-                weight->abs_offset,
-                weight->dim[0],
-                weight->dim[1],
-                x,
-                n_rows) != 0;
-#else
-        return ds4_gpu_matmul_q8_0_tensor(out,
-                                          e->dflash_model.map,
-                                          e->dflash_model.size,
-                                          weight->abs_offset,
-                                          weight->dim[0],
-                                          weight->dim[1],
-                                          x,
-                                          n_rows) != 0;
-#endif
-    }
-    if (tensor_type_is_dense_quant(weight->type)) {
-        return ds4_gpu_matmul_quant_tensor(out,
-                                           e->dflash_model.map,
-                                           e->dflash_model.size,
-                                           weight->abs_offset,
-                                           weight->type,
-                                           weight->dim[0],
-                                           weight->dim[1],
-                                           x,
-                                           n_rows) != 0;
-    }
-    return false;
+static lgn_dflash_exec_context dflash_graph_exec_context(
+        const ds4_engine *e) {
+    lgn_dflash_exec_context ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    if (!e) return ctx;
+    ctx.support_map = e->dflash_model.map;
+    ctx.support_map_size = e->dflash_model.size;
+    ctx.f16_map = e->dflash_f16_map;
+    ctx.f16_map_size = e->dflash_f16_map_size;
+    ctx.support_weights = &e->dflash_weights;
+    ctx.target_context_length = LGN_DFLASH_TARGET_CONTEXT_LENGTH;
+    return ctx;
 }
 
+/* ds4.c owns admission and the terminal command boundary; the execution
+ * module only records support work into the active transaction. */
 static bool dflash_graph_encode_inject(
         ds4_dflash_gpu_graph *g,
         const ds4_engine     *e,
@@ -47919,105 +47881,16 @@ static bool dflash_graph_encode_inject(
         n_rows > g->feature_cap) {
         return false;
     }
-    const ds4_dflash_weights *w = &e->dflash_weights;
-    const uint32_t embd = DS4_SHAPE_LAGUNA_S21.n_embd;
-    const uint32_t n_head_kv = DS4_SHAPE_LAGUNA_S21.n_head_kv;
-    const uint32_t head_dim = DS4_SHAPE_LAGUNA_S21.n_head_dim;
-    const void *weight_map = lgn_dflash_weight_map(
-        &e->dflash_model, e->dflash_f16_map);
-    const uint64_t weight_map_size = lgn_dflash_weight_map_size(
-        &e->dflash_model, e->dflash_f16_map, e->dflash_f16_map_size);
+    const lgn_dflash_exec_context ctx = dflash_graph_exec_context(e);
+    if (!lgn_dflash_exec_context_valid(&ctx)) return false;
 
-    bool ok = ds4_gpu_commands_active() ||
-              ds4_gpu_begin_commands() != 0;
+    bool ok = ds4_gpu_commands_active() != 0;
+    if (!ok) ok = ds4_gpu_begin_commands() != 0;
     if (ok) {
-        ok = ds4_gpu_dflash_aux_norm_tensor(
-                 g->features,
-                 weight_map,
-                 weight_map_size,
-                 w->aux_norm->abs_offset,
-                 n_rows,
-                 embd,
-                 DS4_DFLASH_N_AUX,
-                 DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
+        ok = lgn_dflash_exec_encode_record(g, &ctx, pos0, n_rows);
     }
-    if (ok) {
-        ok = dflash_graph_matmul(g->encoder,
-                                 e,
-                                 w->fc,
-                                 g->features,
-                                 n_rows);
-    }
-    if (ok) {
-        ok = ds4_gpu_rms_norm_weight_rows_tensor(
-                 g->encoder_norm,
-                 g->encoder,
-                 weight_map,
-                 weight_map_size,
-                 w->encoder_output_norm->abs_offset,
-                 embd,
-                 n_rows,
-                 DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
-    }
-    for (uint32_t il = 0; ok && il < DS4_DFLASH_N_LAYER; il++) {
-        const ds4_dflash_layer_weights *l = &w->layer[il];
-        ok = ds4_gpu_rms_norm_weight_rows_tensor(
-                 g->norm,
-                 g->encoder_norm,
-                 weight_map,
-                 weight_map_size,
-                 l->attn_norm->abs_offset,
-                 embd,
-                 n_rows,
-                 DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
-        if (ok) {
-            ok = dflash_graph_matmul(g->k, e, l->attn_k,
-                                     g->norm, n_rows) &&
-                 dflash_graph_matmul(g->v, e, l->attn_v,
-                                     g->norm, n_rows);
-        }
-        if (ok) {
-#ifdef __APPLE__
-            /* Support K staging uses the independent DFlash support atlas
-             * when the strict Laguna atlas plan is enabled. */
-            ok = ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
-#else
-            ok = ds4_gpu_laguna_head_rms_norm_rope_tensor(
-#endif
-                     g->k,
-                     weight_map,
-                     weight_map_size,
-                     l->attn_k_norm->abs_offset,
-                     n_rows,
-                     n_head_kv,
-                     head_dim,
-                     DS4_SHAPE_LAGUNA_S21.n_rot_swa,
-                     pos0,
-                     DS4_CONTEXT_LENGTH,
-                     500000.0f,
-                     1.0f,
-                     0.0f,
-                     1.0f,
-                     0.0f,
-                     0.0f,
-                     DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
-        }
-        if (ok) {
-            ok = ds4_gpu_dflash_commit_kv_tensor(
-                     g->key_cache[il],
-                     g->value_cache[il],
-                     g->k,
-                     g->v,
-                     pos0,
-                     n_rows,
-                     g->cache_cap,
-                     n_head_kv,
-                     head_dim) != 0;
-        }
-    }
-    /* An encode failure can occur after earlier layers have appended KV
-     * stores to this batch.  Ending the batch here would commit those partial
-     * stores and leave the DFlash support cache ahead of its checkpoint. */
+    /* The wrapper retains the former admission/terminal behavior.  The
+     * record-only module never closes or discards this caller-owned batch. */
     if (ds4_gpu_commands_active()) {
         if (ok) {
             if (ds4_gpu_end_commands() == 0) ok = false;
@@ -48069,6 +47942,8 @@ static bool dflash_graph_draft_block(
      * work to it; it must never create, submit, or discard a caller-owned
      * transaction behind the caller's back. */
     if (!dflash_graph_commands_active()) return false;
+    const lgn_dflash_exec_context exec_ctx = dflash_graph_exec_context(e);
+    if (!lgn_dflash_exec_context_valid(&exec_ctx)) return false;
     ds4_gpu_tensor *saved_cur = g->cur;
     ds4_gpu_tensor *saved_next = g->next;
     const uint32_t n_rows = n_draft + 1u;
@@ -48084,7 +47959,7 @@ static bool dflash_graph_draft_block(
         return false;
     }
 
-    const ds4_dflash_weights *w = &e->dflash_weights;
+    const ds4_dflash_weights *w = exec_ctx.support_weights;
     const uint32_t embd = DS4_SHAPE_LAGUNA_S21.n_embd;
     const uint32_t n_head = DS4_SHAPE_LAGUNA_S21.n_head;
     const uint32_t n_head_kv = DS4_SHAPE_LAGUNA_S21.n_head_kv;
@@ -48092,10 +47967,10 @@ static bool dflash_graph_draft_block(
     const uint32_t q_dim = n_head * head_dim;
     const uint32_t kv_dim = n_head_kv * head_dim;
     const uint32_t ff = DS4_SHAPE_LAGUNA_S21.n_ff_dense;
-    const void *weight_map = lgn_dflash_weight_map(
-        &e->dflash_model, e->dflash_f16_map);
-    const uint64_t weight_map_size = lgn_dflash_weight_map_size(
-        &e->dflash_model, e->dflash_f16_map, e->dflash_f16_map_size);
+    const void *weight_map = exec_ctx.f16_map ?
+        exec_ctx.f16_map : exec_ctx.support_map;
+    const uint64_t weight_map_size = exec_ctx.f16_map ?
+        exec_ctx.f16_map_size : exec_ctx.support_map_size;
 
     bool ok = true;
     if (ok) {
@@ -48122,14 +47997,14 @@ static bool dflash_graph_draft_block(
                  n_rows,
                  DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
         if (ok) {
-            ok = dflash_graph_matmul(g->q, e, l->attn_q,
-                                     g->norm, n_rows) &&
-                 dflash_graph_matmul(g->k, e, l->attn_k,
-                                     g->norm, n_rows) &&
-                 dflash_graph_matmul(g->v, e, l->attn_v,
-                                     g->norm, n_rows) &&
-                 dflash_graph_matmul(g->gate, e, l->attn_gate,
-                                     g->norm, n_rows);
+            ok = lgn_dflash_exec_matmul(g->q, &exec_ctx, l->attn_q,
+                                        g->norm, n_rows) &&
+                 lgn_dflash_exec_matmul(g->k, &exec_ctx, l->attn_k,
+                                        g->norm, n_rows) &&
+                 lgn_dflash_exec_matmul(g->v, &exec_ctx, l->attn_v,
+                                        g->norm, n_rows) &&
+                 lgn_dflash_exec_matmul(g->gate, &exec_ctx, l->attn_gate,
+                                        g->norm, n_rows);
         }
         if (ok) {
             ok = ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
@@ -48175,11 +48050,9 @@ static bool dflash_graph_draft_block(
                      1) != 0;
         }
         if (ok) {
-            ok = dflash_graph_matmul(g->attn_out,
-                                     e,
-                                     l->attn_output,
-                                     g->heads,
-                                     n_rows) &&
+            ok = lgn_dflash_exec_matmul(g->attn_out, &exec_ctx,
+                                        l->attn_output, g->heads,
+                                        n_rows) &&
                  ds4_gpu_add_rms_norm_weight_rows_tensor(
                      g->ffn_norm,
                      g->after_attn,
@@ -48193,16 +48066,12 @@ static bool dflash_graph_draft_block(
                      DS4_SHAPE_LAGUNA_S21.rms_eps) != 0;
         }
         if (ok) {
-            ok = dflash_graph_matmul(g->ffn_gate,
-                                     e,
-                                     l->ffn_gate,
-                                     g->ffn_norm,
-                                     n_rows) &&
-                 dflash_graph_matmul(g->ffn_up,
-                                     e,
-                                     l->ffn_up,
-                                     g->ffn_norm,
-                                     n_rows);
+            ok = lgn_dflash_exec_matmul(g->ffn_gate, &exec_ctx,
+                                        l->ffn_gate, g->ffn_norm,
+                                        n_rows) &&
+                 lgn_dflash_exec_matmul(g->ffn_up, &exec_ctx,
+                                        l->ffn_up, g->ffn_norm,
+                                        n_rows);
         }
         if (ok) {
             ok = ds4_gpu_swiglu_tensor(g->ffn_mid,
@@ -48213,11 +48082,9 @@ static bool dflash_graph_draft_block(
                                         1.0f) != 0;
         }
         if (ok) {
-            ok = dflash_graph_matmul(g->ffn_out,
-                                     e,
-                                     l->ffn_down,
-                                     g->ffn_mid,
-                                     n_rows) &&
+            ok = lgn_dflash_exec_matmul(g->ffn_out, &exec_ctx,
+                                        l->ffn_down, g->ffn_mid,
+                                        n_rows) &&
                  ds4_gpu_add_tensor(g->next,
                                     g->after_attn,
                                     g->ffn_out,

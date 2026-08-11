@@ -3,6 +3,7 @@
 #include "../ds4_server.c"
 #include "../lgn.h"
 #include "../ds4_gpu.h"
+#include "../lgn_dflash_exec.h"
 #include "../lgn_graph.h"
 
 static void test_laguna_architecture_gate(void) {
@@ -94,6 +95,136 @@ bool ds4_test_laguna_graph_lifecycle(void);
 bool ds4_test_laguna_dflash_graph_lifecycle(void);
 #if defined(__APPLE__)
 bool ds4_test_laguna_dflash_command_ownership(void);
+
+static void test_laguna_dflash_exec_boundary(void) {
+    lgn_dflash_weights weights;
+    lgn_dflash_graph graph;
+    memset(&weights, 0, sizeof(weights));
+    memset(&graph, 0, sizeof(graph));
+
+    lgn_dflash_exec_context ctx = {
+        .support_map = (const void *)(uintptr_t)1,
+        .support_map_size = 1u,
+        .f16_map = NULL,
+        .f16_map_size = 0u,
+        .support_weights = &weights,
+        .target_context_length = LGN_DFLASH_TARGET_CONTEXT_LENGTH,
+    };
+    TEST_ASSERT(!lgn_dflash_exec_context_valid(NULL));
+    TEST_ASSERT(lgn_dflash_exec_context_valid(&ctx));
+    ctx.target_context_length--;
+    TEST_ASSERT(!lgn_dflash_exec_context_valid(&ctx));
+    ctx.target_context_length = LGN_DFLASH_TARGET_CONTEXT_LENGTH;
+    ctx.f16_map = (const void *)(uintptr_t)2;
+    TEST_ASSERT(!lgn_dflash_exec_context_valid(&ctx));
+    ctx.f16_map_size = 1u;
+    TEST_ASSERT(lgn_dflash_exec_context_valid(&ctx));
+    ctx.f16_map = NULL;
+    ctx.f16_map_size = 0u;
+
+    uint64_t handles_before = 0;
+    uint64_t bytes_before = 0;
+    uint64_t handles_after = 0;
+    uint64_t bytes_after = 0;
+    TEST_ASSERT(ds4_gpu_commands_active() == 0);
+    TEST_ASSERT(ds4_gpu_test_tensor_tracking_state(&handles_before,
+                                                   &bytes_before));
+    TEST_ASSERT(!lgn_dflash_exec_encode_record(&graph, &ctx, 0u, 1u));
+    TEST_ASSERT(ds4_gpu_test_tensor_tracking_state(&handles_after,
+                                                   &bytes_after));
+    TEST_ASSERT(ds4_gpu_commands_active() == 0);
+    TEST_ASSERT(handles_after == handles_before);
+    TEST_ASSERT(bytes_after == bytes_before);
+}
+
+/* Exercise both borrowed weight-map routes with tiny synthetic matrices.  A
+ * BF16 descriptor must use the F16 shadow, while Q8_0 must use the support
+ * map; both are checked against the same all-ones dot product. */
+static void test_laguna_dflash_exec_matmul_maps(void) {
+    enum { IN_DIM = 32, OUT_DIM = 2 };
+    const size_t page = (size_t)getpagesize();
+    void *f16_raw = NULL;
+    void *q8_raw = NULL;
+    ds4_gpu_tensor *x = NULL;
+    ds4_gpu_tensor *out = NULL;
+    bool f16_ok = false;
+    bool q8_ok = false;
+
+    TEST_ASSERT(posix_memalign(&f16_raw, page, page) == 0);
+    TEST_ASSERT(posix_memalign(&q8_raw, page, page) == 0);
+    if (!f16_raw || !q8_raw) goto cleanup;
+    memset(f16_raw, 0, page);
+    memset(q8_raw, 0, page);
+
+    uint16_t *f16_weights = f16_raw;
+    for (size_t i = 0; i < (size_t)IN_DIM * OUT_DIM; i++) {
+        f16_weights[i] = UINT16_C(0x3c00); /* 1.0 */
+    }
+    uint8_t *q8_weights = q8_raw;
+    const size_t q8_row_bytes = 34u;
+    for (uint32_t row = 0; row < OUT_DIM; row++) {
+        uint8_t *dst = q8_weights + row * q8_row_bytes;
+        uint16_t scale = UINT16_C(0x3c00); /* 1.0 */
+        memcpy(dst, &scale, sizeof(scale));
+        memset(dst + 2u, 1, IN_DIM);
+    }
+
+    float x_host[IN_DIM];
+    float out_host[OUT_DIM];
+    for (uint32_t i = 0; i < IN_DIM; i++) x_host[i] = 1.0f;
+    x = ds4_gpu_tensor_alloc((uint64_t)sizeof(x_host));
+    out = ds4_gpu_tensor_alloc((uint64_t)sizeof(out_host));
+    TEST_ASSERT(x && out);
+    if (!x || !out ||
+        !ds4_gpu_tensor_write(x, 0u, x_host, sizeof(x_host))) {
+        goto cleanup;
+    }
+
+    lgn_dflash_weights weights;
+    memset(&weights, 0, sizeof(weights));
+    lgn_dflash_exec_context ctx = {
+        .support_map = q8_raw,
+        .support_map_size = page,
+        .f16_map = f16_raw,
+        .f16_map_size = page,
+        .support_weights = &weights,
+        .target_context_length = LGN_DFLASH_TARGET_CONTEXT_LENGTH,
+    };
+    ds4_tensor f16_weight = {
+        .ndim = 2u,
+        .dim = { IN_DIM, OUT_DIM },
+        .type = LGN_TENSOR_BF16,
+    };
+    ds4_tensor q8_weight = f16_weight;
+    q8_weight.type = LGN_TENSOR_Q8_0;
+
+    if (!ds4_gpu_set_model_map(f16_raw, page) ||
+        !lgn_dflash_exec_matmul(out, &ctx, &f16_weight, x, 1u) ||
+        ds4_gpu_commands_active() ||
+        !ds4_gpu_tensor_read(out, 0u, out_host, sizeof(out_host))) {
+        goto cleanup;
+    }
+    f16_ok = out_host[0] > 31.5f && out_host[0] < 32.5f &&
+             out_host[1] > 31.5f && out_host[1] < 32.5f;
+
+    if (!ds4_gpu_set_model_map(q8_raw, page) ||
+        !lgn_dflash_exec_matmul(out, &ctx, &q8_weight, x, 1u) ||
+        ds4_gpu_commands_active() ||
+        !ds4_gpu_tensor_read(out, 0u, out_host, sizeof(out_host))) {
+        goto cleanup;
+    }
+    q8_ok = out_host[0] > 31.5f && out_host[0] < 32.5f &&
+            out_host[1] > 31.5f && out_host[1] < 32.5f;
+
+cleanup:
+    if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
+    ds4_gpu_tensor_free(out);
+    ds4_gpu_tensor_free(x);
+    free(q8_raw);
+    free(f16_raw);
+    TEST_ASSERT(f16_ok);
+    TEST_ASSERT(q8_ok);
+}
 #endif
 
 static void test_laguna_graph_guard_routes(void) {
@@ -125,6 +256,16 @@ static void test_laguna_dflash_command_ownership(void) {
         return;
     }
     TEST_ASSERT(ds4_test_laguna_dflash_command_ownership());
+    ds4_gpu_cleanup();
+}
+
+static void test_laguna_dflash_exec(void) {
+    if (!ds4_gpu_init()) {
+        TEST_ASSERT(false);
+        return;
+    }
+    test_laguna_dflash_exec_boundary();
+    test_laguna_dflash_exec_matmul_maps();
     ds4_gpu_cleanup();
 }
 #endif
@@ -14640,6 +14781,9 @@ static const ds4_test_entry test_entries[] = {
     {"--laguna-dflash-command-ownership", "laguna-dflash-command-ownership",
      "DFlash draft record-only batches preserve queued-write rollback and flush ownership",
      test_laguna_dflash_command_ownership, false},
+    {"--laguna-dflash-exec", "laguna-dflash-exec",
+     "DFlash execution context ownership and support/F16 map routing",
+     test_laguna_dflash_exec, false},
     {"--dflash-payload-lifecycle", "dflash-payload-lifecycle",
      "payload and snapshot restore invalidate Laguna DFlash support state",
      test_dflash_payload_lifecycle, true},
