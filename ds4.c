@@ -46962,8 +46962,9 @@ static bool laguna_graph_spec_snapshot(
                                          g->cache_cap[il],
                                          row_bytes, true);
     }
-    /* Drafting and verification append to this batch. Keeping it open avoids
-     * a completion whose only purpose was to delimit the KV backup. */
+    /* The caller must commit this snapshot before allowing any speculative
+     * batch to be discarded.  Otherwise a later restore could read a backup
+     * whose copy was discarded together with the speculative work. */
     if (!ok && ds4_gpu_commands_active()) {
         (void)ds4_gpu_discard_commands();
     }
@@ -49604,6 +49605,7 @@ static bool laguna_graph_forward_batch(
         n_tokens > g->prefill_cap || pos0 > g->ctx_size - n_tokens) {
         return false;
     }
+    const bool caller_owned_draft_batch = gpu_draft_tokens != NULL;
 #ifdef __APPLE__
     const int fused_router_mode = laguna_metal_router_decode_fused_mode();
     if (fused_router_mode < 0 ||
@@ -50233,7 +50235,7 @@ static bool laguna_graph_forward_batch(
             g->next = tmp;
             completed_layers = il + 1u;
         }
-        if (ok && live_progress) {
+        if (ok && live_progress && !caller_owned_draft_batch) {
             ok = ds4_gpu_end_commands() != 0;
 #ifdef __APPLE__
             if (ok) {
@@ -50374,8 +50376,8 @@ static bool laguna_graph_forward_batch(
 #endif
     /* A speculative cycle appends support-cache injection before completing
      * the shared snapshot/draft/verify command stream. */
-    const bool defer_completion = ok && gpu_draft_tokens != NULL;
-    if (!defer_completion && ds4_gpu_commands_active()) {
+    const bool defer_completion = ok && caller_owned_draft_batch;
+    if (!caller_owned_draft_batch && ds4_gpu_commands_active()) {
         if (ok) {
             if (ds4_gpu_end_commands() == 0) {
                 ok = false;
@@ -60289,6 +60291,22 @@ static ds4_laguna_feature_capture ds4_session_dflash_capture(
     return capture;
 }
 
+/* A GPU-draft verifier borrows the caller's active batch.  The caller must
+ * observe an active owner here: a missing batch means the helper violated its
+ * ownership contract or a terminal boundary already ran. */
+static bool ds4_session_dflash_discard_owned_commands(void) {
+    return ds4_gpu_commands_active() && ds4_gpu_discard_commands() != 0;
+}
+
+static void ds4_session_dflash_quarantine(ds4_session *s) {
+    if (!s) return;
+    s->checkpoint_valid = false;
+    s->dflash_synced = false;
+#ifdef __APPLE__
+    laguna_metal_target_evidence_discard(&s->laguna_graph);
+#endif
+}
+
 static bool ds4_session_dflash_finish_capture(
         ds4_session *s,
         uint32_t     pos0,
@@ -66862,12 +66880,26 @@ static int ds4_session_eval_dflash_speculative_argmax(
     int verify_tokens[DS4_DFLASH_BLOCK_SIZE] = {0};
     const float draft_p_min = e->dflash_p_min;
     bool draft_read_ok = false;
+    bool spec_snapshot_committed = false;
 
     const double cycle_t0 = now_sec();
     if (!laguna_graph_spec_snapshot(&s->laguna_graph, pos0, n_rows)) {
         if (errlen) snprintf(err, errlen, "Laguna verifier snapshot failed");
         return -1;
     }
+#ifdef __APPLE__
+    /* Commit the target KV backup before the speculative replacement batch is
+     * allowed to be discarded.  The replacement batch is queue-ordered after
+     * this nonblocking flush, so restore can safely read the committed backup
+     * later without a CPU wait here. */
+    if (ds4_gpu_flush_commands() == 0) {
+        ds4_session_dflash_quarantine(s);
+        if (errlen) snprintf(err, errlen,
+                             "Laguna verifier snapshot commit failed");
+        return -1;
+    }
+#endif
+    spec_snapshot_committed = true;
 
     /* Rejected support-model rows are overwritten by the next draft or
      * target-feature injection before they can be consumed. The target graph
@@ -66879,10 +66911,11 @@ static int ds4_session_eval_dflash_speculative_argmax(
                                   n_draft)) {
         fprintf(stderr,
                 "ds4: DFlash draft failed; falling back to Laguna decode\n");
-        bool draft_discard_ok = true;
-        if (ds4_gpu_commands_active()) {
-            draft_discard_ok = ds4_gpu_discard_commands() != 0;
-        }
+        const bool draft_discard_ok =
+            ds4_session_dflash_discard_owned_commands();
+        /* A successful pre-submit discard proves the support transaction was
+         * never promoted.  Preserve the valid host checkpoint while disabling
+         * another speculative attempt, matching the existing fallback path. */
 #ifdef __APPLE__
         laguna_metal_target_evidence_discard(&s->laguna_graph);
 #endif
@@ -66890,7 +66923,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
         if (!draft_discard_ok) {
             /* A failed discard may have waited work that was already
              * submitted.  Do not let the old checkpoint certify it. */
-            s->checkpoint_valid = false;
+            ds4_session_dflash_quarantine(s);
             if (errlen) snprintf(err, errlen,
                                  "DFlash draft rollback failed");
             return -1;
@@ -66907,14 +66940,13 @@ static int ds4_session_eval_dflash_speculative_argmax(
             /* The draft may already be in flight even when creation of the
              * replacement batch fails.  Treat this as terminal and poison
              * both sync and checkpoint state. */
-            if (ds4_gpu_commands_active()) {
-                (void)ds4_gpu_discard_commands();
-            }
-            laguna_metal_target_evidence_discard(&s->laguna_graph);
-            s->dflash_synced = false;
-            s->checkpoint_valid = false;
-            if (errlen) snprintf(err, errlen,
-                                 "DFlash draft batch flush failed");
+            const bool rollback_ok = !ds4_gpu_commands_active() ||
+                ds4_gpu_discard_commands() != 0;
+            ds4_session_dflash_quarantine(s);
+            if (errlen) snprintf(err, errlen, "%s",
+                                 rollback_ok ?
+                                 "DFlash draft batch flush failed" :
+                                 "DFlash draft batch flush rollback failed");
             return -1;
         }
         /*
@@ -66939,15 +66971,18 @@ static int ds4_session_eval_dflash_speculative_argmax(
             NULL,
             NULL,
             0);
-        if (!target_preencoded && ds4_gpu_commands_active()) {
-            if (ds4_gpu_discard_commands() == 0) {
-                laguna_metal_target_evidence_discard(&s->laguna_graph);
-                s->dflash_synced = false;
-                s->checkpoint_valid = false;
+        if (!target_preencoded) {
+            if (!ds4_session_dflash_discard_owned_commands()) {
+                ds4_session_dflash_quarantine(s);
                 if (errlen) snprintf(err, errlen,
                                      "DFlash target pre-encode rollback failed");
                 return -1;
             }
+        } else if (!ds4_gpu_commands_active()) {
+            ds4_session_dflash_quarantine(s);
+            if (errlen) snprintf(err, errlen,
+                                 "DFlash target pre-encode lost its batch");
+            return -1;
         }
     }
 #endif
@@ -66990,7 +67025,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
             }
         }
         if (target_preencoded && n_draft != generated_draft) {
-            draft_read_ok = ds4_gpu_discard_commands() != 0;
+            draft_read_ok = ds4_session_dflash_discard_owned_commands();
 #ifdef __APPLE__
             /* The speculative target was discarded before completion; never
              * let its pre-encode snapshot certify the replacement target. */
@@ -67010,14 +67045,14 @@ static int ds4_session_eval_dflash_speculative_argmax(
 #endif
         if (!draft_read_ok ||
             (!target_preencoded && ds4_gpu_begin_commands() == 0)) {
-            if (ds4_gpu_commands_active()) {
-                (void)ds4_gpu_discard_commands();
+            const bool cleanup_ok = !ds4_gpu_commands_active() ?
+                true : ds4_session_dflash_discard_owned_commands();
+            ds4_session_dflash_quarantine(s);
+            if (!cleanup_ok) {
+                if (errlen) snprintf(err, errlen,
+                                     "DFlash confidence rollback failed");
+                return -1;
             }
-#ifdef __APPLE__
-            laguna_metal_target_evidence_discard(&s->laguna_graph);
-#endif
-            s->dflash_synced = false;
-            s->checkpoint_valid = false;
             if (errlen) snprintf(err, errlen,
                                  "DFlash confidence cutoff failed");
             return -1;
@@ -67027,21 +67062,33 @@ static int ds4_session_eval_dflash_speculative_argmax(
     verify_tokens[0] = first_token;
     ds4_laguna_feature_capture capture =
         ds4_session_dflash_capture(s, 0, n_rows);
-    const bool verify_ok = target_preencoded ||
-        laguna_graph_forward_batch(
-            &s->laguna_graph,
-            &e->model,
-            &e->weights,
-            verify_tokens,
-            s->dflash_graph.argmax,
-            n_rows,
-            pos0,
-            NULL,
-            target_top,
-            &capture,
-            NULL,
-            NULL,
-            0);
+    bool verify_ok = target_preencoded;
+    if (!target_preencoded) {
+        verify_ok = laguna_graph_forward_batch(
+                &s->laguna_graph,
+                &e->model,
+                &e->weights,
+                verify_tokens,
+                s->dflash_graph.argmax,
+                n_rows,
+                pos0,
+                NULL,
+                target_top,
+                &capture,
+                NULL,
+                NULL,
+                0);
+        if (!verify_ok) {
+            const bool discard_ok =
+                ds4_session_dflash_discard_owned_commands();
+            ds4_session_dflash_quarantine(s);
+            if (errlen) snprintf(err, errlen,
+                                 discard_ok ?
+                                 "DFlash target verifier failed" :
+                                 "DFlash target verifier rollback failed");
+            return -1;
+        }
+    }
     bool inject_ok = false;
     if (verify_ok) {
         inject_ok = ds4_session_dflash_finish_capture(s, pos0, n_rows);
@@ -67062,13 +67109,11 @@ static int ds4_session_eval_dflash_speculative_argmax(
         }
     }
     if (!verify_ok || !inject_ok || !target_read_ok || !draft_read_ok) {
-#ifdef __APPLE__
-        laguna_metal_target_evidence_discard(&s->laguna_graph);
-#endif
-        (void)laguna_graph_spec_restore(
-            &s->laguna_graph, pos0, 0, n_rows);
-        s->checkpoint_valid = false;
-        s->dflash_synced = false;
+        ds4_session_dflash_quarantine(s);
+        if (spec_snapshot_committed) {
+            (void)laguna_graph_spec_restore(
+                &s->laguna_graph, pos0, 0, n_rows);
+        }
         if (errlen) snprintf(err, errlen,
                              "%s DFlash target verification failed",
                              ds4_backend_name(e->backend));
@@ -67094,8 +67139,7 @@ static int ds4_session_eval_dflash_speculative_argmax(
         (uint32_t)n_accept,
         n_rows);
     if (!logits_ok || !target_restore_ok) {
-        s->checkpoint_valid = false;
-        s->dflash_synced = false;
+        ds4_session_dflash_quarantine(s);
         if (errlen) snprintf(err, errlen,
                              "DFlash verifier rollback failed");
         return -1;
@@ -68344,47 +68388,198 @@ bool ds4_test_laguna_dflash_graph_lifecycle(void) {
     return ok;
 }
 #ifdef __APPLE__
-/* Model-independent command-ownership seam.  Each iteration queues a real
- * Metal blit plus the production DFlash support-K/RoPE kernel; fail_after
- * injects the caller's post-layer failure before the next layer.  This keeps
- * rollback coverage on actual queued writes without fabricating a model graph
- * or moving scheduler policy into the storage module. */
+/* Snapshot validity is a command-boundary contract, not a host pointer
+ * convention.  Commit a synthetic target backup, discard a later active
+ * mutation, and restore the exact committed row.  A second path deliberately
+ * discards an uncommitted snapshot and verifies that it is never restored
+ * from its stale backup. */
+static bool dflash_graph_test_spec_snapshot_restore(void) {
+    enum {
+        TEST_CACHE_CAP = 2u,
+    };
+    const size_t test_row_bytes =
+        (size_t)DS4_N_HEAD_KV * DS4_N_HEAD_DIM * sizeof(uint16_t);
+    ds4_laguna_gpu_graph target;
+    memset(&target, 0, sizeof(target));
+    ds4_gpu_tensor *mutation_key = NULL;
+    ds4_gpu_tensor *mutation_value = NULL;
+    uint8_t cache_host[TEST_CACHE_CAP * test_row_bytes];
+    uint8_t value_host[TEST_CACHE_CAP * test_row_bytes];
+    uint8_t current_key[test_row_bytes];
+    uint8_t current_value[test_row_bytes];
+    uint8_t mutated_key[test_row_bytes];
+    uint8_t mutated_value[test_row_bytes];
+    uint8_t readback[test_row_bytes];
+    uint32_t chosen = UINT32_MAX;
+    bool ok = false;
+
+    for (size_t i = 0; i < test_row_bytes; i++) {
+        cache_host[i] = 0x31u;
+        cache_host[test_row_bytes + i] = 0x42u;
+        value_host[i] = 0x51u;
+        value_host[test_row_bytes + i] = 0x62u;
+        current_key[i] = 0x42u;
+        current_value[i] = 0x62u;
+        mutated_key[i] = 0x91u;
+        mutated_value[i] = 0xa2u;
+    }
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        if (!ds4_laguna_layer_is_swa(il)) continue;
+        if (chosen == UINT32_MAX) chosen = il;
+        target.cache_cap[il] = TEST_CACHE_CAP;
+        target.key_cache[il] = ds4_gpu_tensor_alloc(sizeof(cache_host));
+        target.value_cache[il] = ds4_gpu_tensor_alloc(sizeof(value_host));
+        if (!target.key_cache[il] || !target.value_cache[il] ||
+            !ds4_gpu_tensor_write(target.key_cache[il], 0,
+                                   cache_host, sizeof(cache_host)) ||
+            !ds4_gpu_tensor_write(target.value_cache[il], 0,
+                                   value_host, sizeof(value_host))) {
+            goto cleanup;
+        }
+    }
+    if (chosen == UINT32_MAX || !laguna_graph_ensure_spec_scratch(&target)) {
+        goto cleanup;
+    }
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        if (!ds4_laguna_layer_is_swa(il)) continue;
+        if (!target.spec_key_backup[il] ||
+            !target.spec_value_backup[il] ||
+            !ds4_gpu_tensor_write(target.spec_key_backup[il],
+                                  0, mutated_key, test_row_bytes) ||
+            !ds4_gpu_tensor_write(target.spec_value_backup[il],
+                                  0, mutated_value, test_row_bytes)) {
+            goto cleanup;
+        }
+    }
+    mutation_key = ds4_gpu_tensor_alloc(test_row_bytes);
+    mutation_value = ds4_gpu_tensor_alloc(test_row_bytes);
+    if (!mutation_key || !mutation_value ||
+        !ds4_gpu_tensor_write(mutation_key, 0, mutated_key, test_row_bytes) ||
+        !ds4_gpu_tensor_write(mutation_value, 0, mutated_value, test_row_bytes)) {
+        goto cleanup;
+    }
+
+    if (!laguna_graph_spec_snapshot(&target, 1u, 1u) ||
+        !ds4_gpu_commands_active() ||
+        ds4_gpu_flush_commands() != 1 ||
+        !ds4_gpu_commands_active() ||
+        !ds4_gpu_tensor_copy(target.key_cache[chosen], test_row_bytes,
+                             mutation_key, 0, test_row_bytes) ||
+        !ds4_gpu_tensor_copy(target.value_cache[chosen], test_row_bytes,
+                             mutation_value, 0, test_row_bytes) ||
+        ds4_gpu_discard_commands() != 1 ||
+        ds4_gpu_commands_active() != 0 ||
+        !laguna_graph_spec_restore(&target, 1u, 0u, 1u) ||
+        ds4_gpu_wait_submitted_commands() != 1 ||
+        !ds4_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
+                             readback, test_row_bytes) ||
+        memcmp(readback, current_key, test_row_bytes) != 0 ||
+        !ds4_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
+                             readback, test_row_bytes) ||
+        memcmp(readback, current_value, test_row_bytes) != 0 ||
+        !ds4_gpu_tensor_read(target.key_cache[chosen], 0,
+                             readback, test_row_bytes) ||
+        memcmp(readback, cache_host, test_row_bytes) != 0 ||
+        !ds4_gpu_tensor_read(target.value_cache[chosen], 0,
+                             readback, test_row_bytes) ||
+        memcmp(readback, value_host, test_row_bytes) != 0) {
+        goto cleanup;
+    }
+
+    /* A discarded snapshot must not be treated as a valid backup. */
+    for (size_t i = 0; i < test_row_bytes; i++) {
+        cache_host[test_row_bytes + i] = 0x73u;
+        value_host[test_row_bytes + i] = 0x83u;
+    }
+    if (!ds4_gpu_tensor_write(target.key_cache[chosen], 0,
+                              cache_host, sizeof(cache_host)) ||
+        !ds4_gpu_tensor_write(target.value_cache[chosen], 0,
+                              value_host, sizeof(value_host)) ||
+        !laguna_graph_spec_snapshot(&target, 1u, 1u) ||
+        ds4_gpu_discard_commands() != 1 ||
+        ds4_gpu_commands_active() != 0 ||
+        !ds4_gpu_tensor_read(target.key_cache[chosen], test_row_bytes,
+                             readback, test_row_bytes) ||
+        memcmp(readback, cache_host + test_row_bytes, test_row_bytes) != 0 ||
+        !ds4_gpu_tensor_read(target.value_cache[chosen], test_row_bytes,
+                             readback, test_row_bytes) ||
+        memcmp(readback, value_host + test_row_bytes, test_row_bytes) != 0) {
+        goto cleanup;
+    }
+    ok = true;
+
+cleanup:
+    if (ds4_gpu_commands_active()) (void)ds4_gpu_discard_commands();
+    (void)ds4_gpu_wait_submitted_commands();
+    ds4_gpu_tensor_free(mutation_value);
+    ds4_gpu_tensor_free(mutation_key);
+    laguna_graph_free(&target);
+    return ok;
+}
+
+/* Model-independent command-ownership seam.  Each iteration queues real
+ * DFlash K/V conversion, a support-K/RoPE kernel, and a target Q/K/RoPE
+ * consumer in one Metal batch; fail_after injects the caller's post-layer
+ * failure before the next layer.  This keeps rollback coverage on actual
+ * queued writes without fabricating a model graph or moving scheduler policy
+ * into the storage module. */
 static bool dflash_graph_test_record_layers(
         ds4_dflash_gpu_graph *g,
         ds4_gpu_tensor       *source,
         const void           *model_map,
         uint64_t              model_size,
+        uint64_t              k_weight_offset,
+        ds4_gpu_tensor       *key_cache,
+        ds4_gpu_tensor       *value_cache,
+        uint32_t              cache_cap,
+        ds4_gpu_tensor       *target_q,
+        ds4_gpu_tensor       *target_k,
         uint32_t              fail_after_layer) {
     const uint32_t n_tokens = 1u;
     const uint32_t n_head = 8u;
+    const uint32_t target_n_head = 72u;
     const uint32_t head_dim = 128u;
-    const uint64_t row_bytes =
+    const uint64_t support_row_bytes =
         (uint64_t)n_tokens * n_head * head_dim * sizeof(float);
+    const uint64_t target_q_bytes =
+        (uint64_t)n_tokens * target_n_head * head_dim * sizeof(float);
+    const uint64_t target_k_bytes = support_row_bytes;
+    const uint64_t cache_bytes =
+        (uint64_t)cache_cap * n_head * head_dim * sizeof(uint16_t);
     if (!g || !g->cur || !g->next || !source || !model_map ||
+        !key_cache || !value_cache || !target_q || !target_k ||
+        cache_cap == 0u ||
         !dflash_graph_commands_active() ||
-        ds4_gpu_tensor_bytes(source) < row_bytes ||
-        ds4_gpu_tensor_bytes(g->cur) < row_bytes ||
-        ds4_gpu_tensor_bytes(g->next) < row_bytes) {
+        ds4_gpu_tensor_bytes(source) < support_row_bytes ||
+        ds4_gpu_tensor_bytes(g->cur) < support_row_bytes ||
+        ds4_gpu_tensor_bytes(g->next) < support_row_bytes ||
+        ds4_gpu_tensor_bytes(key_cache) < cache_bytes ||
+        ds4_gpu_tensor_bytes(value_cache) < cache_bytes ||
+        ds4_gpu_tensor_bytes(target_q) < target_q_bytes ||
+        ds4_gpu_tensor_bytes(target_k) < target_k_bytes) {
         return false;
     }
     ds4_gpu_tensor *saved_cur = g->cur;
     ds4_gpu_tensor *saved_next = g->next;
+    const uint32_t rope_pos0 = 1u;
     for (uint32_t il = 0; il < 2u; il++) {
         if (il == fail_after_layer) {
             dflash_graph_restore_cursors(g, saved_cur, saved_next);
             return false;
         }
-        if (!ds4_gpu_tensor_copy(g->cur, 0, source, 0, row_bytes) ||
+        const uint32_t pos0 = il + 1u;
+        if (!ds4_gpu_tensor_copy(
+                g->cur, 0, source, 0, support_row_bytes) ||
             !ds4_gpu_laguna_head_rms_norm_rope_support_tensor(
                 g->cur,
                 model_map,
                 model_size,
-                (uint64_t)getpagesize(),
+                k_weight_offset,
                 n_tokens,
                 n_head,
                 head_dim,
                 head_dim,
-                0u,
+                rope_pos0,
                 262144u,
                 500000.0f,
                 1.0f,
@@ -68392,7 +68587,40 @@ static bool dflash_graph_test_record_layers(
                 1.0f,
                 0.0f,
                 0.0f,
-                1e-6f)) {
+                1e-6f) ||
+            !ds4_gpu_laguna_qk_head_rms_norm_rope_tensor(
+                target_q,
+                target_k,
+                model_map,
+                model_size,
+                0u,
+                k_weight_offset,
+                n_tokens,
+                target_n_head,
+                n_head,
+                head_dim,
+                head_dim,
+                rope_pos0,
+                262144u,
+                /* The target atlas family is the code-defined SWA contract;
+                 * DFlash support uses the separate 500000-family below. */
+                10000.0f,
+                1.0f,
+                0.0f,
+                1.0f,
+                0.0f,
+                0.0f,
+                1e-6f) ||
+            !ds4_gpu_dflash_commit_kv_tensor(
+                key_cache,
+                value_cache,
+                g->cur,
+                g->cur,
+                pos0,
+                n_tokens,
+                cache_cap,
+                n_head,
+                head_dim)) {
             dflash_graph_restore_cursors(g, saved_cur, saved_next);
             return false;
         }
@@ -68423,20 +68651,43 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
     }
 
     bool ok = false;
+    const ds4_shape saved_shape = g_ds4_shape;
+    g_ds4_shape = *lgn_model_shape();
     void *model_raw = NULL;
     ds4_gpu_tensor *source = NULL;
     ds4_gpu_tensor *cache = NULL;
     ds4_gpu_tensor *next = NULL;
+    ds4_gpu_tensor *key_cache = NULL;
+    ds4_gpu_tensor *value_cache = NULL;
+    ds4_gpu_tensor *target_q = NULL;
+    ds4_gpu_tensor *target_k = NULL;
     ds4_dflash_gpu_graph graph;
     memset(&graph, 0, sizeof(graph));
-    enum { TEST_VALUES = 8 * 128 };
+    enum {
+        TEST_VALUES = 8 * 128,
+        TARGET_Q_VALUES = 72 * 128,
+        TEST_CACHE_CAP = 4,
+        TEST_CACHE_VALUES = TEST_CACHE_CAP * TEST_VALUES,
+    };
     float source_host[TEST_VALUES];
     float poison_host[TEST_VALUES];
     float readback[TEST_VALUES];
+    float target_q_host[TARGET_Q_VALUES];
+    uint16_t key_poison[TEST_CACHE_VALUES];
+    uint16_t value_poison[TEST_CACHE_VALUES];
+    uint16_t key_readback[TEST_CACHE_VALUES];
+    uint16_t value_readback[TEST_CACHE_VALUES];
     for (size_t i = 0; i < TEST_VALUES; i++) {
         source_host[i] = 0.25f + (float)(i % 31u) / 37.0f;
     }
     memset(poison_host, 0xa5, sizeof(poison_host));
+    for (size_t i = 0; i < TARGET_Q_VALUES; i++) {
+        target_q_host[i] = -0.5f + (float)(i % 29u) / 41.0f;
+    }
+    for (size_t i = 0; i < TEST_CACHE_VALUES; i++) {
+        key_poison[i] = (uint16_t)(0x3100u + (i % 251u));
+        value_poison[i] = (uint16_t)(0x5200u + (i % 241u));
+    }
 
     if (setenv(atlas_env_name, "1", 1) != 0 ||
         setenv(simd_env_name, "0", 1) != 0 ||
@@ -68450,24 +68701,42 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
     }
 
     const uint64_t page = (uint64_t)getpagesize();
-    const uint64_t model_size = 2u * page;
+    const uint64_t q_weight_bytes =
+        (uint64_t)TARGET_Q_VALUES * sizeof(float);
+    const uint64_t k_weight_offset =
+        (q_weight_bytes + page - 1u) / page * page;
+    const uint64_t k_weight_bytes = (uint64_t)TEST_VALUES * sizeof(float);
+    const uint64_t model_size = k_weight_offset + k_weight_bytes;
     if (posix_memalign(&model_raw, (size_t)page, (size_t)model_size) != 0 ||
         !model_raw) {
         goto cleanup;
     }
     memset(model_raw, 0, (size_t)model_size);
-    float *weight = (float *)((uint8_t *)model_raw + page);
-    for (uint32_t i = 0; i < 128u; i++) weight[i] = 1.0f;
+    float *q_weight = (float *)model_raw;
+    float *k_weight = (float *)((uint8_t *)model_raw + k_weight_offset);
+    for (size_t i = 0; i < TARGET_Q_VALUES; i++) q_weight[i] = 1.0f;
+    for (size_t i = 0; i < TEST_VALUES; i++) k_weight[i] = 1.0f;
     if (!ds4_gpu_set_model_map(model_raw, model_size)) goto cleanup;
 
     const uint64_t tensor_bytes = sizeof(source_host);
+    const uint64_t cache_bytes = sizeof(key_poison);
+    const uint64_t target_q_bytes = sizeof(target_q_host);
     source = ds4_gpu_tensor_alloc(tensor_bytes);
     cache = ds4_gpu_tensor_alloc(tensor_bytes);
     next = ds4_gpu_tensor_alloc(tensor_bytes);
-    if (!source || !cache || !next ||
+    key_cache = ds4_gpu_tensor_alloc(cache_bytes);
+    value_cache = ds4_gpu_tensor_alloc(cache_bytes);
+    target_q = ds4_gpu_tensor_alloc(target_q_bytes);
+    target_k = ds4_gpu_tensor_alloc(tensor_bytes);
+    if (!source || !cache || !next || !key_cache || !value_cache ||
+        !target_q || !target_k ||
         !ds4_gpu_tensor_write(source, 0, source_host, tensor_bytes) ||
         !ds4_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
-        !ds4_gpu_tensor_write(next, 0, poison_host, tensor_bytes)) {
+        !ds4_gpu_tensor_write(next, 0, poison_host, tensor_bytes) ||
+        !ds4_gpu_tensor_write(key_cache, 0, key_poison, cache_bytes) ||
+        !ds4_gpu_tensor_write(value_cache, 0, value_poison, cache_bytes) ||
+        !ds4_gpu_tensor_write(target_q, 0, target_q_host, target_q_bytes) ||
+        !ds4_gpu_tensor_write(target_k, 0, source_host, tensor_bytes)) {
         goto cleanup;
     }
     graph.cur = cache;
@@ -68475,18 +68744,29 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
 
     /* A draft recorder cannot manufacture its own transaction. */
     if (dflash_graph_commands_active() ||
+        !dflash_graph_test_spec_snapshot_restore() ||
         dflash_graph_test_record_layers(
-            &graph, source, model_raw, model_size, 0u)) {
+            &graph, source, model_raw, model_size, k_weight_offset,
+            key_cache, value_cache, TEST_CACHE_CAP, target_q, target_k, 0u)) {
         goto cleanup;
     }
 
-    const uint64_t generated_before =
+    const uint64_t target_generated_before =
+        ds4_gpu_laguna_rope_atlas_completed_generated_count();
+    const uint64_t target_consumed_before =
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count();
+    const uint64_t target_family0_before =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u);
+    const uint64_t target_family1_before =
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u);
+    const uint64_t support_generated_before =
         ds4_gpu_laguna_rope_support_atlas_completed_generated_count();
-    const uint64_t consumed_before =
+    const uint64_t support_consumed_before =
         ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count();
     if (ds4_gpu_begin_commands() != 1 ||
         dflash_graph_test_record_layers(
-            &graph, source, model_raw, model_size, 1u) ||
+            &graph, source, model_raw, model_size, k_weight_offset,
+            key_cache, value_cache, TEST_CACHE_CAP, target_q, target_k, 1u) ||
         graph.cur != cache || graph.next != next ||
         ds4_gpu_discard_commands() != 1 ||
         ds4_gpu_commands_active() != 0 ||
@@ -68494,18 +68774,34 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
         memcmp(readback, poison_host, tensor_bytes) != 0 ||
         ds4_gpu_tensor_read(next, 0, readback, tensor_bytes) == 0 ||
         memcmp(readback, poison_host, tensor_bytes) != 0 ||
+        ds4_gpu_tensor_read(key_cache, 0, key_readback, cache_bytes) == 0 ||
+        memcmp(key_readback, key_poison, cache_bytes) != 0 ||
+        ds4_gpu_tensor_read(value_cache, 0, value_readback, cache_bytes) == 0 ||
+        memcmp(value_readback, value_poison, cache_bytes) != 0 ||
+        ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+            target_generated_before ||
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+            target_consumed_before ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+            target_family0_before ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+            target_family1_before ||
         ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
-            generated_before ||
+            support_generated_before ||
         ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
-            consumed_before) {
+            support_consumed_before) {
         goto cleanup;
     }
 
     if (!ds4_gpu_tensor_write(cache, 0, poison_host, tensor_bytes) ||
         !ds4_gpu_tensor_write(next, 0, poison_host, tensor_bytes) ||
+        !ds4_gpu_tensor_write(key_cache, 0, key_poison, cache_bytes) ||
+        !ds4_gpu_tensor_write(value_cache, 0, value_poison, cache_bytes) ||
         ds4_gpu_begin_commands() != 1 ||
         !dflash_graph_test_record_layers(
-            &graph, source, model_raw, model_size, UINT32_MAX) ||
+            &graph, source, model_raw, model_size, k_weight_offset,
+            key_cache, value_cache, TEST_CACHE_CAP, target_q, target_k,
+            UINT32_MAX) ||
         !dflash_graph_commands_active() ||
         ds4_gpu_flush_commands() != 1 ||
         !dflash_graph_commands_active() ||
@@ -68520,10 +68816,33 @@ bool ds4_test_laguna_dflash_command_ownership(void) {
     float next_readback[TEST_VALUES];
     if (ds4_gpu_tensor_read(next, 0, next_readback, tensor_bytes) == 0 ||
         memcmp(next_readback, poison_host, tensor_bytes) == 0 ||
+        ds4_gpu_tensor_read(key_cache, 0, key_readback, cache_bytes) == 0 ||
+        ds4_gpu_tensor_read(value_cache, 0, value_readback, cache_bytes) == 0) {
+        goto cleanup;
+    }
+    for (uint32_t row = 0; row < TEST_CACHE_CAP; row++) {
+        const size_t row_offset = (size_t)row * TEST_VALUES;
+        const bool intended = row == 1u || row == 2u;
+        const bool key_changed = memcmp(
+            key_readback + row_offset, key_poison + row_offset,
+            TEST_VALUES * sizeof(uint16_t)) != 0;
+        const bool value_changed = memcmp(
+            value_readback + row_offset, value_poison + row_offset,
+            TEST_VALUES * sizeof(uint16_t)) != 0;
+        if (intended != key_changed || intended != value_changed) goto cleanup;
+    }
+    if (ds4_gpu_laguna_rope_atlas_completed_generated_count() !=
+            target_generated_before + 1u ||
+        ds4_gpu_laguna_rope_atlas_completed_consumed_dispatch_count() !=
+            target_consumed_before + 2u ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(0u) !=
+            target_family0_before ||
+        ds4_gpu_laguna_rope_atlas_completed_family_count(1u) !=
+            target_family1_before + 2u ||
         ds4_gpu_laguna_rope_support_atlas_completed_generated_count() !=
-            generated_before + 1u ||
+            support_generated_before + 1u ||
         ds4_gpu_laguna_rope_support_atlas_completed_consumed_dispatch_count() !=
-            consumed_before + 2u) {
+            support_consumed_before + 2u) {
         goto cleanup;
     }
     ok = true;
@@ -68533,6 +68852,10 @@ cleanup:
     (void)ds4_gpu_wait_submitted_commands();
     (void)ds4_gpu_laguna_rope_atlas_plan_reset_for_test();
     (void)ds4_gpu_laguna_qk_head_norm_rope_simd32_plan_reset_for_test();
+    ds4_gpu_tensor_free(target_k);
+    ds4_gpu_tensor_free(target_q);
+    ds4_gpu_tensor_free(value_cache);
+    ds4_gpu_tensor_free(key_cache);
     ds4_gpu_tensor_free(next);
     ds4_gpu_tensor_free(cache);
     ds4_gpu_tensor_free(source);
@@ -68549,6 +68872,7 @@ cleanup:
     } else {
         (void)unsetenv(simd_env_name);
     }
+    g_ds4_shape = saved_shape;
     return ok;
 }
 #endif
