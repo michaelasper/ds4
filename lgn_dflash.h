@@ -82,9 +82,20 @@ void lgn_dflash_weights_bind(lgn_dflash_weights *weights,
                              const ds4_model *model);
 void lgn_dflash_weights_validate_layout(const lgn_dflash_weights *weights);
 
+typedef void (*lgn_dflash_range_fn)(void *ctx,
+                                    uint64_t begin,
+                                    uint64_t end);
+typedef void (*lgn_dflash_parallel_for_fn)(void *parallel_ctx,
+                                           uint64_t n_rows,
+                                           lgn_dflash_range_fn fn,
+                                           void *ctx,
+                                           uint64_t min_parallel_rows);
+
 /* A BF16 support model is exposed to graph code through an anonymous F16
  * shadow mapping.  Quantized support models continue to use their file map. */
-void *lgn_dflash_prepare_f16_map(const ds4_model *model);
+void *lgn_dflash_prepare_f16_map(const ds4_model *model,
+                                 lgn_dflash_parallel_for_fn parallel_for,
+                                 void *parallel_ctx);
 void lgn_dflash_release_f16_map(void *map, uint64_t map_size);
 const void *lgn_dflash_weight_map(const ds4_model *model,
                                   const void *f16_map);

@@ -78,11 +78,11 @@ static void lgn_die_missing(const char *kind, const char *name) {
 }
 
 static bool lgn_cursor_has(const lgn_cursor *c, uint64_t n) {
-    return c && n <= c->size && c->pos <= c->size - n;
+    return c && c->base && n <= c->size && c->pos <= c->size - n;
 }
 
 static bool lgn_cursor_read(lgn_cursor *c, void *dst, uint64_t n) {
-    if (!lgn_cursor_has(c, n)) return false;
+    if ((n != 0 && !dst) || !lgn_cursor_has(c, n)) return false;
     memcpy(dst, c->base + c->pos, (size_t)n);
     c->pos += n;
     return true;
@@ -98,7 +98,9 @@ static bool lgn_cursor_u64(lgn_cursor *c, uint64_t *out) {
 
 static bool lgn_cursor_string(lgn_cursor *c, ds4_str *out) {
     uint64_t len = 0;
-    if (!lgn_cursor_u64(c, &len) || !lgn_cursor_has(c, len)) return false;
+    if (!out || !lgn_cursor_u64(c, &len) || !lgn_cursor_has(c, len)) {
+        return false;
+    }
     out->ptr = (const char *)(c->base + c->pos);
     out->len = len;
     c->pos += len;
@@ -120,7 +122,7 @@ static bool lgn_streq(ds4_str value, const char *literal) {
 }
 
 static ds4_kv *lgn_model_find_kv(const ds4_model *m, const char *key) {
-    if (!m || !key) return NULL;
+    if (!m || !key || (m->n_kv != 0 && !m->kv)) return NULL;
     for (uint64_t i = 0; i < m->n_kv; i++) {
         if (lgn_streq(m->kv[i].key, key)) return &m->kv[i];
     }
@@ -130,6 +132,7 @@ static ds4_kv *lgn_model_find_kv(const ds4_model *m, const char *key) {
 bool lgn_model_get_string(const ds4_model *m,
                           const char *key,
                           ds4_str *out) {
+    if (!out) return false;
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_STRING) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -139,6 +142,7 @@ bool lgn_model_get_string(const ds4_model *m,
 bool lgn_model_get_u32(const ds4_model *m,
                        const char *key,
                        uint32_t *out) {
+    if (!out) return false;
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_UINT32) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -194,6 +198,7 @@ bool lgn_model_get_token_id(const ds4_model *m,
 bool lgn_model_get_u64_compat(const ds4_model *m,
                               const char *key,
                               uint64_t *out) {
+    if (!out) return false;
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -210,6 +215,7 @@ bool lgn_model_get_u64_compat(const ds4_model *m,
 bool lgn_model_get_f32_compat(const ds4_model *m,
                               const char *key,
                               float *out) {
+    if (!out) return false;
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -240,6 +246,7 @@ bool lgn_model_get_f32_compat(const ds4_model *m,
 bool lgn_model_get_bool(const ds4_model *m,
                         const char *key,
                         bool *out) {
+    if (!out) return false;
     ds4_kv *kv = lgn_model_find_kv(m, key);
     if (!kv || kv->type != LGN_GGUF_VALUE_BOOL) return false;
     lgn_cursor c = lgn_cursor_at(m, kv->value_pos);
@@ -295,7 +302,7 @@ bool lgn_model_get_u32_array(const ds4_model *m,
 }
 
 ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name) {
-    if (!m || !name) return NULL;
+    if (!m || !name || (m->n_tensors != 0 && !m->tensors)) return NULL;
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         if (lgn_streq(m->tensors[i].name, name)) return &m->tensors[i];
     }
@@ -303,6 +310,7 @@ ds4_tensor *lgn_model_find_tensor(const ds4_model *m, const char *name) {
 }
 
 ds4_tensor *lgn_model_required_tensor(const ds4_model *m, const char *name) {
+    if (!name) lgn_die("required tensor name is missing");
     ds4_tensor *tensor = lgn_model_find_tensor(m, name);
     if (!tensor) lgn_die_missing("tensor", name);
     return tensor;
@@ -311,6 +319,7 @@ ds4_tensor *lgn_model_required_tensor(const ds4_model *m, const char *name) {
 ds4_tensor *lgn_model_required_tensorf(const ds4_model *m,
                                        const char *format,
                                        uint32_t layer) {
+    if (!format) lgn_die("required tensor format is missing");
     char name[128];
     const int n = snprintf(name, sizeof(name), format, layer);
     if (n < 0 || (size_t)n >= sizeof(name)) {

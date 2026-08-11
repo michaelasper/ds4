@@ -269,6 +269,471 @@ static void test_dflash_profile_and_binding(void) {
           "incomplete DFlash layer binding is rejected");
 }
 
+enum {
+    TEST_DFLASH_KV_CAP = 20u,
+    TEST_DFLASH_TENSOR_CAP = 4u + LGN_DFLASH_N_LAYER * 12u,
+    TEST_DFLASH_STORAGE = 8192u,
+};
+
+typedef struct {
+    uint8_t map[TEST_DFLASH_STORAGE];
+    size_t cursor;
+    ds4_kv kv[TEST_DFLASH_KV_CAP];
+    uint32_t n_kv;
+    ds4_tensor tensors[TEST_DFLASH_TENSOR_CAP];
+    char tensor_names[TEST_DFLASH_TENSOR_CAP][96];
+    uint32_t n_tensors;
+    ds4_model model;
+} test_dflash_bind_fixture;
+
+static uint64_t test_dflash_reserve(test_dflash_bind_fixture *fixture,
+                                    size_t bytes) {
+    if (!fixture || bytes > sizeof(fixture->map) - fixture->cursor) {
+        return UINT64_MAX;
+    }
+    const uint64_t pos = (uint64_t)fixture->cursor;
+    fixture->cursor += bytes;
+    return pos;
+}
+
+static void test_dflash_put(test_dflash_bind_fixture *fixture,
+                            const void *data,
+                            size_t bytes,
+                            uint64_t *pos_out) {
+    const uint64_t pos = test_dflash_reserve(fixture, bytes);
+    CHECK(pos != UINT64_MAX, "DFlash fixture storage has room");
+    if (pos == UINT64_MAX) {
+        *pos_out = 0;
+        return;
+    }
+    memcpy(fixture->map + pos, data, bytes);
+    *pos_out = pos;
+}
+
+static void test_dflash_add_kv(test_dflash_bind_fixture *fixture,
+                               const char *key,
+                               uint32_t type,
+                               uint64_t value_pos) {
+    CHECK(fixture->n_kv < TEST_DFLASH_KV_CAP,
+          "DFlash fixture metadata table has room");
+    if (fixture->n_kv >= TEST_DFLASH_KV_CAP) return;
+    fixture->kv[fixture->n_kv++] = (ds4_kv){
+        .key = { key, strlen(key) },
+        .type = type,
+        .value_pos = value_pos,
+    };
+}
+
+static void test_dflash_add_u32(test_dflash_bind_fixture *fixture,
+                                const char *key,
+                                uint32_t value) {
+    uint64_t pos = 0;
+    test_dflash_put(fixture, &value, sizeof(value), &pos);
+    test_dflash_add_kv(fixture, key, LGN_GGUF_VALUE_UINT32, pos);
+}
+
+static void test_dflash_add_u64(test_dflash_bind_fixture *fixture,
+                                const char *key,
+                                uint64_t value) {
+    uint64_t pos = 0;
+    test_dflash_put(fixture, &value, sizeof(value), &pos);
+    test_dflash_add_kv(fixture, key, LGN_GGUF_VALUE_UINT64, pos);
+}
+
+static void test_dflash_add_f32(test_dflash_bind_fixture *fixture,
+                                const char *key,
+                                float value) {
+    uint64_t pos = 0;
+    test_dflash_put(fixture, &value, sizeof(value), &pos);
+    test_dflash_add_kv(fixture, key, LGN_GGUF_VALUE_FLOAT32, pos);
+}
+
+static void test_dflash_add_string(test_dflash_bind_fixture *fixture,
+                                   const char *key,
+                                   const char *value) {
+    const uint64_t length = strlen(value);
+    const size_t bytes = sizeof(length) + (size_t)length;
+    const uint64_t pos = test_dflash_reserve(fixture, bytes);
+    CHECK(pos != UINT64_MAX, "DFlash fixture string has room");
+    if (pos == UINT64_MAX) return;
+    memcpy(fixture->map + pos, &length, sizeof(length));
+    memcpy(fixture->map + pos + sizeof(length), value, (size_t)length);
+    test_dflash_add_kv(fixture, key, LGN_GGUF_VALUE_STRING, pos);
+}
+
+static void test_dflash_add_array(test_dflash_bind_fixture *fixture,
+                                  const char *key,
+                                  uint32_t element_type,
+                                  const uint32_t *values,
+                                  size_t count) {
+    const uint64_t length = (uint64_t)count;
+    const size_t bytes = sizeof(element_type) + sizeof(length) +
+                         count * sizeof(values[0]);
+    const uint64_t pos = test_dflash_reserve(fixture, bytes);
+    CHECK(pos != UINT64_MAX, "DFlash fixture array has room");
+    if (pos == UINT64_MAX) return;
+    memcpy(fixture->map + pos, &element_type, sizeof(element_type));
+    memcpy(fixture->map + pos + sizeof(element_type), &length, sizeof(length));
+    memcpy(fixture->map + pos + sizeof(element_type) + sizeof(length),
+           values,
+           count * sizeof(values[0]));
+    test_dflash_add_kv(fixture, key, LGN_GGUF_VALUE_ARRAY, pos);
+}
+
+static ds4_tensor *test_dflash_add_tensor(test_dflash_bind_fixture *fixture,
+                                           const char *name,
+                                           uint32_t type,
+                                           uint32_t ndim,
+                                           uint64_t d0,
+                                           uint64_t d1) {
+    CHECK(fixture->n_tensors < TEST_DFLASH_TENSOR_CAP,
+          "DFlash fixture tensor table has room");
+    if (fixture->n_tensors >= TEST_DFLASH_TENSOR_CAP) return NULL;
+    const uint32_t index = fixture->n_tensors++;
+    const int n = snprintf(fixture->tensor_names[index],
+                           sizeof(fixture->tensor_names[index]),
+                           "%s", name);
+    CHECK(n >= 0 && (size_t)n < sizeof(fixture->tensor_names[index]),
+          "DFlash fixture tensor name has room");
+    ds4_tensor *tensor = &fixture->tensors[index];
+    tensor->name = (ds4_str){ fixture->tensor_names[index], (size_t)n };
+    tensor->ndim = ndim;
+    tensor->dim[0] = d0;
+    tensor->dim[1] = d1;
+    tensor->type = type;
+    return tensor;
+}
+
+static void test_dflash_bind_fixture_init(test_dflash_bind_fixture *fixture) {
+    memset(fixture, 0, sizeof(*fixture));
+    fixture->cursor = 64u;
+    const lgn_dflash_profile *profile = lgn_dflash_profile_get();
+    static const uint32_t all_one[] = { 1u, 1u, 1u, 1u, 1u, 1u };
+
+    test_dflash_add_u32(fixture, "dflash.block_count", profile->n_layer);
+    test_dflash_add_u64(fixture, "dflash.context_length",
+                        profile->context_length);
+    test_dflash_add_u32(fixture, "dflash.embedding_length", profile->n_embd);
+    test_dflash_add_u32(fixture, "dflash.feed_forward_length",
+                        profile->n_ff_dense);
+    test_dflash_add_u32(fixture, "dflash.attention.head_count",
+                        profile->n_head);
+    test_dflash_add_u32(fixture, "dflash.attention.head_count_kv",
+                        profile->n_head_kv);
+    test_dflash_add_u32(fixture, "dflash.attention.key_length",
+                        profile->n_head_dim);
+    test_dflash_add_u32(fixture, "dflash.attention.value_length",
+                        profile->n_value_dim);
+    test_dflash_add_u32(fixture, "dflash.rope.dimension_count", profile->n_rot);
+    test_dflash_add_u32(fixture, "dflash.attention.sliding_window",
+                        profile->cache_cap);
+    test_dflash_add_array(fixture,
+                          "dflash.attention.sliding_window_pattern",
+                          LGN_GGUF_VALUE_UINT32,
+                          all_one,
+                          sizeof(all_one) / sizeof(all_one[0]));
+    test_dflash_add_f32(fixture, "dflash.rope.freq_base",
+                        profile->rope_freq_base);
+    test_dflash_add_f32(fixture,
+                        "dflash.attention.layer_norm_rms_epsilon",
+                        profile->rms_eps);
+    test_dflash_add_u32(fixture, "dflash.block_size", profile->block_size);
+    test_dflash_add_u32(fixture, "tokenizer.ggml.mask_token_id",
+                        profile->mask_token_id);
+    test_dflash_add_array(fixture,
+                          "dflash.target_layers",
+                          LGN_GGUF_VALUE_UINT32,
+                          profile->target_layers,
+                          profile->n_aux);
+    test_dflash_add_string(fixture, "dflash.decoder_arch", "laguna");
+    test_dflash_add_string(fixture, "dflash.rope.scaling.type", "none");
+
+    static const uint32_t malformed[] = { 0u, 1u, 2u, 3u, 4u, 5u, 6u };
+    test_dflash_add_array(fixture,
+                          "test.bad.array",
+                          LGN_GGUF_VALUE_UINT32,
+                          malformed,
+                          sizeof(malformed) / sizeof(malformed[0]));
+    const uint64_t truncated_pos = test_dflash_reserve(
+        fixture, sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
+    CHECK(truncated_pos != UINT64_MAX, "DFlash truncated array has room");
+    if (truncated_pos != UINT64_MAX) {
+        const uint32_t type = LGN_GGUF_VALUE_UINT32;
+        const uint64_t length = 2u;
+        memcpy(fixture->map + truncated_pos, &type, sizeof(type));
+        memcpy(fixture->map + truncated_pos + sizeof(type),
+               &length,
+               sizeof(length));
+        memcpy(fixture->map + truncated_pos + sizeof(type) + sizeof(length),
+               &all_one[0],
+               sizeof(all_one[0]));
+        test_dflash_add_kv(fixture,
+                           "test.truncated.array",
+                           LGN_GGUF_VALUE_ARRAY,
+                           truncated_pos);
+    }
+
+    const uint64_t q_dim = (uint64_t)profile->n_head * profile->n_head_dim;
+    const uint64_t kv_dim = (uint64_t)profile->n_head_kv * profile->n_head_dim;
+    test_dflash_add_tensor(fixture, "enc.aux_norm.weight", LGN_TENSOR_F32,
+                           2u, profile->n_embd, profile->n_aux);
+    test_dflash_add_tensor(fixture, "fc.weight", LGN_TENSOR_BF16,
+                           2u, (uint64_t)profile->n_aux * profile->n_embd,
+                           profile->n_embd);
+    test_dflash_add_tensor(fixture, "enc.output_norm.weight", LGN_TENSOR_F32,
+                           1u, profile->n_embd, 0);
+    test_dflash_add_tensor(fixture, "output_norm.weight", LGN_TENSOR_F32,
+                           1u, profile->n_embd, 0);
+    for (uint32_t il = 0; il < profile->n_layer; il++) {
+        char name[96];
+#define ADD_DFLASH_TENSOR(format, type, ndim, d0, d1) do {                  \
+            snprintf(name, sizeof(name), format, il);                     \
+            test_dflash_add_tensor(fixture, name, type, ndim, d0, d1);     \
+        } while (0)
+        ADD_DFLASH_TENSOR("blk.%u.attn_norm.weight", LGN_TENSOR_F32,
+                          1u, profile->n_embd, 0);
+        ADD_DFLASH_TENSOR("blk.%u.attn_q.weight", LGN_TENSOR_BF16,
+                          2u, profile->n_embd, q_dim);
+        ADD_DFLASH_TENSOR("blk.%u.attn_k.weight", LGN_TENSOR_BF16,
+                          2u, profile->n_embd, kv_dim);
+        ADD_DFLASH_TENSOR("blk.%u.attn_v.weight", LGN_TENSOR_BF16,
+                          2u, profile->n_embd, kv_dim);
+        ADD_DFLASH_TENSOR("blk.%u.attn_gate.weight", LGN_TENSOR_BF16,
+                          2u, profile->n_embd, profile->n_head);
+        ADD_DFLASH_TENSOR("blk.%u.attn_q_norm.weight", LGN_TENSOR_F32,
+                          1u, profile->n_head_dim, 0);
+        ADD_DFLASH_TENSOR("blk.%u.attn_k_norm.weight", LGN_TENSOR_F32,
+                          1u, profile->n_head_dim, 0);
+        ADD_DFLASH_TENSOR("blk.%u.attn_output.weight", LGN_TENSOR_BF16,
+                          2u, q_dim, profile->n_embd);
+        ADD_DFLASH_TENSOR("blk.%u.ffn_norm.weight", LGN_TENSOR_F32,
+                          1u, profile->n_embd, 0);
+        ADD_DFLASH_TENSOR("blk.%u.ffn_gate.weight", LGN_TENSOR_BF16,
+                          2u, profile->n_embd, profile->n_ff_dense);
+        ADD_DFLASH_TENSOR("blk.%u.ffn_up.weight", LGN_TENSOR_BF16,
+                          2u, profile->n_embd, profile->n_ff_dense);
+        ADD_DFLASH_TENSOR("blk.%u.ffn_down.weight", LGN_TENSOR_BF16,
+                          2u, profile->n_ff_dense, profile->n_embd);
+#undef ADD_DFLASH_TENSOR
+    }
+    fixture->model = (ds4_model){
+        .map = fixture->map,
+        .size = sizeof(fixture->map),
+        .n_kv = fixture->n_kv,
+        .n_tensors = fixture->n_tensors,
+        .kv = fixture->kv,
+        .tensors = fixture->tensors,
+    };
+}
+
+static void test_dflash_binding_fixture(void) {
+    test_dflash_bind_fixture fixture;
+    test_dflash_bind_fixture_init(&fixture);
+    CHECK(fixture.n_kv == TEST_DFLASH_KV_CAP,
+          "synthetic DFlash fixture contains all metadata records");
+    CHECK(fixture.n_tensors == TEST_DFLASH_TENSOR_CAP,
+          "synthetic DFlash fixture contains all tensor names");
+
+    lgn_dflash_weights weights;
+    memset(&weights, 0, sizeof(weights));
+    lgn_dflash_weights_bind(&weights, &fixture.model);
+    CHECK(lgn_dflash_binding_eligible(&weights),
+          "synthetic DFlash GGUF binds every required tensor and metadata");
+    CHECK(weights.fc == &fixture.tensors[1] &&
+              weights.layer[LGN_DFLASH_N_LAYER - 1u].ffn_down != NULL,
+          "synthetic DFlash binding retains expected tensor pointers");
+
+    uint32_t values[LGN_DFLASH_N_AUX] = {0};
+    uint32_t count = 0;
+    CHECK(!lgn_model_get_u32_array(&fixture.model,
+                                   "test.bad.array",
+                                   values,
+                                   LGN_DFLASH_N_AUX,
+                                   &count) && count == 0,
+          "DFlash metadata array rejects oversized input");
+    ds4_model truncated = fixture.model;
+    truncated.size = fixture.cursor;
+    CHECK(!lgn_model_get_u32_array(&truncated,
+                                   "test.truncated.array",
+                                   values,
+                                   LGN_DFLASH_N_AUX,
+                                   &count) && count == 0,
+          "DFlash metadata array rejects truncated input");
+    CHECK(!lgn_model_get_string(&fixture.model,
+                                "dflash.decoder_arch",
+                                NULL),
+          "model string getter rejects NULL output");
+    CHECK(!lgn_model_get_u32(&fixture.model,
+                             "dflash.block_count",
+                             NULL),
+          "model u32 getter rejects NULL output");
+    CHECK(!lgn_model_get_token_id(&fixture.model,
+                                  "tokenizer.ggml.mask_token_id",
+                                  NULL),
+          "model token getter rejects NULL output");
+    CHECK(!lgn_model_get_u64_compat(&fixture.model,
+                                    "dflash.context_length",
+                                    NULL),
+          "model u64 getter rejects NULL output");
+    CHECK(!lgn_model_get_f32_compat(&fixture.model,
+                                    "dflash.rope.freq_base",
+                                    NULL),
+          "model f32 getter rejects NULL output");
+    CHECK(!lgn_model_get_bool(&fixture.model, "dflash.decoder_arch", NULL),
+          "model bool getter rejects NULL output");
+    CHECK(!lgn_model_get_array(&fixture.model,
+                               "dflash.target_layers",
+                               NULL),
+          "model array getter rejects NULL output");
+    CHECK(!lgn_model_get_u32_array(&fixture.model,
+                                   "dflash.target_layers",
+                                   NULL,
+                                   LGN_DFLASH_N_AUX,
+                                   &count),
+          "model u32 array getter rejects NULL storage");
+
+    ds4_model missing_kv = fixture.model;
+    missing_kv.kv = NULL;
+    CHECK(!lgn_model_get_u32(&missing_kv,
+                             "dflash.block_count",
+                             &count),
+          "model getter rejects a nonzero KV count with NULL table");
+    ds4_model missing_storage = fixture.model;
+    missing_storage.map = NULL;
+    CHECK(!lgn_model_get_u32(&missing_storage,
+                             "dflash.block_count",
+                             &count),
+          "model getter rejects a missing backing storage mapping");
+    ds4_model missing_tensors = fixture.model;
+    missing_tensors.tensors = NULL;
+    CHECK(lgn_model_find_tensor(&missing_tensors, "fc.weight") == NULL,
+          "tensor finder rejects a nonzero tensor count with NULL table");
+}
+
+typedef struct {
+    uint32_t calls;
+    uint64_t n_rows;
+    uint64_t min_parallel_rows;
+    uint64_t begin[4];
+    uint64_t end[4];
+    uint32_t ranges;
+} test_dflash_parallel_capture;
+
+static void test_dflash_parallel_for(void *parallel_ctx,
+                                     uint64_t n_rows,
+                                     lgn_dflash_range_fn fn,
+                                     void *ctx,
+                                     uint64_t min_parallel_rows) {
+    test_dflash_parallel_capture *capture = parallel_ctx;
+    capture->calls++;
+    capture->n_rows = n_rows;
+    capture->min_parallel_rows = min_parallel_rows;
+    const uint64_t split = n_rows / 2u;
+    capture->begin[capture->ranges] = 0;
+    capture->end[capture->ranges++] = split;
+    fn(ctx, 0, split);
+    capture->begin[capture->ranges] = split;
+    capture->end[capture->ranges++] = n_rows;
+    fn(ctx, split, n_rows);
+}
+
+static void test_dflash_shadow_map(void) {
+    static const uint16_t bf16_input[] = {
+        0x0000u, 0x3f80u, 0xbf80u, 0x3f81u,
+        0x7f80u, 0x0001u, 0x8000u, 0x3c00u,
+    };
+    static const uint16_t expected_f16[] = {
+        0x0000u, 0x3c00u, 0xbc00u, 0x3c08u,
+        0x7c00u, 0x0000u, 0x8000u, 0x2000u,
+    };
+    uint8_t source[128] = {0};
+    ds4_tensor tensors[2] = {0};
+    char names[2][16] = { "f32", "bf16" };
+    uint32_t f32_bits[] = { UINT32_C(0x11223344), UINT32_C(0x55667788) };
+    memcpy(source + 16u, f32_bits, sizeof(f32_bits));
+    memcpy(source + 64u, bf16_input, sizeof(bf16_input));
+    tensors[0] = (ds4_tensor){
+        .name = { names[0], 3u },
+        .type = LGN_TENSOR_F32,
+        .abs_offset = 16u,
+        .elements = 2u,
+        .bytes = sizeof(f32_bits),
+    };
+    tensors[1] = (ds4_tensor){
+        .name = { names[1], 4u },
+        .type = LGN_TENSOR_BF16,
+        .abs_offset = 64u,
+        .elements = sizeof(bf16_input) / sizeof(bf16_input[0]),
+        .bytes = sizeof(bf16_input),
+    };
+    ds4_model model = {
+        .map = source,
+        .size = sizeof(source),
+        .n_tensors = 2u,
+        .tensors = tensors,
+    };
+
+    void *serial_map = lgn_dflash_prepare_f16_map(&model, NULL, NULL);
+    CHECK(serial_map != NULL, "DFlash BF16 serial shadow map is created");
+    if (serial_map) {
+        CHECK(memcmp((const uint8_t *)serial_map + 16u,
+                     f32_bits,
+                     sizeof(f32_bits)) == 0,
+              "DFlash F32 metadata bytes are copied unchanged");
+        CHECK(memcmp((const uint8_t *)serial_map + 64u,
+                     expected_f16,
+                     sizeof(expected_f16)) == 0,
+              "DFlash serial BF16 conversion matches F16 bit patterns");
+        lgn_dflash_release_f16_map(serial_map, model.size);
+    }
+
+    test_dflash_parallel_capture capture = {0};
+    void *parallel_map = lgn_dflash_prepare_f16_map(
+        &model, test_dflash_parallel_for, &capture);
+    CHECK(parallel_map != NULL, "DFlash injected shadow map is created");
+    CHECK(capture.calls == 1u &&
+              capture.n_rows == sizeof(bf16_input) / sizeof(bf16_input[0]) &&
+              capture.min_parallel_rows == (UINT64_C(1) << 18) &&
+              capture.ranges == 2u && capture.begin[0] == 0u &&
+              capture.end[0] == 4u && capture.begin[1] == 4u &&
+              capture.end[1] == 8u,
+          "DFlash BF16 conversion invokes the injected parallel adapter");
+    if (parallel_map) {
+        CHECK(memcmp((const uint8_t *)parallel_map + 64u,
+                     expected_f16,
+                     sizeof(expected_f16)) == 0,
+              "DFlash injected BF16 conversion matches F16 bit patterns");
+        lgn_dflash_release_f16_map(parallel_map, model.size);
+    }
+
+    tensors[1].abs_offset = 120u;
+    CHECK(lgn_dflash_prepare_f16_map(&model, NULL, NULL) == NULL,
+          "DFlash shadow map rejects tensor ranges outside the mapping");
+    tensors[1].abs_offset = 64u;
+    tensors[1].type = LGN_TENSOR_Q4_0;
+    CHECK(lgn_dflash_prepare_f16_map(&model, NULL, NULL) == NULL,
+          "DFlash shadow map rejects unsupported tensor types");
+    tensors[1].type = LGN_TENSOR_BF16;
+    tensors[1].bytes--;
+    CHECK(lgn_dflash_prepare_f16_map(&model, NULL, NULL) == NULL,
+          "DFlash shadow map rejects malformed BF16 byte counts");
+    tensors[1].bytes = sizeof(bf16_input);
+    tensors[1].elements = UINT64_MAX;
+    tensors[1].bytes = 0;
+    CHECK(lgn_dflash_prepare_f16_map(&model, NULL, NULL) == NULL,
+          "DFlash shadow map rejects overflowing BF16 element counts");
+    tensors[1].elements = sizeof(bf16_input) / sizeof(bf16_input[0]);
+    tensors[1].bytes = sizeof(bf16_input);
+    ds4_model missing_tensors = model;
+    missing_tensors.tensors = NULL;
+    CHECK(lgn_dflash_prepare_f16_map(&missing_tensors, NULL, NULL) == NULL,
+          "DFlash shadow map rejects a nonzero tensor count with NULL table");
+    ds4_model missing_map = model;
+    missing_map.map = NULL;
+    CHECK(lgn_dflash_prepare_f16_map(&missing_map, NULL, NULL) == NULL,
+          "DFlash shadow map rejects a missing model mapping");
+}
+
 typedef struct {
     size_t count;
     size_t length[64];
@@ -523,6 +988,8 @@ int main(void) {
     test_s21_model_profile();
     test_model_admission();
     test_dflash_profile_and_binding();
+    test_dflash_binding_fixture();
+    test_dflash_shadow_map();
     test_laguna_pretokenizer();
     if (failures != 0) {
         fprintf(stderr, "test-lgn: %d failure(s)\n", failures);

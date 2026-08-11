@@ -424,20 +424,46 @@ static double lgn_dflash_now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
 }
 
-static void lgn_dflash_convert_bf16_rows(const uint16_t *src,
-                                         uint16_t *dst,
-                                         uint64_t elements) {
-    for (uint64_t i = 0; i < elements; i++) {
-        const uint32_t bits = (uint32_t)src[i] << 16;
+typedef struct {
+    const uint16_t *src;
+    uint16_t *dst;
+} lgn_dflash_convert_ctx;
+
+static void lgn_dflash_convert_bf16_rows(void *opaque,
+                                         uint64_t begin,
+                                         uint64_t end) {
+    lgn_dflash_convert_ctx *ctx = opaque;
+    uint64_t i = begin;
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+    for (; i + 8u <= end; i += 8u) {
+        const uint16x8_t b = vld1q_u16(ctx->src + i);
+        uint32x4_t lo = vmovl_u16(vget_low_u16(b));
+        uint32x4_t hi = vmovl_high_u16(b);
+        lo = vshlq_n_u32(lo, 16);
+        hi = vshlq_n_u32(hi, 16);
+        const float16x4_t hlo =
+            vcvt_f16_f32(vreinterpretq_f32_u32(lo));
+        const float16x4_t hhi =
+            vcvt_f16_f32(vreinterpretq_f32_u32(hi));
+        vst1q_u16(ctx->dst + i,
+                  vcombine_u16(vreinterpret_u16_f16(hlo),
+                               vreinterpret_u16_f16(hhi)));
+    }
+#endif
+    for (; i < end; i++) {
+        const uint32_t bits = (uint32_t)ctx->src[i] << 16;
         float value = 0.0f;
         memcpy(&value, &bits, sizeof(value));
-        dst[i] = lgn_dflash_f32_to_f16(value);
+        ctx->dst[i] = lgn_dflash_f32_to_f16(value);
     }
 }
 
-void *lgn_dflash_prepare_f16_map(const ds4_model *model) {
+void *lgn_dflash_prepare_f16_map(const ds4_model *model,
+                                 lgn_dflash_parallel_for_fn parallel_for,
+                                 void *parallel_ctx) {
     if (!model || !model->map || model->size == 0 ||
-        model->size > (uint64_t)SIZE_MAX) {
+        model->size > (uint64_t)SIZE_MAX ||
+        (model->n_tensors != 0 && !model->tensors)) {
         return NULL;
     }
 #if defined(MAP_ANONYMOUS)
@@ -480,6 +506,7 @@ void *lgn_dflash_prepare_f16_map(const ds4_model *model) {
             continue;
         }
         if (tensor->type != LGN_TENSOR_BF16 ||
+            tensor->elements > UINT64_MAX / sizeof(uint16_t) ||
             tensor->bytes != tensor->elements * sizeof(uint16_t)) {
             fprintf(stderr,
                     "ds4: DFlash tensor %.*s has unsupported type %s\n",
@@ -488,10 +515,19 @@ void *lgn_dflash_prepare_f16_map(const ds4_model *model) {
             munmap(shadow, (size_t)model->size);
             return NULL;
         }
-        lgn_dflash_convert_bf16_rows(
-            (const uint16_t *)(model->map + tensor->abs_offset),
-            (uint16_t *)(shadow + tensor->abs_offset),
-            tensor->elements);
+        lgn_dflash_convert_ctx ctx = {
+            .src = (const uint16_t *)(model->map + tensor->abs_offset),
+            .dst = (uint16_t *)(shadow + tensor->abs_offset),
+        };
+        if (parallel_for) {
+            parallel_for(parallel_ctx,
+                         tensor->elements,
+                         lgn_dflash_convert_bf16_rows,
+                         &ctx,
+                         UINT64_C(1) << 18);
+        } else {
+            lgn_dflash_convert_bf16_rows(&ctx, 0, tensor->elements);
+        }
         converted += tensor->bytes;
     }
 

@@ -1775,6 +1775,15 @@ static void ds4_parallel_for_min_rows(uint64_t n_rows, ds4_parallel_fn fn, void 
     pthread_mutex_unlock(&g_pool.mutex);
 }
 
+static void ds4_lgn_dflash_parallel_for(void *parallel_ctx,
+                                        uint64_t n_rows,
+                                        lgn_dflash_range_fn fn,
+                                        void *ctx,
+                                        uint64_t min_parallel_rows) {
+    (void)parallel_ctx;
+    ds4_parallel_for_min_rows(n_rows, fn, ctx, min_parallel_rows);
+}
+
 static void ds4_parallel_for(uint64_t n_rows, ds4_parallel_fn fn, void *ctx) {
     ds4_parallel_for_min_rows(n_rows, fn, ctx, 512);
 }
@@ -59047,8 +59056,10 @@ static int ds4_engine_open_internal(ds4_engine **out,
         }
         lgn_dflash_weights_bind(&e->dflash_weights, &e->dflash_model);
         if (e->dflash_weights.fc->type == LGN_TENSOR_BF16) {
-            e->dflash_f16_map =
-                lgn_dflash_prepare_f16_map(&e->dflash_model);
+            e->dflash_f16_map = lgn_dflash_prepare_f16_map(
+                &e->dflash_model,
+                ds4_lgn_dflash_parallel_for,
+                NULL);
             if (!e->dflash_f16_map) {
                 ds4_engine_close(e);
                 *out = NULL;
