@@ -108,12 +108,21 @@ The refactor branch already:
   shell, obsolete multi-GPU public header, and stale GLM long-context smoke
   script. Host tokenizer, sampling, payload serialization, DFlash conversion,
   and Metal numerical reference helpers remain where the supported product or
-  its correctness tests still use them.
+  its correctness tests still use them;
+- removes the unreachable legacy Metal HC, raw-KV, generic RoPE, concat,
+  repeat, set-rows, softmax, and sum-rows shader families together with their
+  public wrappers, pipeline state, runtime source registrations, and stale
+  tests. Mixed copy, dense, router, attention, MoE, get-rows, and norm sources
+  are reduced at symbol granularity. The six GLM-named helpers still called by
+  Laguna, grouped Q2/Q3/Q4/Q5/Q6 and R1 routes, logits top-k/argsort, live
+  MXFP4 product templates, command-completion evidence, and DFlash kernels are
+  deliberately retained.
 
 The private generic raw graph implementation and its public routes are now
 deleted. Dormant low-level CUDA/ROCm conditionals, tensor-parallel/tier-aware
-Metal helpers, and broad shared-backend Metal code still remain internally for
-later low-level cleanup; no public
+Metal helpers, and a smaller set of shared FlashAttention, parallel-FFN,
+quantized-MoE, and source-override internals still remain for later low-level
+cleanup; no public
 engine, session, diagnostic, imatrix, or support-model route owns them. Their
 presence is transitional and must not be interpreted as supported behavior. A
 `glm_` name on one of the six retained router/MoE Metal helpers describes

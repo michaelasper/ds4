@@ -72,8 +72,13 @@ requirements.
 - `ds4_cli.c`: command line and interactive transcript handling.
 - `ds4_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
   streaming, tool-call mapping, and server-side KV-cache policy.
-- `ds4_metal.m`: Objective-C Metal runtime and kernel wrappers.
-- `metal/*.metal`: Metal compute kernels.
+- `ds4_metal.m`: contracted Objective-C Metal runtime and kernel wrappers.
+  Legacy HC, raw-KV, compressor, and generic graph wrappers are removed;
+  retain only paths proven reachable from Laguna/DFlash or their correctness
+  and lifecycle evidence.
+- `metal/*.metal`: Metal compute kernels. Runtime and Makefile source lists
+  must remain identical; mixed sources are pruned by symbol rather than by
+  filename when Laguna still owns a kernel.
 - `tests/`: unit and live integration tests.
 - `FORK.md`: refactor boundary, deletion order, guardrails, and deferred
   compatibility decisions.
