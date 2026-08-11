@@ -888,36 +888,16 @@ static void lgn_weights_bind_layer(ds4_layer_weights *l,
 }
 
 void lgn_weights_bind(ds4_weights *w,
-                      const ds4_model *m,
-                      bool load_slice,
-                      uint32_t load_layer_start,
-                      uint32_t load_layer_end,
-                      bool require_output,
-                      bool optional_output) {
+                      const ds4_model *m) {
     const uint32_t executable_layers = LGN_SHAPE_LAGUNA_S21.n_layer;
     memset(w, 0, sizeof(*w));
 
-    uint32_t start = 0;
-    uint32_t end = executable_layers - 1u;
-    bool require_token_embd = true;
-    if (load_slice) {
-        if (load_layer_start >= executable_layers) lgn_die("invalid model load layer slice");
-        start = load_layer_start;
-        end = load_layer_end == UINT32_MAX ? executable_layers - 1u : load_layer_end;
-        if (end >= executable_layers || end < start) lgn_die("invalid model load layer slice");
-        require_token_embd = start == 0;
-    } else {
-        require_output = true;
-        optional_output = false;
-    }
-
-    if (require_token_embd) {
-        w->token_embd = lgn_required_tensor(m, "token_embd.weight");
-    } else {
-        w->token_embd = lgn_model_find_tensor(m, "token_embd.weight");
-    }
-    lgn_weights_bind_output(w, m, require_output, optional_output);
-    for (uint32_t il = start; il <= end; il++) {
+    /* Laguna uses a whole-model mmap.  Every executable tensor, including
+     * token embeddings and the output head, is bound up front; partial layer
+     * loading is intentionally not part of the product contract. */
+    w->token_embd = lgn_required_tensor(m, "token_embd.weight");
+    lgn_weights_bind_output(w, m, true, false);
+    for (uint32_t il = 0; il < executable_layers; il++) {
         lgn_weights_bind_layer(&w->layer[il], m, il);
     }
 }

@@ -232,7 +232,6 @@ int main(void) {
                 "MXFP4 Metal half-LUT raw-bit A/B exact for all 4096 e/q pairs\n");
     }
     ds4_gpu_set_quality(false);
-    ds4_gpu_set_ssd_streaming(false);
     ds4_gpu_tensor *x_tensor = ds4_gpu_tensor_alloc(sizeof(x));
     ds4_gpu_tensor *selected_tensor = ds4_gpu_tensor_alloc(sizeof(selected));
     ds4_gpu_tensor *weights_tensor = ds4_gpu_tensor_alloc(sizeof(weights));

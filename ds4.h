@@ -6,8 +6,6 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "ds4_ssd.h"
-
 /* Public engine boundary.
  *
  * The CLI and server should treat ds4_engine as the loaded model and
@@ -85,22 +83,10 @@ typedef struct {
     float directional_steering_attn;
     float directional_steering_ffn;
     int power_percent;
-    uint32_t ssd_streaming_cache_experts;
-    uint64_t ssd_streaming_cache_bytes;
-    uint32_t ssd_streaming_full_layers;
-    uint32_t ssd_streaming_preload_experts;
-    uint64_t simulate_used_memory_bytes;
     bool warm_weights;
     bool quality;
     bool dflash_p_min_set;
-    bool ssd_streaming;
-    bool ssd_streaming_cold;
-    bool ssd_streaming_full_layers_set;
     bool inspect_only;
-    bool load_slice;
-    uint32_t load_layer_start;
-    uint32_t load_layer_end;
-    bool load_output;
 } ds4_engine_options;
 
 typedef void (*ds4_token_emit_fn)(void *ud, int token);
@@ -169,11 +155,6 @@ ds4_context_memory ds4_context_memory_estimate_with_prefill(
         ds4_backend backend,
         int ctx_size,
         uint32_t prefill_chunk);
-ds4_context_memory ds4_context_memory_estimate_with_prefill_mode(
-        ds4_backend backend,
-        int ctx_size,
-        uint32_t prefill_chunk,
-        bool ssd_streaming);
 bool ds4_log_is_tty(FILE *fp);
 void ds4_log(FILE *fp, ds4_log_type type, const char *fmt, ...);
 int ds4_engine_generate_argmax(ds4_engine *e, const ds4_tokens *prompt,

@@ -315,11 +315,6 @@ void lgn_weights_validate_layout(const ds4_weights *w,
                                  bool require_output);
 
 void lgn_weights_bind(ds4_weights *w,
-                      const ds4_model *m,
-                      bool load_slice,
-                      uint32_t load_layer_start,
-                      uint32_t load_layer_end,
-                      bool require_output,
-                      bool optional_output);
+                      const ds4_model *m);
 
 #endif /* LGN_MODEL_H */

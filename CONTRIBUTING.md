@@ -4,7 +4,8 @@ This fork is intentionally specialized for Laguna S2.1 inference on Apple
 Metal. Changes should make that product smaller, clearer, more correct, or
 faster. CPU inference, CUDA, ROCm, DeepSeek, GLM, distributed execution,
 tensor parallelism, multi-GPU placement, SSD expert streaming, MTP, and DSpark
-are outside the supported boundary.
+are outside the supported boundary; SSD expert streaming is retired rather than
+an available compatibility mode.
 
 Include the commands you ran, the exact commit, macOS and hardware, model
 filename and SHA-256, and any non-default selectors in a pull request or commit

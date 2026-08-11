@@ -1465,9 +1465,6 @@ static bool eval_option_is_unsupported(const char *arg) {
     static const char *const options[] = {
         "--cpu", "--cuda", "--rocm", "--gpu-vram", "--gpu-devices",
         "--cuda-tensor-parallel",
-        "--ssd-streaming", "--ssd-streaming-cold",
-        "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
-        "--ssd-streaming-preload-experts", "--simulate-used-memory",
         "--prefill-chunk", "--power",
         "--expert-profile",
         "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",

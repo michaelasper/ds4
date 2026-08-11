@@ -14,7 +14,7 @@ requirements.
   streaming.
 - Retain the CLI and server as supported product surfaces.
 - Retain DFlash as an explicitly Laguna-specific optional path for now.
-- Make no product promise for CPU, CUDA, ROCm, SSD streaming, distributed
+- Make no product promise for CPU, CUDA, ROCm, distributed
   inference, tensor parallelism, multi-GPU placement, MTP, DSpark, steering,
   power controls, or custom prefill. Do not preserve these paths with new
   compatibility flags.
@@ -29,8 +29,11 @@ requirements.
 
 - Keep one canonical Laguna Metal execution path. Prefer deleting obsolete
   branches over adding another semantic variant behind a flag.
-- Keep model loading mmap-backed and whole-model. Do not reintroduce an SSD,
-  distributed, or host-inference fallback while simplifying the runtime.
+- Keep model loading mmap-backed and whole-model. SSD expert streaming,
+  simulated-memory, SSD expert-cache budget, and partial-load compatibility are
+  retired; do not reintroduce them, a distributed path, or a host-inference
+  fallback. Disk-KV persistence and its independent on-disk budget/eviction
+  policy remain supported.
 - Keep Objective-C limited to the Metal runtime and use C for the rest of the
   implementation. Do not introduce C++.
 - Keep public APIs narrow. CLI and server code should not know tensor or

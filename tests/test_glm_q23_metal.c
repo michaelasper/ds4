@@ -178,6 +178,60 @@ static int run_case(const void *model,
         ok = ds4_gpu_tensor_read(mid, 0, legacy_mid, mid_bytes) &&
              ds4_gpu_tensor_read(out, 0, legacy_out, out_bytes);
     }
+    if (ok && n_tokens == 1u) {
+        /* The ordinary one-token helper must bind all three whole-model
+         * ranges before dispatch. Compare its output with the exact Q2/Q3
+         * verifier so a nil MTLBuffer cannot masquerade as success. */
+        const char *saved_qmv = getenv("DS4_METAL_GLM_QMV_R1");
+        char *saved_qmv_copy = saved_qmv ? strdup(saved_qmv) : NULL;
+        ds4_gpu_tensor *one_mid = ds4_gpu_tensor_alloc(mid_bytes);
+        ds4_gpu_tensor *one_out = ds4_gpu_tensor_alloc(out_bytes);
+        int one_ok = !saved_qmv || saved_qmv_copy != NULL;
+        if (one_ok) one_ok = unsetenv("DS4_METAL_GLM_QMV_R1") == 0;
+        if (one_ok) {
+            one_ok = one_mid && one_out &&
+                ds4_gpu_glm_routed_moe_one_tensor(
+                    one_out, one_mid, model, model_size,
+                    gate_offset, up_offset, down_offset,
+                    quant_type, quant_type, quant_type,
+                    expert_bytes, row_bytes,
+                    expert_bytes, row_bytes,
+                    expert_bytes, row_bytes,
+                    DIM, DIM, DIM,
+                    selected, weights,
+                    N_TOTAL_EXPERT, N_EXPERT, 0u,
+                    x, false);
+        }
+        if (one_ok) {
+            one_ok = ds4_gpu_tensor_read(
+                one_mid, 0, multi_mid, mid_bytes) &&
+                ds4_gpu_tensor_read(one_out, 0, multi_out, out_bytes);
+        }
+        if (one_ok &&
+            (memcmp(legacy_mid, multi_mid,
+                    (size_t)per_token_mid * sizeof(float)) != 0 ||
+             memcmp(legacy_out, multi_out, (size_t)out_bytes) != 0)) {
+            fprintf(stderr, "Q%u Metal one-token mapped bind/output mismatch\n",
+                    quant_type == Q2_K_TYPE ? 2u : 3u);
+            one_ok = 0;
+        }
+        if (saved_qmv_copy) {
+            setenv("DS4_METAL_GLM_QMV_R1", saved_qmv_copy, 1);
+        } else if (!saved_qmv) {
+            unsetenv("DS4_METAL_GLM_QMV_R1");
+        }
+        free(saved_qmv_copy);
+        ds4_gpu_tensor_free(one_mid);
+        ds4_gpu_tensor_free(one_out);
+        if (!one_ok) {
+            fprintf(stderr, "Q%u Metal one-token mapped bind/output FAIL\n",
+                    quant_type == Q2_K_TYPE ? 2u : 3u);
+            ok = 0;
+        } else {
+            fprintf(stderr, "Q%u Metal one-token mapped bind/output PASS\n",
+                    quant_type == Q2_K_TYPE ? 2u : 3u);
+        }
+    }
     /* Do not let a missing multirow write inherit the legacy result and make
      * the bitwise comparison pass accidentally. */
     if (ok) {
@@ -293,7 +347,6 @@ int main(void) {
 
     int ok = ds4_gpu_init() && ds4_gpu_set_model_map(model, model_size);
     ds4_gpu_set_quality(false);
-    ds4_gpu_set_ssd_streaming(false);
     if (ok) {
         ok = run_case(model, model_size, Q2_K_TYPE,
                       q2_gate_offset, q2_up_offset, q2_down_offset,

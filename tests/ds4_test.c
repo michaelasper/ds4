@@ -295,26 +295,6 @@ static bool test_env_bool(const char *name) {
     return v && v[0] && strcmp(v, "0") != 0;
 }
 
-static uint32_t test_env_u32(const char *name) {
-    const char *v = getenv(name);
-    if (!v || !v[0]) return 0;
-    char *end = NULL;
-    unsigned long n = strtoul(v, &end, 10);
-    if (end == v) return 0;
-    return n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
-}
-
-static uint64_t test_env_gib(const char *name) {
-    const char *v = getenv(name);
-    if (!v || !v[0]) return 0;
-    char *end = NULL;
-    unsigned long long n = strtoull(v, &end, 10);
-    if (end == v || n == 0) return 0;
-    const uint64_t one_gib = 1024ull * 1024ull * 1024ull;
-    if (n > UINT64_MAX / one_gib) return UINT64_MAX;
-    return (uint64_t)n * one_gib;
-}
-
 static char *test_save_env(const char *name) {
     const char *value = getenv(name);
     if (!value) return NULL;
@@ -381,14 +361,6 @@ static ds4_engine *test_open_engine(bool quality) {
         .model_path = test_model_path(),
         .backend = test_model_backend(),
         .quality = quality,
-        .ssd_streaming = test_env_bool("DS4_TEST_SSD_STREAMING"),
-        .ssd_streaming_cold = test_env_bool("DS4_TEST_SSD_STREAMING_COLD"),
-        .ssd_streaming_cache_experts =
-            test_env_u32("DS4_TEST_SSD_STREAMING_CACHE_EXPERTS"),
-        .ssd_streaming_cache_bytes =
-            test_env_gib("DS4_TEST_SSD_STREAMING_CACHE_GB"),
-        .ssd_streaming_preload_experts =
-            test_env_u32("DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS"),
     };
     TEST_ASSERT(ds4_engine_open(&engine, &opt) == 0);
     return engine;
@@ -14575,14 +14547,6 @@ static ds4_engine *test_open_dflash_engine(const char *support_path) {
         .backend = DS4_BACKEND_CUDA,
 #endif
         .quality = false,
-        .ssd_streaming = test_env_bool("DS4_TEST_SSD_STREAMING"),
-        .ssd_streaming_cold = test_env_bool("DS4_TEST_SSD_STREAMING_COLD"),
-        .ssd_streaming_cache_experts =
-            test_env_u32("DS4_TEST_SSD_STREAMING_CACHE_EXPERTS"),
-        .ssd_streaming_cache_bytes =
-            test_env_gib("DS4_TEST_SSD_STREAMING_CACHE_GB"),
-        .ssd_streaming_preload_experts =
-            test_env_u32("DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS"),
         .dflash_path = support_path,
         .dflash_draft_tokens = 4,
         .dflash_p_min = 0.0f,
@@ -14814,10 +14778,6 @@ static void test_print_help(const char *prog) {
     puts("\nEnvironment:");
     puts("  DS4_TEST_MODEL=FILE        Model path. Default: ds4flash.gguf");
     puts("  DS4_TEST_BACKEND=cpu       Run model tests on CPU instead of Metal/CUDA.");
-    puts("  DS4_TEST_SSD_STREAMING=1   Run model tests through Metal SSD streaming.");
-    puts("  DS4_TEST_SSD_STREAMING_CACHE_GB=N  Streaming routed expert cache in GiB.");
-    puts("  DS4_TEST_SSD_STREAMING_CACHE_EXPERTS=N  Streaming routed expert cache count.");
-    puts("  DS4_TEST_SSD_STREAMING_COLD=1  Skip streaming hot expert preload.");
     puts("  DS4_METAL_GLM_QMV_R1=1  Enable resident decode-only one-row-per-SIMD GLM QMV.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK=1  Enable exact finite-domain Laguna router top-k SIMD selector.");
     puts("  DS4_METAL_LAGUNA_ROUTER_SIMD_TOPK_TRACE=1  Collect optimized/fallback selector row counters.");

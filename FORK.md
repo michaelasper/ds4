@@ -14,7 +14,7 @@ The CLI and server remain supported; DFlash remains a Laguna-specific optional
 feature for now.
 
 The following are explicitly outside the product boundary: CPU, CUDA, ROCm,
-SSD expert streaming, distributed inference, tensor parallelism, multi-GPU
+distributed inference, tensor parallelism, multi-GPU
 placement, MTP, DSpark, steering, power controls, and custom prefill. Existing
 code for those features is legacy removal material, even when it still builds.
 The `ds4_*` names are retained temporarily; renaming is deliberately deferred.
@@ -95,11 +95,16 @@ The refactor branch already:
 - retains only Laguna quality fixtures and tooling under `quality/`;
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.
+- removes SSD expert streaming, simulated-memory accounting, SSD expert-cache
+  budget controls, and partial-load compatibility; supported model weights are
+  whole-model mmap-backed while generic residency, warmup, and Q4 resident
+  paths remain available. Disk-KV persistence, including its independent disk
+  budget and eviction policy, remains supported.
 
 The private generic raw graph implementation and its public routes are now
-deleted. Low-level CUDA-oriented tensor-parallel and tier-aware helpers, SSD
-expert-streaming compatibility, legacy model helpers, and broad shared-backend
-Metal code still remain internally for later low-level cleanup; no public
+deleted. Low-level CUDA-oriented tensor-parallel and tier-aware helpers,
+legacy model helpers, and broad shared-backend Metal code still remain
+internally for later low-level cleanup; no public
 engine, session, diagnostic, imatrix, or support-model route owns them. Their
 presence is transitional and must not be interpreted as supported behavior. A
 `glm_` name on one of the six retained router/MoE Metal helpers describes
@@ -124,15 +129,17 @@ inherited implementation naming, not GLM product support.
 5. **Remove platform compatibility.** Delete CUDA/MMQ and ROCm/HIP layers and
    build targets. Remove the CPU inference/reference backend after host-side
    helpers needed by Metal diagnostics and serialisation are separated.
-6. **Enforce the storage policy.** Remove SSD streaming and its cache/planning
-   promises if whole-model mmap is the final policy. Keep only the mmap model
-   map and session/KV persistence that the supported path needs.
+6. **Enforce the storage policy.** Completed on this branch: remove SSD
+   streaming, simulated-memory, SSD expert-cache budget, and partial-load
+   promises. Keep the independent disk-KV budget and eviction policy alongside
+   the whole-model mmap map, generic residency/warmup, Q4 resident
+   paths, DFlash, and session/KV persistence needed by the supported path.
 7. **Slim Metal sources atomically.** Update Metal pipeline globals, runtime
    source loading, the Makefile source list, environment contracts, and
    callers together. Retain Laguna, DFlash, and genuinely shared kernels only
    after a call-graph check.
 8. **Extract or remove adjacent tooling.** Keep CLI/server and their focused
-   tests. Rewrite or remove DeepSeek/GLM/CUDA/ROCm/SSD/distributed fixtures,
+   tests. Rewrite or remove DeepSeek/GLM/CUDA/ROCm/distributed fixtures,
    quantisation notes, model download cases, and stale documentation. Extract
    any still-useful Laguna-only tooling before deleting umbrella tooling.
 9. **Rename last.** Apply the fixed LagoonNebula product identity and rename

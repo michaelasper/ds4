@@ -2,6 +2,7 @@
 #include "../lgn_dflash.h"
 #include "../lgn_model.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -179,6 +180,118 @@ static void test_s21_model_profile(void) {
     weights.output = &output;
     CHECK(lgn_weights_have_output_head(&weights),
           "paired output tensors form an output head");
+}
+
+static bool synthetic_tensor_add(ds4_tensor *tensors,
+                                 size_t *n_tensors,
+                                 size_t capacity,
+                                 const char *name) {
+    if (!tensors || !n_tensors || *n_tensors >= capacity || !name) {
+        return false;
+    }
+    const size_t length = strlen(name);
+    char *copy = malloc(length + 1u);
+    if (!copy) return false;
+    memcpy(copy, name, length + 1u);
+    tensors[*n_tensors].name.ptr = copy;
+    tensors[*n_tensors].name.len = length;
+    (*n_tensors)++;
+    return true;
+}
+
+static void test_whole_model_weight_bind(void) {
+    static const char *const common_suffixes[] = {
+        "attn_norm.weight",
+        "attn_q.weight",
+        "attn_k.weight",
+        "attn_v.weight",
+        "attn_gate.weight",
+        "attn_q_norm.weight",
+        "attn_k_norm.weight",
+        "attn_output.weight",
+        "ffn_norm.weight",
+    };
+    static const char *const dense_suffixes[] = {
+        "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+    };
+    static const char *const routed_suffixes[] = {
+        "ffn_gate_inp.weight", "exp_probs_b.bias",
+        "ffn_gate_exps.weight", "ffn_up_exps.weight",
+        "ffn_down_exps.weight", "ffn_gate_shexp.weight",
+        "ffn_up_shexp.weight", "ffn_down_shexp.weight",
+    };
+    const uint32_t n_layer = lgn_model_shape()->n_layer;
+    const size_t expected = 3u +
+        sizeof(common_suffixes) / sizeof(common_suffixes[0]) +
+        sizeof(dense_suffixes) / sizeof(dense_suffixes[0]) +
+        (size_t)(n_layer - 1u) *
+            (sizeof(common_suffixes) / sizeof(common_suffixes[0]) +
+             sizeof(routed_suffixes) / sizeof(routed_suffixes[0]));
+    ds4_tensor *tensors = calloc(expected, sizeof(*tensors));
+    CHECK(tensors != NULL, "whole-model bind fixture allocates tensor table");
+    if (!tensors) return;
+
+    size_t n_tensors = 0;
+    bool ok = synthetic_tensor_add(tensors, &n_tensors, expected,
+                                   "token_embd.weight") &&
+              synthetic_tensor_add(tensors, &n_tensors, expected,
+                                   "output_norm.weight") &&
+              synthetic_tensor_add(tensors, &n_tensors, expected,
+                                   "output.weight");
+    char name[96];
+    for (uint32_t il = 0; ok && il < n_layer; il++) {
+        for (size_t i = 0;
+             ok && i < sizeof(common_suffixes) / sizeof(common_suffixes[0]);
+             i++) {
+            snprintf(name, sizeof(name), "blk.%u.%s", il, common_suffixes[i]);
+            ok = synthetic_tensor_add(tensors, &n_tensors, expected, name);
+        }
+        const char *const *suffixes = il == 0u ? dense_suffixes : routed_suffixes;
+        const size_t suffix_count = il == 0u ?
+            sizeof(dense_suffixes) / sizeof(dense_suffixes[0]) :
+            sizeof(routed_suffixes) / sizeof(routed_suffixes[0]);
+        for (size_t i = 0; ok && i < suffix_count; i++) {
+            snprintf(name, sizeof(name), "blk.%u.%s", il, suffixes[i]);
+            ok = synthetic_tensor_add(tensors, &n_tensors, expected, name);
+        }
+    }
+    CHECK(ok && n_tensors == expected,
+          "whole-model bind fixture covers every executable layer tensor");
+
+    ds4_model model = {
+        .n_tensors = n_tensors,
+        .tensors = tensors,
+    };
+    ds4_weights weights;
+    memset(&weights, 0, sizeof(weights));
+    if (ok) lgn_weights_bind(&weights, &model);
+    CHECK(ok && weights.token_embd && weights.output_norm && weights.output,
+          "whole-model bind includes embeddings and output head");
+    bool all_layers_bound = ok;
+    for (uint32_t il = 0; all_layers_bound && il < n_layer; il++) {
+        const ds4_layer_weights *layer = &weights.layer[il];
+        all_layers_bound = layer->attn_norm && layer->attn_q &&
+            layer->attn_k && layer->attn_v && layer->attn_gate &&
+            layer->attn_q_norm && layer->attn_k_norm && layer->attn_output &&
+            layer->ffn_norm;
+        if (il == 0u) {
+            all_layers_bound = all_layers_bound && layer->ffn_gate &&
+                layer->ffn_up && layer->ffn_down;
+        } else {
+            all_layers_bound = all_layers_bound && layer->ffn_gate_inp &&
+                layer->ffn_exp_probs_b && layer->ffn_gate_exps &&
+                layer->ffn_up_exps && layer->ffn_down_exps &&
+                layer->ffn_gate_shexp && layer->ffn_up_shexp &&
+                layer->ffn_down_shexp;
+        }
+    }
+    CHECK(all_layers_bound,
+          "whole-model bind populates all 48 layer records");
+
+    for (size_t i = 0; i < n_tensors; i++) {
+        free((void *)tensors[i].name.ptr);
+    }
+    free(tensors);
 }
 
 static void test_model_admission(void) {
@@ -986,6 +1099,7 @@ int main(void) {
     test_ladder_formatter();
     test_s21_topology();
     test_s21_model_profile();
+    test_whole_model_weight_bind();
     test_model_admission();
     test_dflash_profile_and_binding();
     test_dflash_binding_fixture();

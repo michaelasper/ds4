@@ -49,7 +49,7 @@ DS4_TEST_DFLASH ?=
 LAGUNA_TEST_MODEL ?=
 
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
-CORE_OBJS = ds4.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o lgn_dflash_exec.o ds4_ssd.o ds4_metal.o
+CORE_OBJS = ds4.o lgn.o lgn_model.o lgn_dflash.o lgn_graph.o lgn_dflash_graph.o lgn_dflash_exec.o ds4_metal.o
 
 DS4_TEST_METAL_OBJ := ds4_metal_test_hooks.o
 DS4_TEST_DS4_OBJ := ds4_test_hooks.o
@@ -166,7 +166,7 @@ test-glm-q23-metal: tests/test_glm_q23_metal
 tests/test_sampling.o: tests/test_sampling.c ds4.h
 	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o ds4_kvstore.o rax.o ds4_ssd.o
+tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o ds4_kvstore.o rax.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_lgn.o: tests/test_lgn.c lgn.h lgn_model.h lgn_dflash.h
@@ -178,7 +178,7 @@ tests/test_lgn: tests/test_lgn.o lgn.o lgn_model.o lgn_dflash.o
 test-lgn: tests/test_lgn
 	./tests/test_lgn
 
-ds4.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+ds4.o: ds4.c ds4.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
 
 lgn.o: lgn.c lgn.h
@@ -199,28 +199,25 @@ lgn_dflash_graph.o: lgn_dflash_graph.c lgn_dflash_graph.h lgn_dflash.h lgn_model
 lgn_dflash_exec.o: lgn_dflash_exec.c lgn_dflash_exec.h lgn_dflash_graph.h lgn_dflash.h lgn_model.h ds4_gpu.h lgn.h
 	$(CC) $(CFLAGS) -c -o $@ lgn_dflash_exec.c
 
-ds4_ssd.o: ds4_ssd.c ds4_ssd.h
-	$(CC) $(CFLAGS) -c -o $@ ds4_ssd.c
-
-ds4_cli.o: ds4_cli.c ds4.h ds4_ssd.h ds4_help.h linenoise.h
+ds4_cli.o: ds4_cli.c ds4.h ds4_help.h linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_cli.c
 
 ds4_help.o: ds4_help.c ds4_help.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_help.c
 
-ds4_server.o: ds4_server.c ds4.h ds4_ssd.h ds4_help.h ds4_kvstore.h rax.h
+ds4_server.o: ds4_server.c ds4.h ds4_help.h ds4_kvstore.h rax.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_server.c
 
 ds4_bench.o: ds4_bench.c ds4.h ds4_help.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_bench.c
 
-ds4_eval.o: ds4_eval.c ds4.h ds4_ssd.h ds4_help.h
+ds4_eval.o: ds4_eval.c ds4.h ds4_help.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_eval.c
 
-ds4_kvstore.o: ds4_kvstore.c ds4_kvstore.h ds4.h ds4_ssd.h
+ds4_kvstore.o: ds4_kvstore.c ds4_kvstore.h ds4.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_kvstore.c
 
-ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_gpu.h ds4_ssd.h ds4_help.h ds4_kvstore.h rax.h lgn.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_gpu.h ds4_help.h ds4_kvstore.h rax.h lgn.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ tests/ds4_test.c
 
 rax.o: rax.c rax.h rax_malloc.h
@@ -235,7 +232,7 @@ ds4_metal.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -DDS4_TEST_HOOKS -c -o $@ ds4_metal.m
 
-ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+ds4_test_hooks.o: ds4.c ds4.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
 ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
@@ -277,11 +274,6 @@ test-metal-laguna-integration: check-metal-sources ds4 ds4-server ds4-bench ds4-
 	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" ./ds4 --metal --model "$(LAGUNA_TEST_MODEL)" --inspect
 	DS4_TEST_MODEL="$(LAGUNA_TEST_MODEL)" \
 	DS4_TEST_BACKEND=metal \
-	DS4_TEST_SSD_STREAMING= \
-	DS4_TEST_SSD_STREAMING_COLD= \
-	DS4_TEST_SSD_STREAMING_CACHE_GB= \
-	DS4_TEST_SSD_STREAMING_CACHE_EXPERTS= \
-	DS4_TEST_SSD_STREAMING_PRELOAD_EXPERTS= \
 	./tests/test_metal_session_batch
 
 dflash-verify-depth: ds4_test

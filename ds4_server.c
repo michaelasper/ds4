@@ -12188,13 +12188,11 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
 
 static void log_context_memory(ds4_backend backend, int ctx_size,
                                uint32_t prefill_chunk,
-                               bool ssd_streaming,
                                int session_count) {
     ds4_context_memory m =
-        ds4_context_memory_estimate_with_prefill_mode(backend,
-                                                      ctx_size,
-                                                      prefill_chunk,
-                                                      ssd_streaming);
+        ds4_context_memory_estimate_with_prefill(backend,
+                                                 ctx_size,
+                                                 prefill_chunk);
     server_log(DS4_LOG_DEFAULT,
                "ds4-server: context buffers %.2f MiB (ctx=%d, backend=%s, prefill_chunk=%u, raw_kv_rows=%u, compressed_kv_rows=%u)",
                (double)m.total_bytes / (1024.0 * 1024.0),
@@ -12248,9 +12246,6 @@ static bool server_option_is_unsupported(const char *arg) {
     static const char *const options[] = {
         "--cpu", "--cuda", "--rocm", "--gpu-vram", "--gpu-devices",
         "--cuda-tensor-parallel",
-        "--ssd-streaming", "--ssd-streaming-cold",
-        "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
-        "--ssd-streaming-preload-experts", "--simulate-used-memory",
         "--prefill-chunk", "--power",
         "--expert-profile",
         "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
@@ -12437,7 +12432,6 @@ int main(int argc, char **argv) {
     log_context_memory(cfg.engine.backend,
                        cfg.ctx_size,
                        ds4_engine_prefill_chunk(engine),
-                       cfg.engine.ssd_streaming,
                        slot_count);
 
     server s = {0};

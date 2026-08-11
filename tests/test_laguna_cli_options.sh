@@ -165,12 +165,6 @@ unsupported=(
     "--gpu-vram 1"
     "--gpu-devices 0"
     "--cuda-tensor-parallel"
-    "--ssd-streaming"
-    "--ssd-streaming-cold"
-    "--ssd-streaming-cache-experts 2"
-    "--ssd-streaming-full-layers 1"
-    "--ssd-streaming-preload-experts 1"
-    "--simulate-used-memory 1GB"
     "--prefill-chunk 128"
     "--power 50"
     "--expert-profile profile.json"
@@ -221,22 +215,6 @@ for spec_name in ds4 ds4-server; do
     done
 done
 
-for env_name in DS4_EXPERT_PROFILE DS4_EXPERT_HOTLIST; do
-    out="$test_tmp_dir/ds4.${env_name}.negative"
-    if env "$env_name=/tmp/laguna-profile-output" \
-        ./ds4 -m /tmp/laguna-missing-model.gguf >"$out" 2>&1; then
-        fail "ds4 accepts inert profile environment: $env_name"
-        continue
-    fi
-    if grep -Fq -- "expert profile/hotlist is unsupported" "$out" &&
-       ! grep -Eq -- "failed to open|unsupported model|architecture" "$out"; then
-        pass "ds4 rejects inert profile environment before model I/O: $env_name"
-    else
-        fail "ds4 performs model work before rejecting profile environment: $env_name"
-        sed -n '1,40p' "$out" >&2
-    fi
-done
-
 for spec_name in ds4-bench ds4-eval; do
     bin=./$spec_name
     out="$test_tmp_dir/${spec_name}.expert-profile.negative"
@@ -251,6 +229,36 @@ for spec_name in ds4-bench ds4-eval; do
         fail "$spec_name gives non-product diagnostic for --expert-profile"
         sed -n '1,40p' "$out" >&2
     fi
+done
+
+# SSD expert-streaming switches were retired with the whole-model mmap
+# contract.  They must follow the ordinary unknown-option path rather than a
+# product-specific compatibility rejection.
+retired_options=(
+    "--ssd-streaming"
+    "--ssd-streaming-cold"
+    "--ssd-streaming-cache-experts 2"
+    "--ssd-streaming-full-layers 1"
+    "--ssd-streaming-preload-experts 1"
+    "--simulate-used-memory 1GB"
+)
+for spec_name in ds4 ds4-server ds4-bench ds4-eval; do
+    bin=./$spec_name
+    for spec in "${retired_options[@]}"; do
+        read -r -a argv <<< "$spec"
+        out="$test_tmp_dir/${spec_name}.retired"
+        if "$bin" "${argv[@]}" -m /dev/null >"$out" 2>&1; then
+            fail "$spec_name accepts retired option: $spec"
+            continue
+        fi
+        if grep -Fq -- "unknown option" "$out" &&
+           ! grep -Eq -- "failed to open|unsupported model|architecture" "$out"; then
+            pass "$spec_name treats retired option as unknown: $spec"
+        else
+            fail "$spec_name gives non-unknown diagnostic for retired option: $spec"
+            sed -n '1,40p' "$out" >&2
+        fi
+    done
 done
 
 # Legacy raw diagnostics must fail during CLI parsing, before a model is

@@ -119,9 +119,6 @@ static bool cli_option_is_unsupported(const char *arg) {
     static const char *const options[] = {
         "--cpu", "--cuda", "--rocm", "--gpu-vram", "--gpu-devices",
         "--cuda-tensor-parallel",
-        "--ssd-streaming", "--ssd-streaming-cold",
-        "--ssd-streaming-cache-experts", "--ssd-streaming-full-layers",
-        "--ssd-streaming-preload-experts", "--simulate-used-memory",
         "--prefill-chunk", "--power",
         "--expert-profile",
         "--dir-steering-file", "--dir-steering-ffn", "--dir-steering-attn",
@@ -161,13 +158,11 @@ static ds4_backend default_backend(void) {
 
 static void log_context_memory(ds4_backend backend,
                                int         ctx_size,
-                               uint32_t    prefill_chunk,
-                               bool        ssd_streaming) {
+                               uint32_t    prefill_chunk) {
     ds4_context_memory m =
-        ds4_context_memory_estimate_with_prefill_mode(backend,
-                                                      ctx_size,
-                                                      prefill_chunk,
-                                                      ssd_streaming);
+        ds4_context_memory_estimate_with_prefill(backend,
+                                                 ctx_size,
+                                                 prefill_chunk);
     const uint64_t kv_bytes = m.raw_bytes + m.compressed_bytes;
     const uint64_t total_bytes = kv_bytes + m.scratch_bytes;
     const bool color = ds4_log_is_tty(stderr);
@@ -1484,8 +1479,7 @@ static int run_repl(ds4_engine *engine, cli_config *cfg) {
                 cfg->gen.ctx_size = parse_int(arg, "/ctx");
                 log_context_memory(cfg->engine.backend,
                                    cfg->gen.ctx_size,
-                                   ds4_engine_prefill_chunk(engine),
-                                   cfg->engine.ssd_streaming);
+                                   ds4_engine_prefill_chunk(engine));
                 rc = repl_chat_set_ctx(engine, &chat, cfg->gen.ctx_size);
                 if (rc != 0) {
                     linenoiseFree(line);
@@ -1737,8 +1731,7 @@ int main(int argc, char **argv) {
     if (!cfg.inspect) {
         log_context_memory(cfg.engine.backend,
                            cfg.gen.ctx_size,
-                           ds4_engine_prefill_chunk(engine),
-                           cfg.engine.ssd_streaming);
+                           ds4_engine_prefill_chunk(engine));
         cli_warn_think_max_downgraded(&cfg.gen, "--think-max");
     }
     int rc = 0;
