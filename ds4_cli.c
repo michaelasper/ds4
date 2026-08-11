@@ -46,15 +46,7 @@ typedef struct {
     int dump_logprobs_top_k;
     int decode_consistency_tokens;
     const char *perplexity_file_path;
-    const char *imatrix_dataset_path;
-    const char *imatrix_output_path;
-    int imatrix_max_prompts;
-    int imatrix_max_tokens;
     ds4_think_mode think_mode;
-    bool head_test;
-    bool metal_graph_test;
-    bool metal_graph_full_test;
-    bool metal_graph_prompt_test;
 } cli_generation_options;
 
 typedef struct {
@@ -1074,21 +1066,6 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
     build_prompt(engine, &cfg->gen, &prompt);
 
     int rc = 0;
-    if (cfg->gen.metal_graph_test) {
-        rc = ds4_engine_metal_graph_test(engine, &prompt);
-        ds4_tokens_free(&prompt);
-        return rc;
-    }
-    if (cfg->gen.metal_graph_full_test) {
-        rc = ds4_engine_metal_graph_full_test(engine, &prompt);
-        ds4_tokens_free(&prompt);
-        return rc;
-    }
-    if (cfg->gen.metal_graph_prompt_test) {
-        rc = ds4_engine_metal_graph_prompt_test(engine, &prompt, cfg->gen.ctx_size);
-        ds4_tokens_free(&prompt);
-        return rc;
-    }
     if (cfg->gen.dump_logits_path) {
         rc = run_logits_dump(engine, cfg, &prompt);
         ds4_tokens_free(&prompt);
@@ -1105,11 +1082,7 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
         return rc;
     }
 
-    const bool diagnostic = cfg->gen.dump_tokens ||
-                            cfg->gen.head_test;
-    if (cfg->gen.head_test) {
-        rc = ds4_engine_head_test(engine, &prompt);
-    }
+    const bool diagnostic = cfg->gen.dump_tokens;
     if (cfg->gen.dump_tokens) {
         ds4_engine_dump_tokens(engine, &prompt);
     }
@@ -1706,32 +1679,12 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.decode_consistency_tokens = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--perplexity-file")) {
             c.gen.perplexity_file_path = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--imatrix-dataset")) {
-            c.gen.imatrix_dataset_path = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--imatrix-out")) {
-            c.gen.imatrix_output_path = need_arg(&i, argc, argv, arg);
-            c.engine.backend = DS4_BACKEND_METAL;
-        } else if (!strcmp(arg, "--imatrix-max-prompts")) {
-            c.gen.imatrix_max_prompts = parse_int(need_arg(&i, argc, argv, arg), arg);
-        } else if (!strcmp(arg, "--imatrix-max-tokens")) {
-            c.gen.imatrix_max_tokens = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--think")) {
             c.gen.think_mode = DS4_THINK_HIGH;
         } else if (!strcmp(arg, "--think-max")) {
             c.gen.think_mode = DS4_THINK_MAX;
         } else if (!strcmp(arg, "--nothink")) {
             c.gen.think_mode = DS4_THINK_NONE;
-        } else if (!strcmp(arg, "--head-test")) {
-            c.gen.head_test = true;
-        } else if (!strcmp(arg, "--metal-graph-test")) {
-            c.gen.metal_graph_test = true;
-            c.engine.backend = DS4_BACKEND_METAL;
-        } else if (!strcmp(arg, "--metal-graph-full-test")) {
-            c.gen.metal_graph_full_test = true;
-            c.engine.backend = DS4_BACKEND_METAL;
-        } else if (!strcmp(arg, "--metal-graph-prompt-test")) {
-            c.gen.metal_graph_prompt_test = true;
-            c.engine.backend = DS4_BACKEND_METAL;
         } else if (!strcmp(arg, "--metal-graph-generate")) {
             fprintf(stderr, "ds4: --metal-graph-generate was removed; --metal is the graph path\n");
             exit(2);
@@ -1749,14 +1702,6 @@ static cli_config parse_options(int argc, char **argv) {
         }
     }
 
-    if (c.gen.imatrix_output_path && !c.gen.imatrix_dataset_path) {
-        fprintf(stderr, "ds4: --imatrix-out requires --imatrix-dataset\n");
-        exit(2);
-    }
-    if (c.gen.imatrix_dataset_path && !c.gen.imatrix_output_path) {
-        fprintf(stderr, "ds4: --imatrix-dataset requires --imatrix-out\n");
-        exit(2);
-    }
     if (c.gen.perplexity_file_path && c.gen.prompt) {
         fprintf(stderr, "ds4: --perplexity-file does not use -p/--prompt-file\n");
         exit(2);
@@ -1780,7 +1725,6 @@ int main(int argc, char **argv) {
         return rc;
     }
     cfg.engine.inspect_only = cfg.inspect;
-    cfg.engine.metal_graph_test = cfg.gen.metal_graph_test;
     cfg.engine.context_size = cfg.gen.ctx_size;
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &cfg.engine) != 0) {
@@ -1801,13 +1745,6 @@ int main(int argc, char **argv) {
     int rc = 0;
     if (cfg.inspect) {
         ds4_engine_summary(engine);
-    } else if (cfg.gen.imatrix_output_path) {
-        rc = ds4_engine_collect_imatrix(engine,
-                                        cfg.gen.imatrix_dataset_path,
-                                        cfg.gen.imatrix_output_path,
-                                        cfg.gen.ctx_size,
-                                        cfg.gen.imatrix_max_prompts,
-                                        cfg.gen.imatrix_max_tokens);
     } else if (cfg.gen.perplexity_file_path) {
         rc = run_perplexity_file(engine, &cfg);
     } else if (cfg.gen.prompt == NULL) {

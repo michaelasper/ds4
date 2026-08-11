@@ -71,6 +71,9 @@ assert_help_contract() {
         "--tensor-parallel" "--transport" "--rdma-device"
         "--rdma-gid-index" "--tensor-parallel-token-prefill"
         "--debug-hash" "--first-token-test"
+        "--imatrix-dataset" "--imatrix-out" "--imatrix-max-prompts"
+        "--imatrix-max-tokens" "--head-test" "--metal-graph-test"
+        "--metal-graph-full-test" "--metal-graph-prompt-test"
     )
     local pattern
     for pattern in "${forbidden[@]}"; do
@@ -214,6 +217,35 @@ for spec_name in ds4 ds4-server; do
             sed -n '1,40p' "$out" >&2
         fi
     done
+done
+
+# Legacy raw diagnostics must fail during CLI parsing, before a model is
+# opened. Exercise both bare switches and every argument-taking spelling with
+# an intentionally invalid model path to make an accidental dispatch obvious.
+removed_options=(
+    "--imatrix-dataset /tmp/laguna-imatrix.txt"
+    "--imatrix-out /tmp/laguna-imatrix.dat"
+    "--imatrix-max-prompts 1"
+    "--imatrix-max-tokens 1"
+    "--head-test"
+    "--metal-graph-test"
+    "--metal-graph-full-test"
+    "--metal-graph-prompt-test"
+)
+for spec in "${removed_options[@]}"; do
+    read -r -a argv <<< "$spec"
+    out="$test_tmp_dir/ds4.removed"
+    if ./ds4 "${argv[@]}" -m /dev/null >"$out" 2>&1; then
+        fail "ds4 accepts removed raw diagnostic option: $spec"
+        continue
+    fi
+    if grep -Fq -- "ds4: unknown option: ${argv[0]}" "$out" &&
+       ! grep -Eq -- "failed to open|unsupported model|architecture" "$out"; then
+        pass "ds4 rejects removed option before model work: $spec"
+    else
+        fail "ds4 dispatches removed option or gives wrong diagnostic: $spec"
+        sed -n '1,40p' "$out" >&2
+    fi
 done
 
 echo "test_laguna_cli_options: PASS=$pass_count FAIL=$fail_count"

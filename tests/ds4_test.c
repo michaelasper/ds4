@@ -1641,47 +1641,6 @@ static void test_metal_q8_decode_lifecycle_snapshot(void) {
     test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
 }
 
-/* Run alone in a fresh process so the Q8 process snapshot is still unset.
- * Both malformed selectors must fail before raw-graph memset/allocation and
- * leave the caller-owned command state untouched. */
-static void test_metal_graph_malformed_q8_admission(void) {
-    char *saved_nsg = test_save_env("DS4_METAL_Q8_MV_NSG");
-    char *saved_rows = test_save_env("DS4_METAL_Q8_MV_ROWS");
-    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_NSG", "not-a-number", 1) == 0);
-    TEST_ASSERT(setenv("DS4_METAL_Q8_MV_ROWS", "not-a-number", 1) == 0);
-    TEST_ASSERT(!ds4_gpu_commands_active());
-    TEST_ASSERT(ds4_test_raw_graph_preflight_failure_state(1) != 0);
-    TEST_ASSERT(!ds4_gpu_commands_active());
-    fprintf(stderr,
-            "ds4-test: malformed Q8 snapshot rejected before raw graph "
-            "mutation\n");
-    test_restore_env("DS4_METAL_Q8_MV_NSG", saved_nsg);
-    test_restore_env("DS4_METAL_Q8_MV_ROWS", saved_rows);
-}
-
-/* Run alone with an optional old DENSE source override. If the current source
- * has the output PSO, a deliberately invalid weight shape still exercises the
- * same preflight boundary. With the old source, the valid-shape branch proves
- * the unavailable PSO fails before graph/KV/command state changes. */
-static void test_metal_graph_output_preflight_failure(void) {
-    char *saved_output = test_save_env(
-        "DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE");
-    TEST_ASSERT(setenv("DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE", "1", 1) == 0);
-    TEST_ASSERT(ds4_gpu_init() != 0);
-    const int output_pso = ds4_gpu_matmul_f16_rms_norm_mv_preflight(
-        16384u, 4u);
-    TEST_ASSERT(!ds4_gpu_commands_active());
-    TEST_ASSERT(ds4_test_raw_graph_preflight_failure_state(
-                    output_pso == 0 ? 1 : 0) != 0);
-    TEST_ASSERT(!ds4_gpu_commands_active());
-    fprintf(stderr,
-            "ds4-test: output-head selector preflight failed cleanly "
-            "(optional_pso=%s)\n",
-            output_pso ? "available" : "unavailable");
-    ds4_gpu_cleanup();
-    test_restore_env("DS4_METAL_LAGUNA_OUTPUT_HEAD_NORM_FUSE", saved_output);
-}
-
 /* The focused selector starts in a fresh process, so use it to prove that a
  * fast-compiled Metal library cannot be certified merely by setting
  * DS4_METAL_MATH_SAFE after initialization.  The ordinary Metal suite does
@@ -14816,12 +14775,6 @@ static const ds4_test_entry test_entries[] = {
     {"--metal-short-prefill", "metal-short-prefill", "Metal ratio-4 short prefill regression", test_metal_short_prefill_ratio4, false},
     {"--metal-kernels", "metal-kernels", "isolated Metal kernel numeric regressions", test_metal_kernel_group, false},
 #if defined(__APPLE__)
-    {"--metal-graph-malformed-q8", "metal-graph-malformed-q8",
-     "malformed Q8 graph admission fails before graph/KV/command mutation",
-     test_metal_graph_malformed_q8_admission, true},
-    {"--metal-graph-output-preflight", "metal-graph-output-preflight",
-     "output-head selector/PSO failure leaves raw graph state untouched",
-     test_metal_graph_output_preflight_failure, true},
     {"--metal-laguna-q8-lmhead-screen", "metal-laguna-q8-lmhead-screen",
      "certified Laguna Q8 lm-head top-1 screen (focused opt-in)",
      test_metal_laguna_q8_lmhead_screen_focused, true},

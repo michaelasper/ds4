@@ -100,8 +100,6 @@ typedef struct {
     bool inspect_only;
     /* Server batch mode serializes execution and can share prefill scratch. */
     bool share_session_prefill_workspace;
-    bool first_token_test;
-    bool metal_graph_test;
     bool load_slice;
     uint32_t load_layer_start;
     uint32_t load_layer_end;
@@ -185,19 +183,8 @@ int ds4_engine_generate_argmax(ds4_engine *e, const ds4_tokens *prompt,
                                void *emit_ud,
                                ds4_session_progress_fn progress,
                                void *progress_ud);
-int ds4_engine_collect_imatrix(ds4_engine *e,
-                               const char *dataset_path,
-                               const char *output_path,
-                               int ctx_size,
-                               int max_prompts,
-                               int max_tokens);
 void ds4_engine_dump_tokens(ds4_engine *e, const ds4_tokens *tokens);
 int ds4_dump_text_tokenization(const char *model_path, const char *text, FILE *fp);
-int ds4_engine_head_test(ds4_engine *e, const ds4_tokens *prompt);
-int ds4_engine_first_token_test(ds4_engine *e, const ds4_tokens *prompt);
-int ds4_engine_metal_graph_test(ds4_engine *e, const ds4_tokens *prompt);
-int ds4_engine_metal_graph_full_test(ds4_engine *e, const ds4_tokens *prompt);
-int ds4_engine_metal_graph_prompt_test(ds4_engine *e, const ds4_tokens *prompt, int ctx_size);
 
 void ds4_tokens_push(ds4_tokens *tv, int token);
 void ds4_tokens_free(ds4_tokens *tv);
@@ -292,11 +279,6 @@ int ds4_test_sample_arena_lifecycle(void);
 bool ds4_test_engine_session_lifecycle(void);
 bool ds4_test_engine_close_order(void);
 bool ds4_test_engine_close_workspace_lifecycle(void);
-/* Exercise the raw-graph admission guard with an initialized sentinel graph.
- * The hook is test-only and must return without allocating or opening a
- * command batch when the caller has arranged a malformed Q8 or unavailable
- * output-head preflight. */
-int ds4_test_raw_graph_preflight_failure_state(int valid_output_shape);
 #ifndef DS4_NO_GPU
 /* Model-independent session-route contract: Laguna argmax uses the Laguna
  * evaluator and mixed raw-graph prefill is rejected before graph access. */
