@@ -160,8 +160,10 @@ const char *ds4_think_mode_name(ds4_think_mode mode);
 const char *ds4_think_max_prefix(void);
 uint32_t ds4_think_max_min_context(void);
 ds4_think_mode ds4_think_mode_for_context(ds4_think_mode mode, int ctx_size);
-/* Uses the active model shape selected by ds4_engine_open(); call after opening
- * the GGUF so Flash/Pro dimensions are known. */
+/* Estimate the Laguna target graph's base KV and scratch storage.  The
+ * optional DFlash/speculative/session allocations are not included.  A
+ * non-positive context or one beyond Laguna's trained context length returns
+ * a zeroed estimate, matching lgn_graph_alloc()'s admission policy. */
 ds4_context_memory ds4_context_memory_estimate(ds4_backend backend, int ctx_size);
 ds4_context_memory ds4_context_memory_estimate_with_prefill(
         ds4_backend backend,
@@ -276,8 +278,12 @@ int ds4_test_logprob_cache_probe(void);
 int ds4_test_sample_arena_lifecycle(void);
 bool ds4_test_engine_session_lifecycle(void);
 bool ds4_test_engine_close_order(void);
+bool ds4_test_laguna_context_memory_estimator(void);
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
 bool ds4_test_engine_close_drain_failure(void);
+#endif
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+bool ds4_test_laguna_graph_env_flag(void);
 #endif
 #ifndef DS4_NO_GPU
 /* Model-independent session-route contract: Laguna argmax uses the Laguna

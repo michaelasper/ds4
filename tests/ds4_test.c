@@ -27,11 +27,15 @@ static void test_laguna_architecture_gate(void) {
         TEST_ASSERT((int)lgn_architecture_is_supported(architecture, len) ==
                     cases[i].accepted);
     }
+    TEST_ASSERT(ds4_test_laguna_context_memory_estimator());
 }
 
 /* These selectors are backend-independent, so keep their strict parser and
  * route-boundary checks runnable in the default CPU/no-GPU test binary too. */
 static void test_laguna_selector_parser(void) {
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+    TEST_ASSERT(ds4_test_laguna_graph_env_flag());
+#endif
     TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse(NULL) == 16u);
     TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("") == 16u);
     TEST_ASSERT(ds4_gpu_q8_mv_ext_max_tokens_parse("  2 \t") == 2u);

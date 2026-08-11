@@ -178,7 +178,7 @@ tests/test_lgn: tests/test_lgn.o lgn.o lgn_model.o lgn_dflash.o
 test-lgn: tests/test_lgn
 	./tests/test_lgn
 
-ds4.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+ds4.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
 
 lgn.o: lgn.c lgn.h
@@ -235,10 +235,10 @@ ds4_metal.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 ds4_metal_test_hooks.o: ds4_metal.m ds4_gpu.h | check-metal-sources
 	$(CC) $(OBJCFLAGS) -DDS4_TEST_HOOKS -c -o $@ ds4_metal.m
 
-ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h ds4_gpu_mgpu.h
+ds4_test_hooks.o: ds4.c ds4.h ds4_ssd.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
-ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h ds4_gpu_mgpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
+ds4_cpu_test_hooks.o: ds4.c ds4.h ds4_gpu.h lgn.h lgn_model.h lgn_dflash.h lgn_graph.h lgn_dflash_graph.h lgn_dflash_exec.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -DDS4_TEST_HOOKS -c -o $@ ds4.c
 
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(TEST_CORE_OBJS) $(METAL_SOURCE_ORDER_ONLY)

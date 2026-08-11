@@ -61,18 +61,17 @@ The refactor branch already:
   shared Metal tensors, backend caches, host aliases, and model mappings in
   lifetime-safe order, including partial initialization and GPU-error paths;
 - fences Laguna session synchronization, argmax, and mixed-batch admission
-  away from the legacy GLM/raw graphs, using the serial public fallback where
-  the generic optimized prefill path does not own the Laguna graph;
-- deletes the unreachable standalone GLM/DSA graph, session, diagnostics, and
-  CLI reasoning-prefix orchestration while preserving the generic raw graph as
-  a separate, temporary deletion boundary; six GLM-named Metal router/MoE
-  helpers remain because Laguna decode, prefill, and DFlash verification still
-  call them, and the Q2/Q3 exactness fixture continues to cover that retained
-  kernel surface;
+  away from legacy GLM execution, using the serial public fallback where the
+  generic optimized prefill path does not own the Laguna graph;
+- deletes the unreachable standalone GLM/DSA graph, the private generic/raw
+  graph implementation, session diagnostics, and CLI reasoning-prefix
+  orchestration; six GLM-named Metal router/MoE helpers remain because Laguna
+  decode, prefill, and DFlash verification still call them, and the Q2/Q3
+  exactness fixture continues to cover that retained kernel surface;
 - removes the remaining public raw-graph, first-token, output-head, and
   imatrix diagnostic APIs and CLI switches. Removed switches now fail during
-  option parsing, before model I/O, so the private raw graph can be deleted
-  without leaving a crashable Laguna entry point;
+  option parsing, before model I/O, and no deleted generic-graph entry point is
+  left reachable from Laguna;
 - contracts the public engine and session runtime to the Laguna target graph
   plus optional DFlash support: generic graph workspaces, MTP/DSpark support
   loading, native/backend batch dispatch, and legacy speculative schedulers no
@@ -97,14 +96,14 @@ The refactor branch already:
 - preserves normal DSV4 session payloads, disk KV persistence, batching,
   streaming responses, tool calls, and the optional Laguna DFlash path.
 
-The separate generic raw graph, low-level CUDA-oriented tensor-parallel and
-tier-aware helpers, SSD expert streaming, legacy model helpers, and broad
-shared-backend Metal code still remain internally, but no public engine,
-session, diagnostic, imatrix, or support-model route owns that graph. Graph
-scalarization is not complete. Their presence is transitional and must not be
-interpreted as supported behavior. A `glm_` name on one of the six retained
-router/MoE Metal helpers describes inherited implementation naming, not GLM
-product support.
+The private generic raw graph implementation and its public routes are now
+deleted. Low-level CUDA-oriented tensor-parallel and tier-aware helpers, SSD
+expert-streaming compatibility, legacy model helpers, and broad shared-backend
+Metal code still remain internally for later low-level cleanup; no public
+engine, session, diagnostic, imatrix, or support-model route owns them. Their
+presence is transitional and must not be interpreted as supported behavior. A
+`glm_` name on one of the six retained router/MoE Metal helpers describes
+inherited implementation naming, not GLM product support.
 
 ## Staged deletion and extraction order
 

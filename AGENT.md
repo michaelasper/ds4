@@ -57,13 +57,13 @@ requirements.
 - `lgn_dflash_exec.c` / `lgn_dflash_exec.h`: borrowed DFlash support-map
   execution and active-batch-only six-layer injection recording; it never owns
   scheduler, target-output, rollback, or command completion state.
-- `ds4.c`: transitional tokenizer, Laguna scheduling, sessions, disk-cache
-  payload serialisation, and the still-separate but unreachable private raw
-  graph. Public session/batch/speculative routes now own only Laguna plus
-  optional DFlash; the standalone GLM/DSA graph and all public raw-graph,
-  imatrix, MTP, and DSpark orchestration are gone. Move supported Laguna code
-  into `lgn_*` modules as the remaining obsolete graph/backend paths are
-  deleted.
+- `ds4.c`: transitional tokenizer, Laguna scheduling, sessions, and disk-cache
+  payload serialisation. The unreachable private generic/raw graph
+  implementation is deleted; public session/batch/speculative routes own only
+  Laguna plus optional DFlash. The standalone GLM/DSA graph and all public
+  raw-graph, imatrix, MTP, and DSpark orchestration are gone. Move supported
+  Laguna code into `lgn_*` modules as the remaining obsolete backend and
+  low-level compatibility paths are deleted.
 - `ds4_cli.c`: command line and interactive transcript handling.
 - `ds4_server.c`: OpenAI/Anthropic-compatible HTTP API, worker queue,
   streaming, tool-call mapping, and server-side KV-cache policy.
