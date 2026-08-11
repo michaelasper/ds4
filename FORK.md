@@ -42,6 +42,9 @@ The refactor branch already:
 - enforces engine-outlives-session ownership and tears down command buffers,
   shared Metal tensors, backend caches, host aliases, and model mappings in
   lifetime-safe order, including partial initialization and GPU-error paths;
+- fences Laguna session synchronization, argmax, and mixed-batch admission
+  away from the legacy GLM/raw graphs, using the serial public fallback where
+  the generic optimized prefill path does not own the Laguna graph;
 - fixes the product name as **LagoonNebula** and the eventual repository name
   as **`lgn2`**, while deliberately postponing the mechanical identifier
   rename until unsupported implementation paths are gone;
