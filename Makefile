@@ -34,6 +34,11 @@ METAL_SOURCE_SPECS := \
 	LGN2_METAL_GLU_SOURCE=metal/glu.metal \
 	LGN2_METAL_NORM_SOURCE=metal/norm.metal \
 	LGN2_METAL_BIN_SOURCE=metal/bin.metal
+PREFIX ?= /usr/local
+DESTDIR ?=
+INSTALL ?= install
+LGN2_BINS := lgn2 lgn2-server lgn2-bench lgn2-eval
+METAL_INSTALL_DIR := $(PREFIX)/share/lgn2/metal
 LGN2_TEST_MODEL ?= lgn2.gguf
 LGN2_TEST_DFLASH ?=
 
@@ -46,7 +51,7 @@ TEST_CORE_OBJS := $(filter-out lgn2_engine.o lgn2_metal.o,$(CORE_OBJS)) $(LGN2_T
 
 METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 
-.PHONY: all help clean test test-extended test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-laguna-q23-metal dflash-verify-depth
+.PHONY: all help clean install uninstall test test-extended test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-laguna-q23-metal test-installed-resources dflash-verify-depth
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -54,6 +59,7 @@ METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 # an explicitly nonempty override is authoritative and the default is not
 # consulted, matching the fail-closed runtime override contract.
 check-metal-sources:
+	@python3 metal/generate_mxfp4_half_lut.py --check
 	@set -eu; for spec in $(METAL_SOURCE_SPECS); do \
 		env_name=$${spec%%=*}; \
 		default_path=$${spec#*=}; \
@@ -67,6 +73,29 @@ check-metal-sources:
 
 all: check-metal-sources lgn2 lgn2-server lgn2-bench lgn2-eval
 
+install: all
+	@set -eu; \
+	$(INSTALL) -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(METAL_INSTALL_DIR)"; \
+	for bin in $(LGN2_BINS); do \
+		$(INSTALL) -m 755 "$$bin" "$(DESTDIR)$(PREFIX)/bin/$$bin"; \
+	done; \
+	for spec in $(METAL_SOURCE_SPECS); do \
+		src=$${spec#*=}; \
+		$(INSTALL) -m 644 "$$src" "$(DESTDIR)$(METAL_INSTALL_DIR)/$${src##*/}"; \
+	done
+
+uninstall:
+	@set -eu; \
+	for bin in $(LGN2_BINS); do \
+		rm -f "$(DESTDIR)$(PREFIX)/bin/$$bin"; \
+	done; \
+	for spec in $(METAL_SOURCE_SPECS); do \
+		src=$${spec#*=}; \
+		rm -f "$(DESTDIR)$(METAL_INSTALL_DIR)/$${src##*/}"; \
+	done; \
+	rmdir "$(DESTDIR)$(METAL_INSTALL_DIR)" 2>/dev/null || true; \
+	rmdir "$(DESTDIR)$(PREFIX)/share/lgn2" 2>/dev/null || true
+
 help:
 	@echo "LGN2 build targets:"
 	@echo "  make              Build Metal ./lgn2, ./lgn2-server, ./lgn2-bench, and ./lgn2-eval"
@@ -74,6 +103,9 @@ help:
 	@echo "  make test-metal-laguna  Run the strict model-independent Apple Metal/Laguna suite"
 	@echo "  make test-extended  Run the extended model-independent developer suite"
 	@echo "  make test-metal-laguna-integration LGN2_TEST_MODEL=FILE  Run model-backed Laguna smoke"
+	@echo "  make test-installed-resources  Stage-install sources and test relocated lookup"
+	@echo "  make install PREFIX=DIR DESTDIR=DIR  Install binaries and runtime Metal sources"
+	@echo "  make uninstall PREFIX=DIR DESTDIR=DIR  Remove installed binaries and runtime sources"
 	@echo "  make dflash-verify-depth  Run DFlash speculative verification smoke if support GGUF is present"
 	@echo "  make clean        Remove build outputs"
 
@@ -207,6 +239,18 @@ test-metal-laguna: check-metal-sources test-lgn test-laguna-q23-metal test-lagun
 	./tests/test_sampling; \
 	LGN2_TEST_LAGUNA_STAGED_SWA_ALLOW_FALLBACK= \
 	./lgn2_test --laguna-metal-core
+
+test-installed-resources: all lgn2_test tests/test_lgn2_resource_install.sh
+	@set -eu; \
+	stage=$$(mktemp -d "$${TMPDIR:-/tmp}/lgn2-install-test.XXXXXX"); \
+	trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
+	$(MAKE) --no-print-directory install DESTDIR="$$stage" PREFIX=/usr/local; \
+	cp -p lgn2_test "$$stage/usr/local/bin/lgn2_test"; \
+	./tests/test_lgn2_resource_install.sh "$$stage/usr/local" "$$stage/usr/local/bin/lgn2_test"; \
+	rm -f "$$stage/usr/local/bin/lgn2_test"; \
+	$(MAKE) --no-print-directory uninstall DESTDIR="$$stage" PREFIX=/usr/local; \
+	for bin in $(LGN2_BINS); do test ! -e "$$stage/usr/local/bin/$$bin"; done; \
+	test ! -e "$$stage/usr/local/share/lgn2/metal"
 
 test: test-metal-laguna
 

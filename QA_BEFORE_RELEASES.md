@@ -34,6 +34,7 @@ and explicit source overrides must pass the fail-closed source check:
 
 ```zsh
 make check-metal-sources
+python3 metal/generate_mxfp4_half_lut.py --check
 ```
 
 Review compiler output. Existing SDK deprecation diagnostics must be recorded;
@@ -72,7 +73,13 @@ focused targets that cover the changed code. At minimum:
 
 ```zsh
 make test-metal-laguna
+make test-installed-resources
 ```
+
+The installability gate stages the four binaries and every runtime Metal source,
+then runs the model-independent kernel group from relocated working directories
+using both `PREFIX/bin/../share/lgn2/metal` and executable-adjacent `metal/`
+layouts before checking uninstall cleanup.
 
 Do not substitute `test-extended` for the default Laguna suite. It adds useful
 developer coverage, but it does not replace the strict source, selector, CLI,

@@ -137,8 +137,9 @@ The active MoE host/MSL ABI marker is
 `kernel_laguna_moe_abi_v2_mulmmid104_routed96_stride48`: generation 2,
 `mul_mm_id` size 104, routed-MoE size 96, and routed key/stride offset 48.
 Every host/MSL layout change must rename or bump this marker.  The strict
-checks are `make check-metal-sources`, `make test-laguna-q23-metal`, and
-`make test-metal-laguna` (also the default `make test`).  The ABI gate inside
+checks are `make check-metal-sources`, `make test-laguna-q23-metal`,
+`make test-metal-laguna`, and `make test-installed-resources` (also the default
+`make test` for the first three).  The ABI gate inside
 the latter runs `./lgn2_test --laguna-moe-abi`, whose default matrix creates a
 current source and a marker-stripped stale fixture, plus the explicit current
 source check:

@@ -48,7 +48,7 @@ fallback or compatibility alias.
 ## Prerequisites
 
 - Apple silicon running macOS with Metal support.
-- Xcode Command Line Tools, `make`, `curl`, and `shasum`.
+- Xcode Command Line Tools, `make`, Python 3.11+, `curl`, and `shasum`.
 - Enough local storage for the pinned model and any generated cache files.
 
 No memory or performance minimum is asserted here; measure the exact model and
@@ -72,8 +72,9 @@ legacy model-link names.
 
 ## Install and build
 
-The project is built from source; there is no package-manager install step. The
-source rename is staged on `refactor/laguna-metal-only`, but the GitHub
+The project is built from source, with an optional `make install` for the four
+executables and their runtime Metal sources. The source rename is staged on
+`refactor/laguna-metal-only`, but the GitHub
 repository remains `michaelasper/ds4` until the final remote rename. Clone that
 current URL and branch now; update the remote and clone URL only as part of the
 final repository operation.
@@ -88,6 +89,16 @@ make -j8
 `make` builds the four executables: `lgn2`, `lgn2-server`, `lgn2-bench`, and
 `lgn2-eval`. Run `make clean` before a clean rebuild when changing source or
 compiler settings.
+
+To stage or install the standalone runtime without installing a model:
+
+```sh
+make install PREFIX="$PWD/.local"
+make uninstall PREFIX="$PWD/.local"
+```
+
+The installed executables discover Metal sources under the corresponding
+`share/lgn2/metal` directory even when launched from another working directory.
 
 ## Pinned model download
 
@@ -270,6 +281,7 @@ git diff --check
 make clean
 make -j8 test
 make check-metal-sources
+make test-installed-resources
 make test-laguna-cli-options
 ./lgn2_test --laguna-architecture
 ./lgn2_test --laguna-selector-parser

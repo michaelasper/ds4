@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
+#include <mach-o/dyld.h>
 
 #include "lgn2.h"
 #include "lgn2_gpu.h"
@@ -3157,6 +3158,51 @@ static const char *lgn2_gpu_source =
 "\n"
 "\n";
 
+/* Return the launch path of the running executable.  Metal source lookup is
+ * intentionally based on executable location rather than process CWD so
+ * copied bundles and PREFIX installs remain relocatable. */
+static NSString *lgn2_gpu_executable_path(void) {
+    char stack_path[PATH_MAX];
+    uint32_t path_size = (uint32_t)sizeof(stack_path);
+    char *path_buffer = stack_path;
+    BOOL allocated = NO;
+
+    if (_NSGetExecutablePath(path_buffer, &path_size) != 0) {
+        path_buffer = malloc(path_size);
+        if (!path_buffer) return nil;
+        allocated = YES;
+        if (_NSGetExecutablePath(path_buffer, &path_size) != 0) {
+            free(path_buffer);
+            return nil;
+        }
+    }
+
+    NSString *executable_path = [NSString stringWithUTF8String:path_buffer];
+    if (allocated) free(path_buffer);
+    if (!executable_path) return nil;
+    return [executable_path stringByStandardizingPath];
+}
+
+/* Preserve both resource roots for symlinked launchers: a package may put
+ * resources beside the symlink, while a copied bundle commonly puts them
+ * beside the resolved executable.  The launch directory is first so the
+ * lookup remains deterministic, and duplicate roots are omitted. */
+static NSArray<NSString *> *lgn2_gpu_executable_directories(void) {
+    NSString *launch_path = lgn2_gpu_executable_path();
+    if (!launch_path) return @[];
+
+    NSMutableArray<NSString *> *directories = [NSMutableArray array];
+    NSString *launch_directory = [launch_path stringByDeletingLastPathComponent];
+    if (launch_directory) [directories addObject:launch_directory];
+
+    NSString *resolved_path = [launch_path stringByResolvingSymlinksInPath];
+    NSString *resolved_directory = [resolved_path stringByDeletingLastPathComponent];
+    if (resolved_directory && ![directories containsObject:resolved_directory]) {
+        [directories addObject:resolved_directory];
+    }
+    return directories;
+}
+
 static NSString *lgn2_gpu_full_source(void) {
     NSString *base = [NSString stringWithUTF8String:lgn2_gpu_source];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -3196,8 +3242,26 @@ static NSString *lgn2_gpu_full_source(void) {
             [paths addObject:[NSString stringWithUTF8String:override_path]];
         }
         if (!exclusive_override) {
+            /* Keep the search order stable: the caller's CWD first, then
+             * adjacent and installed roots for the launch path and (when it
+             * differs) the symlink-resolved executable path. */
             [paths addObject:spec[1]];
-            [paths addObject:[@"./" stringByAppendingString:spec[1]]];
+            for (NSString *executable_directory in
+                 lgn2_gpu_executable_directories()) {
+                NSString *adjacent_path = [executable_directory
+                    stringByAppendingPathComponent:spec[1]];
+                if (![paths containsObject:adjacent_path]) {
+                    [paths addObject:adjacent_path];
+                }
+                NSString *installed_directory = [[executable_directory
+                    stringByAppendingPathComponent:@"../share/lgn2/metal"]
+                    stringByStandardizingPath];
+                NSString *installed_path = [installed_directory
+                    stringByAppendingPathComponent:[spec[1] lastPathComponent]];
+                if (![paths containsObject:installed_path]) {
+                    [paths addObject:installed_path];
+                }
+            }
         }
 
         NSString *loaded = nil;
