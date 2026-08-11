@@ -72,7 +72,7 @@ help:
 	@echo "  make              Build Metal ./lgn2, ./lgn2-server, ./lgn2-bench, and ./lgn2-eval"
 	@echo "  make test         Build/run the model-independent Apple Metal/Laguna suite"
 	@echo "  make test-metal-laguna  Run the strict model-independent Apple Metal/Laguna suite"
-	@echo "  make test-extended  Run the extended model-dependent regression suite"
+	@echo "  make test-extended  Run the extended model-independent developer suite"
 	@echo "  make test-metal-laguna-integration LGN2_TEST_MODEL=FILE  Run model-backed Laguna smoke"
 	@echo "  make dflash-verify-depth  Run DFlash speculative verification smoke if support GGUF is present"
 	@echo "  make clean        Remove build outputs"
