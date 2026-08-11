@@ -221,13 +221,6 @@ int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset,
 int ds4_gpu_tensor_copy_f32_to_f16(ds4_gpu_tensor *dst, uint64_t dst_offset,
                                    const ds4_gpu_tensor *src, uint64_t src_offset,
                                    uint64_t count);
-int ds4_gpu_moe_handoff_pack_tensor(
-        ds4_gpu_tensor       *packed,
-        const ds4_gpu_tensor *ffn_norm,
-        const ds4_gpu_tensor *selected,
-        const ds4_gpu_tensor *weights,
-        uint32_t              n_embd,
-        uint32_t              n_expert);
 int ds4_gpu_pack_slot_rows_f32_tensor(
         ds4_gpu_tensor       *out,
         const ds4_gpu_tensor *slots,
@@ -285,8 +278,6 @@ int ds4_gpu_device_is_m5_apple_silicon(void);
 static inline int ds4_gpu_device_is_pre_m5_apple_silicon(void) { return 0; }
 static inline int ds4_gpu_device_is_m5_apple_silicon(void) { return 0; }
 #endif
-void ds4_gpu_print_memory_report(const char *label);
-
 /* =========================================================================
  * Embeddings and Indexer Helpers.
  * =========================================================================
@@ -335,50 +326,12 @@ int ds4_gpu_embed_tokens_quant_tensor(
         uint32_t                n_embd);
 
 
-int ds4_gpu_dspark_markov_argmax_tensor(ds4_gpu_tensor *out_idx,
-                                        const ds4_gpu_tensor *logits_row,
-                                        const void *model_map,
-                                        uint64_t model_size,
-                                        uint64_t w1_offset,
-                                        uint64_t w2_offset,
-                                        uint32_t prev_token,
-                                        uint32_t vocab,
-                                        uint32_t rank);
 int ds4_gpu_indexer_topk_tensor(
         ds4_gpu_tensor       *selected,
         const ds4_gpu_tensor *scores,
         uint32_t                n_comp,
         uint32_t                n_tokens,
         uint32_t                top_k);
-
-int ds4_gpu_indexer_top1_value_tensor(
-        ds4_gpu_tensor       *selected,
-        ds4_gpu_tensor       *values,
-        const ds4_gpu_tensor *scores,
-        uint32_t              n_comp,
-        uint32_t              n_tokens,
-        uint32_t              index_offset);
-
-int ds4_gpu_matmul_q8_0_top1_tensor(
-        ds4_gpu_tensor       *selected,
-        ds4_gpu_tensor       *values,
-        const void           *model_map,
-        uint64_t              model_size,
-        uint64_t              weight_offset,
-        uint64_t              in_dim,
-        uint64_t              out_dim,
-        const ds4_gpu_tensor *x,
-        uint32_t              index_offset);
-
-int ds4_gpu_set_decode_fast_attention(int enabled);
-int ds4_gpu_set_decode_score_vec4(int enabled);
-
-/* GPU argmax over n_vocab F32 logits. Writes the winning index as int32 at
- * out_idx[0]. Tie-break: lower index wins (matches host sample_argmax). */
-int ds4_gpu_argmax_tensor(
-        ds4_gpu_tensor       *out_idx,
-        const ds4_gpu_tensor *logits,
-        uint32_t                n_vocab);
 
 #ifdef __APPLE__
 /* Laguna raw-generation prototype: one threadgroup reads an F32 logit row and
@@ -448,7 +401,6 @@ int ds4_gpu_laguna_q8_lmhead_screen_tensor(
  * DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2=1; malformed values are rejected.
  * DS4_METAL_LAGUNA_Q8_LMHEAD_SCREEN_V2_FALLBACK=1 explicitly permits a v1
  * fallback when the indirect path or its pipelines are unavailable. */
-int ds4_gpu_laguna_q8_lmhead_screen_v2_available(void);
 int ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(
         const ds4_gpu_laguna_q8_lmhead_screen *screen);
 int ds4_gpu_laguna_q8_lmhead_screen_stats_v2(
@@ -627,21 +579,6 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
         const ds4_gpu_tensor *x,
         float                   clamp);
 
-int ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor(
-        ds4_gpu_tensor       *mid,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                gate_offset,
-        uint64_t                up_offset,
-        uint64_t                in_dim,
-        uint64_t                out_dim,
-        const ds4_gpu_tensor *x,
-        float                   clamp,
-        const ds4_gpu_tensor *selected,
-        const ds4_gpu_tensor *prequant,
-        uint32_t                expert_split,
-        bool                    home_rank);
-
 int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
         ds4_gpu_tensor       *mid,
         const void             *model_map,
@@ -783,17 +720,6 @@ int ds4_gpu_add_rms_norm_weight_rows_tensor(
         uint64_t                weight_offset,
         uint32_t                n,
         uint32_t                rows,
-        float                   eps);
-
-int ds4_gpu_add_rms_norm_weight_tensor(
-        ds4_gpu_tensor       *norm_out,
-        ds4_gpu_tensor       *sum_out,
-        const ds4_gpu_tensor *a,
-        const ds4_gpu_tensor *b,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                weight_offset,
-        uint32_t                n,
         float                   eps);
 
 int ds4_gpu_laguna_head_rms_norm_rope_tensor(
@@ -1322,34 +1248,6 @@ int ds4_gpu_glm_routed_moe_batch_decode_exact_q4_tensor(
         uint32_t              n_tokens,
         uint32_t              mid_token_stride);
 #endif
-
-/* Decode-island graph-capture descriptor. Metal/CPU builds stub capture out
- * and stay eager. Design ported from the Entrpi/ds4 batched-serving fork's
- * per-layer decode graph capture. The key identifies a captured island:
- * layer, island index, and the activation buffers whose addresses captured
- * kernels bake in. Backend implementations must mirror this layout
- * byte-for-byte; keep the fields in sync. */
-typedef struct ds4_decode_graph_key {
-    uint32_t il;
-    uint32_t island;    /* 0: layer top to pre-rope; 1: attn-out to layer end */
-    uint32_t variant;
-    uint32_t _pad;
-    void    *cur_hc;
-    void    *after_attn_hc;
-    void    *after_ffn_hc;
-    void    *attn_norm;
-} ds4_decode_graph_key;
-
-int  ds4_gpu_decode_graphs_supported(void);
-/* 1: replayed (island already executed; skip encoding it)
- * 0: capturing (encode the island, then call _end)
- * -1: run eagerly */
-int  ds4_gpu_decode_graph_begin(const ds4_decode_graph_key *key);
-/* 0: capture committed and launched; -1: capture failed (entry retired;
- * the caller must re-encode the island eagerly -- no work was executed). */
-int  ds4_gpu_decode_graph_end(const ds4_decode_graph_key *key);
-void ds4_gpu_decode_graph_abort(const ds4_decode_graph_key *key);
-void ds4_gpu_decode_graphs_invalidate(void);
 
 #ifdef __cplusplus
 }

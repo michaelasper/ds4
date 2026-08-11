@@ -17,7 +17,6 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
-#include <mach/mach.h>
 
 #include "ds4.h"
 #include "ds4_gpu.h"
@@ -245,13 +244,9 @@ static uintptr_t *g_tensor_live_slots;
 static size_t g_tensor_live_cap;
 static size_t g_tensor_live_count;
 static size_t g_tensor_live_tombs;
-static uint64_t g_model_wrap_count;
-static uint64_t g_model_wrap_bytes;
-static uint64_t g_model_wrap_max_bytes;
 static uint64_t g_model_buffer_cache_bytes;
 static uint64_t g_model_buffer_cache_evictions;
 static int g_model_buffer_cache_over_limit;
-static uint64_t g_model_residency_count;
 static int g_model_residency_added_to_queue;
 static int g_metal4_runtime_available;
 static int g_metal4_family_supported;
@@ -1077,7 +1072,6 @@ static void ds4_gpu_model_residency_clear(void) {
         }
     }
 #endif
-    g_model_residency_count = 0;
     g_model_residency_added_to_queue = 0;
 }
 
@@ -1120,7 +1114,6 @@ static int ds4_gpu_model_residency_request_views(void) {
             [g_queue addResidencySet:g_model_residency_set];
             g_model_residency_added_to_queue = 1;
         }
-        g_model_residency_count = g_model_view_count;
     }
 #endif
 
@@ -1259,10 +1252,6 @@ static int ds4_gpu_add_model_view_range(
         g_model_views[g_model_view_count].model_offset = page_model_offset + off;
         g_model_views[g_model_view_count].bytes = view_bytes;
         g_model_view_count++;
-
-        g_model_wrap_count++;
-        g_model_wrap_bytes += view_bytes;
-        if (view_bytes > g_model_wrap_max_bytes) g_model_wrap_max_bytes = view_bytes;
 
         if (off + view_bytes >= mapped_model_size) break;
         off += step;
@@ -3081,130 +3070,6 @@ static double ds4_gpu_mib(uint64_t bytes) {
 
 static double ds4_gpu_gib(uint64_t bytes) {
     return (double)bytes / (1024.0 * 1024.0 * 1024.0);
-}
-
-static void ds4_gpu_print_task_memory_report(void) {
-    task_vm_info_data_t info;
-    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-    const kern_return_t kr = task_info(mach_task_self(),
-                                       TASK_VM_INFO,
-                                       (task_info_t)&info,
-                                       &count);
-    if (kr != KERN_SUCCESS) return;
-
-    fprintf(stderr,
-            "ds4:   macOS task memory footprint %.2f GiB, resident %.2f GiB, virtual %.2f GiB\n",
-            ds4_gpu_gib((uint64_t)info.phys_footprint),
-            ds4_gpu_gib((uint64_t)info.resident_size),
-            ds4_gpu_gib((uint64_t)info.virtual_size));
-}
-
-void ds4_gpu_print_memory_report(const char *label) {
-    const uint64_t scratch =
-        (uint64_t)g_flash_attn_zero_mask_bytes +
-        (uint64_t)g_flash_attn_pad_bytes +
-        (uint64_t)g_flash_attn_tmp_bytes +
-        (uint64_t)g_embed_rows_bytes +
-        (uint64_t)g_router_selection_bytes +
-        (uint64_t)g_router_weight_sum_bytes +
-        (uint64_t)g_indexer_topk_bytes +
-        (uint64_t)g_moe_gate_scratch_bytes +
-        (uint64_t)g_moe_down_scratch_bytes +
-        (uint64_t)g_moe_id_map_bytes +
-        (uint64_t)g_laguna_rope_atlas_buffer_bytes +
-        (uint64_t)g_laguna_rope_support_atlas_buffer_bytes;
-
-    pthread_mutex_lock(&g_tensor_mu);
-    const uint64_t tensor_live_snap = g_tensor_alloc_live_bytes;
-    const uint64_t tensor_peak_snap = g_tensor_alloc_peak_bytes;
-    pthread_mutex_unlock(&g_tensor_mu);
-
-    const uint64_t tracked_live = tensor_live_snap;
-
-    const bool color = ds4_log_is_tty(stderr);
-    const char *green = color ? "\x1b[32m" : "";
-    const char *bright_green = color ? "\x1b[1;32m" : "";
-    const char *reset = color ? "\x1b[0m" : "";
-    fprintf(stderr,
-            "%sds4: Metal memory%s%s: runtime %.2f GiB = %s%.2f GiB tracked live%s\n",
-            green,
-            label && label[0] ? " " : "",
-            label && label[0] ? label : "",
-            ds4_gpu_gib(tensor_live_snap),
-            bright_green,
-            ds4_gpu_gib(tracked_live),
-            reset);
-    if (color) fputs(green, stderr);
-    fprintf(stderr,
-            "ds4:   runtime tensors live %.2f MiB peak %.2f MiB\n",
-            ds4_gpu_mib(tensor_live_snap),
-            ds4_gpu_mib(tensor_peak_snap));
-    ds4_gpu_print_task_memory_report();
-    fprintf(stderr,
-            "ds4:   mmap model wrapper spans %llu buffers %.2f GiB total, %.2f GiB max (not copied)\n",
-            (unsigned long long)g_model_wrap_count,
-            ds4_gpu_gib(g_model_wrap_bytes),
-            ds4_gpu_gib(g_model_wrap_max_bytes));
-    if (g_model_buffer_cache && [g_model_buffer_cache count] != 0) {
-        const uint64_t limit = ds4_gpu_exact_view_cache_limit_bytes();
-        if (limit == 0) {
-            fprintf(stderr,
-                    "ds4:   exact model view cache %lu buffers %.2f GiB unlimited, %llu evictions (not copied)\n",
-                    (unsigned long)[g_model_buffer_cache count],
-                    ds4_gpu_gib(g_model_buffer_cache_bytes),
-                    (unsigned long long)g_model_buffer_cache_evictions);
-        } else {
-            fprintf(stderr,
-                    "ds4:   exact model view cache %lu buffers %.2f GiB / %.2f GiB, %llu evictions (not copied)\n",
-                    (unsigned long)[g_model_buffer_cache count],
-                    ds4_gpu_gib(g_model_buffer_cache_bytes),
-                    ds4_gpu_gib(limit),
-                    (unsigned long long)g_model_buffer_cache_evictions);
-        }
-    }
-    fprintf(stderr,
-            "ds4:   model residency requests %llu%s\n",
-            (unsigned long long)g_model_residency_count,
-            getenv("DS4_METAL_NO_RESIDENCY") != NULL ? " (disabled)" : "");
-    fprintf(stderr,
-            "ds4:   device %s, Metal 4 runtime %s, family %s, MTL4 queue %s, tensor API %s, M5 neural accelerators %s\n",
-            g_metal_device_name[0] ? g_metal_device_name : "(unknown)",
-            g_metal4_runtime_available ? "yes" : "no",
-            g_metal4_family_supported ? "yes" : "no",
-            g_metal4_queue_supported ? "yes" : "no",
-            g_metal4_tensor_api_enabled ? "enabled" :
-                (g_metal4_tensor_api_compile_supported ? "available" : "disabled"),
-            g_metal4_m5_neural_accelerators_hint ? "likely" : "not detected");
-    fprintf(stderr,
-            "ds4:   accelerated Metal path %s%s\n",
-            ds4_gpu_mpp_available() ? "enabled" : "disabled",
-            g_quality_mode ? " by --quality" :
-                (!g_metal4_tensor_api_enabled ? " (tensor API unavailable)" : ""));
-    fprintf(stderr,
-            "ds4:   device %s, Metal 4 runtime %s, family %s, MTL4 queue %s, tensor API %s, M5 neural accelerators %s\n",
-            g_metal_device_name[0] ? g_metal_device_name : "(unknown)",
-            g_metal4_runtime_available ? "yes" : "no",
-            g_metal4_family_supported ? "yes" : "no",
-            g_metal4_queue_supported ? "yes" : "no",
-            g_metal4_tensor_api_enabled ? "enabled" :
-                (g_metal4_tensor_api_compile_supported ? "available" : "disabled"),
-            g_metal4_m5_neural_accelerators_hint ? "likely" : "not detected");
-    fprintf(stderr,
-            "ds4:   scratch %.2f MiB (zero-mask %.2f, pad %.2f, tmp %.2f, embed %.2f, router %.2f, indexer %.2f, moe %.2f, laguna-atlas %.2f, laguna-support-atlas %.2f)\n",
-            ds4_gpu_mib(scratch),
-            ds4_gpu_mib((uint64_t)g_flash_attn_zero_mask_bytes),
-            ds4_gpu_mib((uint64_t)g_flash_attn_pad_bytes),
-            ds4_gpu_mib((uint64_t)g_flash_attn_tmp_bytes),
-            ds4_gpu_mib((uint64_t)g_embed_rows_bytes),
-            ds4_gpu_mib((uint64_t)g_router_selection_bytes +
-                          (uint64_t)g_router_weight_sum_bytes),
-            ds4_gpu_mib((uint64_t)g_indexer_topk_bytes),
-            ds4_gpu_mib((uint64_t)g_moe_gate_scratch_bytes +
-                          (uint64_t)g_moe_down_scratch_bytes +
-                          (uint64_t)g_moe_id_map_bytes),
-            ds4_gpu_mib((uint64_t)g_laguna_rope_atlas_buffer_bytes),
-            ds4_gpu_mib((uint64_t)g_laguna_rope_support_atlas_buffer_bytes));
-    if (color) fputs(reset, stderr);
 }
 
 void ds4_gpu_set_quality(bool quality) {
@@ -5930,9 +5795,6 @@ void ds4_gpu_cleanup(void) {
         g_moe_gate_scratch_bytes = 0;
         g_moe_down_scratch_bytes = 0;
         g_moe_id_map_bytes = 0;
-        g_model_wrap_count = 0;
-        g_model_wrap_bytes = 0;
-        g_model_wrap_max_bytes = 0;
         g_model_buffer_cache_bytes = 0;
         g_model_buffer_cache_evictions = 0;
         g_model_buffer_cache_over_limit = 0;
@@ -6692,7 +6554,6 @@ int ds4_gpu_test_cleanup_state_is_clean(void) {
            g_model_buffer_cache_evictions == 0 &&
            g_model_buffer_cache_over_limit == 0 &&
            g_model_view_count == 0 && !g_model_residency_set &&
-           g_model_residency_count == 0 &&
            g_model_residency_added_to_queue == 0 &&
            g_model_map_ptr == NULL &&
            g_model_map_size == 0 && g_model_mapped_offset == 0 &&
@@ -6942,20 +6803,6 @@ int ds4_gpu_indexer_topk_tensor(
     }
 
     return 1;
-}
-
-int ds4_gpu_argmax_tensor(
-        ds4_gpu_tensor       *out_idx,
-        const ds4_gpu_tensor *logits,
-        uint32_t                n_vocab) {
-    if (!out_idx || !logits || n_vocab == 0) return 0;
-    if (ds4_gpu_tensor_bytes(out_idx) < sizeof(int32_t) ||
-        ds4_gpu_tensor_bytes(logits) < (uint64_t)n_vocab * sizeof(float)) {
-        fprintf(stderr, "ds4: Metal graph argmax received undersized buffers\n");
-        return 0;
-    }
-
-    return ds4_gpu_indexer_topk_tensor(out_idx, logits, n_vocab, 1, 1);
 }
 
 int ds4_gpu_laguna_argmax_available(void) {
@@ -7529,11 +7376,6 @@ ds4_gpu_laguna_q8_lmhead_screen_create(
 void ds4_gpu_laguna_q8_lmhead_screen_destroy(
         ds4_gpu_laguna_q8_lmhead_screen *screen) {
     ds4_gpu_laguna_q8_lmhead_screen_free_partial(screen);
-}
-
-int ds4_gpu_laguna_q8_lmhead_screen_v2_available(void) {
-    if (!g_initialized && !ds4_gpu_init()) return 0;
-    return ds4_gpu_laguna_q8_lmhead_screen_v2_pipelines_ready();
 }
 
 int ds4_gpu_laguna_q8_lmhead_screen_v2_enabled(
@@ -9985,21 +9827,6 @@ int ds4_gpu_add_rms_norm_weight_rows_tensor(
     }
 
     return 1;
-}
-
-int ds4_gpu_add_rms_norm_weight_tensor(
-        ds4_gpu_tensor       *norm_out,
-        ds4_gpu_tensor       *sum_out,
-        const ds4_gpu_tensor *a,
-        const ds4_gpu_tensor *b,
-        const void             *model_map,
-        uint64_t                model_size,
-        uint64_t                weight_offset,
-        uint32_t                n,
-        float                   eps) {
-    return ds4_gpu_add_rms_norm_weight_rows_tensor(
-            norm_out, sum_out, a, b, model_map, model_size,
-            weight_offset, n, 1, eps);
 }
 
 static NSUInteger ds4_gpu_align_up_ns(NSUInteger value, NSUInteger align) {

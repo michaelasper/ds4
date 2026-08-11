@@ -9947,6 +9947,35 @@ static void test_laguna_moe_abi_contract(void) {
         TEST_ASSERT(strstr(header, removed_public[i]) == NULL);
     }
 
+    /* These declarations were never backed by reachable callers.  Keep the
+     * public header and Metal implementation free of the same dead façade,
+     * including the retired decode-graph family and report-only helpers. */
+    static const char *const removed_gpu_facade[] = {
+        "ds4_gpu_moe_handoff_pack_tensor",
+        "ds4_gpu_dspark_markov_argmax_tensor",
+        "ds4_gpu_indexer_top1_value_tensor",
+        "ds4_gpu_matmul_q8_0_top1_tensor",
+        "ds4_gpu_set_decode_fast_attention",
+        "ds4_gpu_set_decode_score_vec4",
+        "ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor",
+        "ds4_decode_graph_key",
+        "ds4_gpu_decode_graph",
+        "ds4_gpu_argmax_tensor",
+        "ds4_gpu_print_memory_report",
+        "ds4_gpu_print_task_memory_report",
+        "ds4_gpu_laguna_q8_lmhead_screen_v2_available",
+        "ds4_gpu_add_rms_norm_weight_tensor",
+        "g_model_wrap_count",
+        "g_model_wrap_bytes",
+        "g_model_wrap_max_bytes",
+        "g_model_residency_count",
+    };
+    for (size_t i = 0;
+         i < sizeof(removed_gpu_facade) / sizeof(removed_gpu_facade[0]); i++) {
+        TEST_ASSERT(strstr(header, removed_gpu_facade[i]) == NULL);
+        TEST_ASSERT(strstr(host, removed_gpu_facade[i]) == NULL);
+    }
+
     /* The legacy decode-MPP, scalar-row, and half-output matmul names were
      * uncalled declaration/implementation residue.  Keep both source sides
      * free of those public names while pinning the neighboring Laguna/DFlash
