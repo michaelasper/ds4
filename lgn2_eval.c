@@ -1494,6 +1494,11 @@ static void usage(FILE *fp, const char *topic) {
 }
 
 static eval_config parse_options(int argc, char **argv) {
+    if (lgn2_help_version_requested(argc, argv)) {
+        lgn2_help_print_version(stdout, LGN2_HELP_EVAL);
+        exit(0);
+    }
+
     eval_config c = {
         .model_path = "lgn2.gguf",
         .max_tokens = 16000,

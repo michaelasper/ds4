@@ -184,6 +184,11 @@ static char *read_file(const char *path) {
 }
 
 static bench_config parse_options(int argc, char **argv) {
+    if (lgn2_help_version_requested(argc, argv)) {
+        lgn2_help_print_version(stdout, LGN2_HELP_BENCH);
+        exit(0);
+    }
+
     bench_config c = {
         .model_path = "lgn2.gguf",
         .system = "You are a helpful assistant.",

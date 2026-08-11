@@ -110,6 +110,15 @@ static const char *tool_name(lgn2_help_tool tool) {
     return "lgn2";
 }
 
+bool lgn2_help_version_requested(int argc, char *const argv[]) {
+    return argc == 2 && argv && argv[1] && strcmp(argv[1], "--version") == 0;
+}
+
+void lgn2_help_print_version(FILE *fp, lgn2_help_tool tool) {
+    fprintf(fp, "LagoonNebula %s %s (revision %s)\n",
+            tool_name(tool), LGN2_RELEASE_LABEL, LGN2_BUILD_REVISION);
+}
+
 static const char *tool_usage(lgn2_help_tool tool) {
     switch (tool) {
     case LGN2_HELP_LGN2:
@@ -424,6 +433,12 @@ static void print_default(FILE *fp, const help_colors *c, lgn2_help_tool tool) {
     }
 }
 
+static void print_identity(FILE *fp, const help_colors *c) {
+    title(fp, c, "Identity");
+    opt(fp, c, "--version", "Print LagoonNebula, this executable, the development release label, and the source revision.");
+    fputc('\n', fp);
+}
+
 void lgn2_help_print(FILE *fp, lgn2_help_tool tool, const char *topic) {
     help_colors c = help_make_colors(fp);
     if (topic && !tool_has_topic(tool, topic)) {
@@ -434,6 +449,7 @@ void lgn2_help_print(FILE *fp, lgn2_help_tool tool, const char *topic) {
     fprintf(fp, "%s%s%s\n", c.bright ? c.bright : "", tool_name(tool), c.off ? c.off : "");
     fprintf(fp, "%s\n\n", tool_summary(tool));
     fprintf(fp, "%s\n\n", tool_usage(tool));
+    print_identity(fp, &c);
 
     if (topic) print_topic(fp, &c, tool, topic);
     else {

@@ -12265,6 +12265,11 @@ static void server_reject_unsupported_option(const char *arg) {
 }
 
 static server_config parse_options(int argc, char **argv) {
+    if (lgn2_help_version_requested(argc, argv)) {
+        lgn2_help_print_version(stdout, LGN2_HELP_SERVER);
+        exit(0);
+    }
+
     server_config c = {
         .engine = {
             .model_path = "lgn2.gguf",

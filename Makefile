@@ -15,6 +15,11 @@ CFLAGS ?= -O3 -ffast-math $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c
 OBJCFLAGS ?= -O3 -ffast-math $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -fobjc-arc
 QUALITY_CFLAGS ?= -O3 $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c11
 
+# Version output is tied to the committed tree, never to dirty state or the
+# wall clock.  Source archives have no .git directory and report unknown.
+LGN2_GIT_REVISION := $(shell if test -e .git; then git rev-parse --short=12 HEAD 2>/dev/null || echo unknown; else echo unknown; fi)
+LGN2_VERSION_CFLAGS := -DLGN2_BUILD_REVISION=\"$(LGN2_GIT_REVISION)\"
+
 LDLIBS ?= -lm -pthread
 # Metal kernels are loaded from these files at runtime by lgn2_metal.m.  Keep
 # the loader's environment-name/default-path pairs explicit for the source
@@ -51,7 +56,7 @@ TEST_CORE_OBJS := $(filter-out lgn2_engine.o lgn2_metal.o,$(CORE_OBJS)) $(LGN2_T
 
 METAL_SOURCE_ORDER_ONLY := | check-metal-sources
 
-.PHONY: all help clean install uninstall test test-extended test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-laguna-q23-metal test-installed-resources dflash-verify-depth
+.PHONY: all help clean install uninstall test test-extended test-engine-lifecycle test-metal-laguna test-metal-laguna-integration test-laguna-cli-options test-lgn check-metal-sources test-metal-session-batch test-laguna-q23-metal test-installed-resources dflash-verify-depth lgn2-version-refresh
 
 # Keep this check cheap and always current: the executable contains only the
 # host-side loader, while these source files are read and compiled at runtime.
@@ -182,7 +187,14 @@ lgn2_cli.o: lgn2_cli.c lgn2.h lgn2_help.h linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ lgn2_cli.c
 
 lgn2_help.o: lgn2_help.c lgn2_help.h
-	$(CC) $(CFLAGS) -c -o $@ lgn2_help.c
+lgn2_help.o: lgn2-version-refresh
+	$(CC) $(CFLAGS) $(LGN2_VERSION_CFLAGS) -c -o $@ lgn2_help.c
+
+# This deliberately keeps the version-bearing object fresh after a later
+# commit without recompiling the rest of the tree.  The revision flag above is
+# recomputed on every make invocation, while this phony prerequisite makes the
+# changed value reach the object even when no source timestamp changed.
+lgn2-version-refresh:
 
 lgn2_server.o: lgn2_server.c lgn2.h lgn2_help.h lgn2_kvstore.h rax.h
 	$(CC) $(CFLAGS) -c -o $@ lgn2_server.c

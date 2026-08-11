@@ -30,6 +30,45 @@ contains_option() {
     fi
 }
 
+assert_version_contract() {
+    local name=$1 bin=$2 expected_revision=$3
+    local out="$test_tmp_dir/${name}.version"
+    local expected="LagoonNebula ${name} development (revision ${expected_revision})"
+
+    if "$bin" --version >"$out" 2>&1; then
+        pass "$name --version exits zero"
+    else
+        fail "$name --version exits nonzero"
+        sed -n '1,20p' "$out" >&2
+        return
+    fi
+    if test "$(wc -l <"$out" | tr -d ' ')" -eq 1 &&
+       grep -Fqx -- "$expected" "$out"; then
+        pass "$name --version identity and revision"
+    else
+        fail "$name --version identity and revision"
+        sed -n '1,20p' "$out" >&2
+    fi
+
+    out="$test_tmp_dir/${name}.version-alias"
+    if "$bin" -V >"$out" 2>&1; then
+        fail "$name rejects legacy -V alias"
+    elif grep -Fqx -- "$expected" "$out"; then
+        fail "$name rejects legacy -V alias (printed version)"
+    else
+        pass "$name rejects legacy -V alias"
+    fi
+
+    out="$test_tmp_dir/${name}.version-extra"
+    if "$bin" --version extra >"$out" 2>&1; then
+        fail "$name requires standalone --version"
+    elif grep -Fqx -- "$expected" "$out"; then
+        fail "$name requires standalone --version (printed version)"
+    else
+        pass "$name requires standalone --version"
+    fi
+}
+
 omits_token() {
     local name=$1 token=$2 file=$3
     if grep -Fq -- "$token" "$file"; then
@@ -51,6 +90,7 @@ assert_help_contract() {
     fi
 
     contains_option "$name advertises Metal" "--metal" "$out"
+    contains_option "$name advertises version" "--version" "$out"
     contains_option "$name advertises DFlash" "--dflash" "$out"
     contains_option "$name advertises DFlash draft width" "--dflash-draft" "$out"
     contains_option "$name advertises DFlash probability floor" "--dflash-p-min" "$out"
@@ -90,6 +130,57 @@ assert_help_contract() {
 
 assert_help_contract lgn2 ./lgn2
 assert_help_contract lgn2-server ./lgn2-server
+for spec_name in lgn2-bench lgn2-eval; do
+    out="$test_tmp_dir/${spec_name}.help"
+    if ./$spec_name --help >"$out" 2>&1; then
+        pass "$spec_name --help exits zero"
+        contains_option "$spec_name advertises version" "--version" "$out"
+    else
+        fail "$spec_name --help exits nonzero"
+    fi
+done
+
+git_revision=$(git rev-parse --short=12 HEAD)
+assert_version_contract lgn2 ./lgn2 "$git_revision"
+assert_version_contract lgn2-server ./lgn2-server "$git_revision"
+assert_version_contract lgn2-bench ./lgn2-bench "$git_revision"
+assert_version_contract lgn2-eval ./lgn2-eval "$git_revision"
+
+# --version is only the standalone identity query.  Do not consume it as an
+# option value, and do not let it silently override another command spelling.
+for spec_name in lgn2 lgn2-server lgn2-bench lgn2-eval; do
+    out="$test_tmp_dir/${spec_name}.version-value"
+    if ./"$spec_name" --model --version >"$out" 2>&1; then
+        fail "$spec_name does not consume --version as a model value"
+    elif grep -Eq '^LagoonNebula .* development \(revision [^)]*\)$' "$out"; then
+        fail "$spec_name does not consume --version as a model value (printed version)"
+    else
+        pass "$spec_name keeps --version as an option value"
+    fi
+done
+
+# A git archive has no .git directory.  Build the four binaries from that
+# archive and require the deterministic source-archive fallback revision.
+archive_dir="$test_tmp_dir/source-archive"
+mkdir -p "$archive_dir"
+if git archive --format=tar HEAD | tar -x -C "$archive_dir" &&
+   (cd "$archive_dir" && make -j8 lgn2 lgn2-server lgn2-bench lgn2-eval) \
+       >"$test_tmp_dir/source-archive.build" 2>&1; then
+    for spec_name in lgn2 lgn2-server lgn2-bench lgn2-eval; do
+        out="$test_tmp_dir/source-archive.${spec_name}.version"
+        if (cd "$archive_dir" && ./"$spec_name" --version) >"$out" 2>&1 &&
+           test "$(wc -l <"$out" | tr -d ' ')" -eq 1 &&
+           grep -Fqx -- "LagoonNebula ${spec_name} development (revision unknown)" "$out"; then
+            pass "source archive $spec_name reports unknown revision"
+        else
+            fail "source archive $spec_name reports unknown revision"
+            sed -n '1,20p' "$out" >&2
+        fi
+    done
+else
+    fail "source archive builds four versioned executables"
+    sed -n '1,120p' "$test_tmp_dir/source-archive.build" >&2
+fi
 
 # Public engine selection is intentionally DFlash-only in this product slice.
 # Check the linked CLI surface as well as the source-level environment contract;

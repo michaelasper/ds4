@@ -51,6 +51,19 @@ features:
 ./lgn2-eval --help all
 ```
 
+Check the uniform executable identity before release. Each command must accept
+only standalone `--version` and print `LagoonNebula`, its invoked executable
+name, the literal `development` label, and a deterministic 12-hex Git
+revision. A source archive must print `revision unknown`; `-V` must remain
+unsupported.
+
+```zsh
+./lgn2 --version
+./lgn2-server --version
+./lgn2-bench --version
+./lgn2-eval --version
+```
+
 ## 2. Model-independent tests
 
 Run the default Laguna suite from a clean build:

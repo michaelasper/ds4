@@ -90,6 +90,12 @@ make -j8
 `lgn2-eval`. Run `make clean` before a clean rebuild when changing source or
 compiler settings.
 
+Each executable accepts the standalone `--version` option. It prints the
+LagoonNebula product name, the invoked executable, the literal `development`
+release label, and the 12-hex committed Git revision. Builds from source
+archives report `unknown` for the revision; `-V` and other legacy aliases are
+not accepted.
+
 To stage or install the standalone runtime without installing a model:
 
 ```sh
