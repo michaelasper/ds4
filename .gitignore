@@ -10,6 +10,8 @@
 /gguf/
 /core
 /core.*
+/tests/test_laguna_q23_metal
+/tests/test_lgn
 /tests/test_metal_session_batch
 /tests/test_mxfp4_dot
 /tests/test_q4k_dot
