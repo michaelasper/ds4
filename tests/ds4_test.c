@@ -31,6 +31,9 @@ static void test_laguna_architecture_gate(void) {
         TEST_ASSERT((int)lgn_architecture_is_supported(architecture, len) ==
                     cases[i].accepted);
     }
+    TEST_ASSERT(ds4_engine_model_id(NULL) == 3);
+    TEST_ASSERT(ds4_engine_is_laguna(NULL));
+    TEST_ASSERT(strcmp(ds4_engine_model_name(NULL), "Laguna S 2.1") == 0);
     TEST_ASSERT(ds4_test_laguna_context_memory_estimator());
 }
 

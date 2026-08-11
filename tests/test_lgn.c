@@ -1,3 +1,6 @@
+#ifdef DS4_TEST_HOOKS
+#include "../ds4.h"
+#endif
 #include "../lgn.h"
 #include "../lgn_dflash.h"
 #include "../lgn_model.h"
@@ -150,6 +153,8 @@ static void test_s21_model_profile(void) {
           "Laguna profile selects the Laguna family");
     CHECK(shape->variant == DS4_VARIANT_LAGUNA_S21,
           "Laguna profile selects S2.1");
+    CHECK(DS4_VARIANT_LAGUNA_S21 == 3,
+          "Laguna S2.1 keeps the explicit KVC model identity 3");
     CHECK(shape->n_layer == LGN_LAYER_COUNT && shape->n_embd == 3072u,
           "Laguna profile dimensions");
     CHECK(shape->n_vocab == 100352u && shape->n_expert == 256u,
@@ -327,6 +332,198 @@ static void test_model_admission(void) {
           "Laguna model admission rejects a missing model");
 }
 
+#ifdef DS4_TEST_HOOKS
+enum {
+    TEST_LAGUNA_SUMMARY_KV_CAP = 40u,
+    TEST_LAGUNA_SUMMARY_STORAGE = 8192u,
+};
+
+typedef struct {
+    uint8_t map[TEST_LAGUNA_SUMMARY_STORAGE];
+    size_t cursor;
+    ds4_kv kv[TEST_LAGUNA_SUMMARY_KV_CAP];
+    uint32_t n_kv;
+    ds4_model model;
+} test_laguna_summary_fixture;
+
+static uint64_t test_laguna_summary_reserve(
+        test_laguna_summary_fixture *fixture, size_t bytes) {
+    if (!fixture || bytes > sizeof(fixture->map) - fixture->cursor) {
+        return UINT64_MAX;
+    }
+    const uint64_t pos = (uint64_t)fixture->cursor;
+    fixture->cursor += bytes;
+    return pos;
+}
+
+static void test_laguna_summary_add_kv(
+        test_laguna_summary_fixture *fixture,
+        const char *key, uint32_t type, uint64_t value_pos) {
+    CHECK(fixture->n_kv < TEST_LAGUNA_SUMMARY_KV_CAP,
+          "Laguna summary fixture metadata table has room");
+    if (fixture->n_kv >= TEST_LAGUNA_SUMMARY_KV_CAP) return;
+    fixture->kv[fixture->n_kv++] = (ds4_kv){
+        .key = { key, strlen(key) },
+        .type = type,
+        .value_pos = value_pos,
+    };
+}
+
+static void test_laguna_summary_add_bytes(
+        test_laguna_summary_fixture *fixture,
+        const char *key, uint32_t type, const void *value, size_t bytes) {
+    const uint64_t pos = test_laguna_summary_reserve(fixture, bytes);
+    CHECK(pos != UINT64_MAX, "Laguna summary fixture storage has room");
+    if (pos == UINT64_MAX) return;
+    memcpy(fixture->map + pos, value, bytes);
+    test_laguna_summary_add_kv(fixture, key, type, pos);
+}
+
+static void test_laguna_summary_add_u32(
+        test_laguna_summary_fixture *fixture,
+        const char *key, uint32_t value) {
+    test_laguna_summary_add_bytes(fixture, key, LGN_GGUF_VALUE_UINT32,
+                                  &value, sizeof(value));
+}
+
+static void test_laguna_summary_add_u64(
+        test_laguna_summary_fixture *fixture,
+        const char *key, uint64_t value) {
+    test_laguna_summary_add_bytes(fixture, key, LGN_GGUF_VALUE_UINT64,
+                                  &value, sizeof(value));
+}
+
+static void test_laguna_summary_add_f32(
+        test_laguna_summary_fixture *fixture,
+        const char *key, float value) {
+    test_laguna_summary_add_bytes(fixture, key, LGN_GGUF_VALUE_FLOAT32,
+                                  &value, sizeof(value));
+}
+
+static void test_laguna_summary_add_bool(
+        test_laguna_summary_fixture *fixture,
+        const char *key, bool value) {
+    const uint8_t encoded = value ? 1u : 0u;
+    test_laguna_summary_add_bytes(fixture, key, LGN_GGUF_VALUE_BOOL,
+                                  &encoded, sizeof(encoded));
+}
+
+static void test_laguna_summary_add_string(
+        test_laguna_summary_fixture *fixture,
+        const char *key, const char *value) {
+    const uint64_t length = strlen(value);
+    const size_t bytes = sizeof(length) + (size_t)length;
+    const uint64_t pos = test_laguna_summary_reserve(fixture, bytes);
+    CHECK(pos != UINT64_MAX, "Laguna summary fixture string has room");
+    if (pos == UINT64_MAX) return;
+    memcpy(fixture->map + pos, &length, sizeof(length));
+    memcpy(fixture->map + pos + sizeof(length), value, (size_t)length);
+    test_laguna_summary_add_kv(fixture, key, LGN_GGUF_VALUE_STRING, pos);
+}
+
+static void test_laguna_summary_add_u32_array(
+        test_laguna_summary_fixture *fixture,
+        const char *key, const uint32_t *values, size_t count) {
+    const uint32_t type = LGN_GGUF_VALUE_UINT32;
+    const uint64_t length = (uint64_t)count;
+    const size_t bytes = sizeof(type) + sizeof(length) +
+                         count * sizeof(values[0]);
+    const uint64_t pos = test_laguna_summary_reserve(fixture, bytes);
+    CHECK(pos != UINT64_MAX, "Laguna summary fixture array has room");
+    if (pos == UINT64_MAX) return;
+    memcpy(fixture->map + pos, &type, sizeof(type));
+    memcpy(fixture->map + pos + sizeof(type), &length, sizeof(length));
+    memcpy(fixture->map + pos + sizeof(type) + sizeof(length),
+           values, count * sizeof(values[0]));
+    test_laguna_summary_add_kv(fixture, key, LGN_GGUF_VALUE_ARRAY, pos);
+}
+
+static void test_laguna_summary_fixture_init(
+        test_laguna_summary_fixture *fixture) {
+    memset(fixture, 0, sizeof(*fixture));
+    fixture->cursor = 64u;
+    const ds4_shape *shape = lgn_model_shape();
+    uint32_t head_count[LGN_LAYER_COUNT];
+    for (uint32_t il = 0; il < LGN_LAYER_COUNT; il++) {
+        head_count[il] = lgn_layer_head_count(il);
+    }
+
+    test_laguna_summary_add_string(fixture, "general.name",
+                                   "Laguna S 2.1 summary fixture");
+    test_laguna_summary_add_string(fixture, "general.architecture", "laguna");
+    test_laguna_summary_add_u32(fixture, "laguna.block_count", shape->n_layer);
+    test_laguna_summary_add_u64(fixture, "laguna.context_length",
+                                shape->context_length);
+    test_laguna_summary_add_u32(fixture, "laguna.embedding_length",
+                                shape->n_embd);
+    test_laguna_summary_add_u32(fixture, "laguna.vocab_size", shape->n_vocab);
+    test_laguna_summary_add_u32(fixture, "laguna.feed_forward_length",
+                                shape->n_ff_dense);
+    test_laguna_summary_add_u32(fixture, "laguna.attention.head_count_kv",
+                                shape->n_head_kv);
+    test_laguna_summary_add_u32(fixture, "laguna.attention.key_length",
+                                shape->n_head_dim);
+    test_laguna_summary_add_u32(fixture, "laguna.attention.value_length",
+                                shape->n_value_dim);
+    test_laguna_summary_add_u32(fixture, "laguna.rope.dimension_count",
+                                shape->n_rot);
+    test_laguna_summary_add_u32(fixture, "laguna.rope.dimension_count_swa",
+                                shape->n_rot_swa);
+    test_laguna_summary_add_u32(fixture, "laguna.attention.sliding_window",
+                                shape->n_swa);
+    test_laguna_summary_add_u32(fixture, "laguna.expert_count",
+                                shape->n_expert);
+    test_laguna_summary_add_u32(fixture, "laguna.expert_used_count",
+                                shape->n_expert_used);
+    test_laguna_summary_add_u32(fixture,
+                                "laguna.expert_feed_forward_length",
+                                shape->n_ff_exp);
+    test_laguna_summary_add_u32(fixture,
+                                "laguna.expert_shared_feed_forward_length",
+                                shape->n_ff_shared);
+    test_laguna_summary_add_u32(fixture, "laguna.expert_gating_func", 2u);
+    test_laguna_summary_add_u32(fixture,
+                                "laguna.leading_dense_block_count",
+                                shape->n_leading_dense);
+    test_laguna_summary_add_u32_array(fixture,
+                                      "laguna.attention.head_count",
+                                      head_count,
+                                      LGN_LAYER_COUNT);
+    test_laguna_summary_add_string(fixture, "laguna.rope.scaling.type", "yarn");
+    test_laguna_summary_add_u64(fixture,
+                                "laguna.rope.scaling.original_context_length",
+                                shape->rope_orig_ctx);
+    test_laguna_summary_add_f32(fixture, "laguna.rope.freq_base",
+                                shape->rope_freq_base);
+    test_laguna_summary_add_f32(fixture, "laguna.rope.freq_base_swa",
+                                shape->rope_freq_base_swa);
+    test_laguna_summary_add_f32(fixture, "laguna.rope.scaling.factor",
+                                shape->rope_scale_factor);
+    test_laguna_summary_add_f32(fixture,
+                                "laguna.rope.scaling.yarn_attn_factor",
+                                shape->rope_yarn_attn_factor);
+    test_laguna_summary_add_f32(fixture,
+                                "laguna.rope.scaling.yarn_beta_fast",
+                                shape->rope_yarn_beta_fast);
+    test_laguna_summary_add_f32(fixture,
+                                "laguna.rope.scaling.yarn_beta_slow",
+                                shape->rope_yarn_beta_slow);
+    test_laguna_summary_add_f32(fixture,
+                                "laguna.attention.layer_norm_rms_epsilon",
+                                shape->rms_eps);
+    test_laguna_summary_add_f32(fixture, "laguna.expert_weights_scale",
+                                shape->expert_weight_scale);
+    test_laguna_summary_add_bool(fixture, "laguna.expert_weights_norm", true);
+    fixture->model = (ds4_model){
+        .version = 3u,
+        .map = fixture->map,
+        .size = sizeof(fixture->map),
+        .n_kv = fixture->n_kv,
+        .kv = fixture->kv,
+    };
+}
+#endif
+
 static void test_dflash_profile_and_binding(void) {
     const lgn_dflash_profile *profile = lgn_dflash_profile_get();
     CHECK(profile != NULL, "DFlash profile is available");
@@ -383,7 +580,7 @@ static void test_dflash_profile_and_binding(void) {
 }
 
 enum {
-    TEST_DFLASH_KV_CAP = 20u,
+    TEST_DFLASH_KV_CAP = 22u,
     TEST_DFLASH_TENSOR_CAP = 4u + LGN_DFLASH_N_LAYER * 12u,
     TEST_DFLASH_STORAGE = 8192u,
 };
@@ -523,6 +720,9 @@ static void test_dflash_bind_fixture_init(test_dflash_bind_fixture *fixture) {
     const lgn_dflash_profile *profile = lgn_dflash_profile_get();
     static const uint32_t all_one[] = { 1u, 1u, 1u, 1u, 1u, 1u };
 
+    test_dflash_add_string(fixture, "general.name",
+                           "Laguna DFlash summary fixture");
+    test_dflash_add_string(fixture, "general.architecture", "dflash");
     test_dflash_add_u32(fixture, "dflash.block_count", profile->n_layer);
     test_dflash_add_u64(fixture, "dflash.context_length",
                         profile->context_length);
@@ -722,6 +922,70 @@ static void test_dflash_binding_fixture(void) {
     CHECK(lgn_model_find_tensor(&missing_tensors, "fc.weight") == NULL,
           "tensor finder rejects a nonzero tensor count with NULL table");
 }
+
+#ifdef DS4_TEST_HOOKS
+static bool test_model_summary_capture(const ds4_model *model,
+                                       char *output,
+                                       size_t output_cap) {
+    if (!model || !output || output_cap < 2u) return false;
+    FILE *fp = tmpfile();
+    if (!fp) return false;
+    bool ok = ds4_test_model_summary(model, fp) && fflush(fp) == 0;
+    size_t length = 0;
+    if (ok) {
+        rewind(fp);
+        length = fread(output, 1u, output_cap - 1u, fp);
+        ok = !ferror(fp) && length < output_cap - 1u;
+    }
+    output[length] = '\0';
+    fclose(fp);
+    return ok;
+}
+
+static void test_production_model_summary(void) {
+    char output[4096];
+
+    test_laguna_summary_fixture target;
+    test_laguna_summary_fixture_init(&target);
+    CHECK(target.n_kv == 31u,
+          "Laguna summary fixture contains the complete target config");
+    lgn_model_validate_config(&target.model);
+    CHECK(test_model_summary_capture(&target.model, output, sizeof(output)),
+          "production summary formatter emits a Laguna target summary");
+    CHECK(strstr(output, "model: Laguna S 2.1 summary fixture\n") != NULL,
+          "Laguna production summary emits the model name");
+    CHECK(strstr(output, "arch:  laguna\n") != NULL,
+          "Laguna production summary emits the architecture");
+    CHECK(strstr(output, "layers: 48\n") != NULL &&
+              strstr(output, "train context: 262144\n") != NULL,
+          "Laguna production summary emits layers and context");
+    CHECK(strstr(output,
+                 "attention: heads=72 kv_heads=8 head_dim=128 swa=512\n") != NULL,
+          "Laguna production summary emits attention fields");
+    CHECK(strstr(output, "experts: count=256 used=10\n") != NULL,
+          "Laguna production summary emits expert fields");
+
+    test_dflash_bind_fixture support;
+    test_dflash_bind_fixture_init(&support);
+    lgn_dflash_weights weights;
+    memset(&weights, 0, sizeof(weights));
+    lgn_dflash_weights_bind(&weights, &support.model);
+    CHECK(test_model_summary_capture(&support.model, output, sizeof(output)),
+          "production summary formatter emits a DFlash support summary");
+    CHECK(strstr(output, "model: Laguna DFlash summary fixture\n") != NULL,
+          "DFlash production summary emits the model name");
+    CHECK(strstr(output, "arch:  dflash\n") != NULL,
+          "DFlash production summary emits the architecture");
+    CHECK(strstr(output, "layers: 6\n") != NULL &&
+              strstr(output, "train context: 1048576\n") != NULL,
+          "DFlash production summary emits layers and context");
+    CHECK(strstr(output,
+                 "attention: heads=72 kv_heads=8 head_dim=128 swa=512\n") != NULL,
+          "DFlash production summary emits attention fields");
+    CHECK(strstr(output, "experts:") == NULL,
+          "DFlash production summary does not borrow Laguna experts");
+}
+#endif
 
 typedef struct {
     uint32_t calls;
@@ -1103,6 +1367,9 @@ int main(void) {
     test_model_admission();
     test_dflash_profile_and_binding();
     test_dflash_binding_fixture();
+#ifdef DS4_TEST_HOOKS
+    test_production_model_summary();
+#endif
     test_dflash_shadow_map();
     test_laguna_pretokenizer();
     if (failures != 0) {

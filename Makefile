@@ -139,10 +139,10 @@ tests/test_sampling.o: tests/test_sampling.c ds4.h
 tests/test_sampling: tests/test_sampling.o ds4_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o ds4_kvstore.o rax.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/test_lgn.o: tests/test_lgn.c lgn.h lgn_model.h lgn_dflash.h
-	$(CC) $(CFLAGS) -I. -c -o $@ $<
+tests/test_lgn.o: tests/test_lgn.c ds4.h lgn.h lgn_model.h lgn_dflash.h
+	$(CC) $(CFLAGS) -DDS4_TEST_HOOKS -I. -c -o $@ $<
 
-tests/test_lgn: tests/test_lgn.o lgn.o lgn_model.o lgn_dflash.o
+tests/test_lgn: tests/test_lgn.o ds4_cpu_test_hooks.o lgn.o lgn_model.o lgn_dflash.o ds4_kvstore.o rax.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 test-lgn: tests/test_lgn

@@ -75,15 +75,17 @@ enum {
 };
 
 typedef enum {
+    /* Keep the historical numeric space stable for private callers that
+     * inspect rejected model identities.  Admission accepts Laguna only. */
     DS4_MODEL_FAMILY_DEEPSEEK4 = 0,
-    DS4_MODEL_FAMILY_GLM_DSA   = 1,
     DS4_MODEL_FAMILY_LAGUNA    = 2,
 } ds4_model_family;
 
 typedef enum {
+    /* The legacy values remain reserved so Laguna's KVC identity stays the
+     * explicit value 3 rather than being renumbered during the fork. */
     DS4_VARIANT_FLASH = 0,
     DS4_VARIANT_PRO   = 1,
-    DS4_VARIANT_GLM52 = 2,
     DS4_VARIANT_LAGUNA_S21 = 3,
 } ds4_variant;
 
@@ -135,6 +137,20 @@ typedef struct {
     uint64_t context_length;
     uint64_t rope_orig_ctx;
 } ds4_shape;
+
+/* Stable, validated fields used by the user-facing model summary.  Laguna's
+ * attention head count is layer-varying in GGUF, so n_head is the profile's
+ * maximum/SWA head count while the validator checks every layer's array. */
+typedef struct {
+    uint32_t n_layer;
+    uint64_t context_length;
+    uint32_t n_head;
+    uint32_t n_head_kv;
+    uint32_t n_head_dim;
+    uint32_t n_swa;
+    uint32_t n_expert;
+    uint32_t n_expert_used;
+} lgn_model_summary_fields;
 
 typedef struct {
     const char *ptr;
@@ -252,6 +268,9 @@ typedef struct ds4_weights {
  * owns the immutable S2.1 profile and returns it through this private accessor
  * so ds4.c can retain its existing shape macros during the transition. */
 const ds4_shape *lgn_model_shape(void);
+/* The caller must have admitted and validated the Laguna target before
+ * requesting this profile summary. */
+void lgn_model_get_validated_summary(lgn_model_summary_fields *out);
 uint32_t lgn_model_layer_head_count(uint32_t il);
 bool lgn_model_layer_is_swa(uint32_t il);
 

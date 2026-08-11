@@ -116,9 +116,9 @@ const char *ds4_engine_model_name(ds4_engine *e);
 int ds4_engine_layer_count(ds4_engine *e);
 uint32_t ds4_engine_layer_compress_ratio(ds4_engine *e, uint32_t layer);
 uint64_t ds4_engine_hidden_f32_values(ds4_engine *e);
-/* Stable id for cache compatibility.  0 is the original Flash shape, so old
- * KV files with the previously-zero reserved byte remain Flash-compatible;
- * Pro and later shapes must use nonzero ids. */
+/* Stable id for cache compatibility.  Laguna S2.1 deliberately keeps the
+ * explicit private identity value 3; KVC/KV headers continue to serialize
+ * this byte in place without changing their wire layout. */
 int ds4_engine_model_id(ds4_engine *e);
 bool ds4_engine_is_laguna(ds4_engine *e);
 const char *ds4_engine_default_system_prompt(ds4_engine *e);
@@ -218,6 +218,7 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
                       int top_k, float top_p, float min_p, uint64_t *rng);
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng);
 #ifdef DS4_TEST_HOOKS
+struct ds4_model;
 int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float temperature, int top_k,
                            float top_p, float min_p, uint64_t *rng,
@@ -237,6 +238,7 @@ int ds4_test_sample_arena_lifecycle(void);
 bool ds4_test_engine_session_lifecycle(void);
 bool ds4_test_engine_close_order(void);
 bool ds4_test_laguna_context_memory_estimator(void);
+bool ds4_test_model_summary(const struct ds4_model *model, FILE *out);
 #if defined(__APPLE__) && !defined(DS4_NO_GPU)
 bool ds4_test_engine_close_drain_failure(void);
 #endif

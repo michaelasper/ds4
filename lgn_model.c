@@ -549,6 +549,24 @@ void lgn_model_require_laguna_architecture(const ds4_model *m) {
     exit(1);
 }
 
+void lgn_model_get_validated_summary(lgn_model_summary_fields *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    /* lgn_model_validate_config() admits only this exact profile before the
+     * runtime can print a target summary.  Read the immutable profile rather
+     * than stale family-prefixed metadata from the removed model families. */
+    const ds4_shape *s = lgn_model_shape();
+    out->n_layer = s->n_layer;
+    out->context_length = s->context_length;
+    out->n_head = s->n_head;
+    out->n_head_kv = s->n_head_kv;
+    out->n_head_dim = s->n_head_dim;
+    out->n_swa = s->n_swa;
+    out->n_expert = s->n_expert;
+    out->n_expert_used = s->n_expert_used;
+}
+
 void lgn_model_validate_config(const ds4_model *m) {
     const ds4_shape *s = &LGN_SHAPE_LAGUNA_S21;
     const uint32_t n_layer = lgn_required_u32(m, "laguna.block_count");

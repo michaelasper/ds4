@@ -65,16 +65,6 @@ static uint64_t g_ds4_test_engine_model_open_calls;
 
 #define DS4_NEG_INF (-1.0e30f)
 #define DS4_POS_INF ( 1.0e30f)
-#define DS4_DEFAULT_RMS_EPS ( 1.0e-6f)
-#define DS4_DEFAULT_HC_EPS  ( 1.0e-6f)
-#define DS4_DEFAULT_SWIGLU_CLAMP_EXP    (10.0f)
-#define DS4_DEFAULT_ROPE_FREQ_BASE      (10000.0f)
-#define DS4_DEFAULT_ROPE_SCALE_FACTOR   (16.0f)
-#define DS4_DEFAULT_ROPE_YARN_BETA_FAST (32.0f)
-#define DS4_DEFAULT_ROPE_YARN_BETA_SLOW (1.0f)
-#define DS4_DEFAULT_COMPRESS_ROPE_FREQ_BASE (160000.0f)
-#define DS4_DEFAULT_ROPE_ORIG_CTX       UINT64_C(65536)
-
 static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
@@ -89,9 +79,9 @@ static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
  * Model Shape Profiles.
  * =========================================================================
  *
- * The weight binder and metadata validator select one of the known model
- * profiles below.  Arrays reserve the maximum Pro dimensions; hot loops read
- * the active profile after GGUF validation.
+ * The weight binder and metadata validator admit one Laguna S2.1 profile.
+ * Arrays retain the historical maximum dimensions so tensor/layout capacity
+ * and serialized interfaces remain unchanged during the transition.
  */
 
 enum {
@@ -120,44 +110,47 @@ enum {
 };
 
 static ds4_shape g_ds4_shape = {
-    .name = "DeepSeek V4 Flash",
-    .family = DS4_MODEL_FAMILY_DEEPSEEK4,
-    .variant = DS4_VARIANT_FLASH,
-    .n_layer = 43,
-    .n_embd = 4096,
-    .n_vocab = 129280,
-    .n_head = 64,
-    .n_head_kv = 1,
-    .n_head_dim = 512,
-    .n_value_dim = 512,
+    .name = "Laguna S 2.1",
+    .family = DS4_MODEL_FAMILY_LAGUNA,
+    .variant = DS4_VARIANT_LAGUNA_S21,
+    .n_layer = 48,
+    .n_embd = 3072,
+    .n_vocab = 100352,
+    .n_head = 72,
+    .n_head_kv = 8,
+    .n_head_dim = 128,
+    .n_value_dim = 128,
     .n_rot = 64,
-    .n_out_group = 8,
-    .n_lora_q = 1024,
-    .n_lora_o = 1024,
+    .n_out_group = 0,
+    .n_lora_q = 0,
+    .n_lora_o = 0,
     .n_expert = 256,
-    .n_expert_used = 6,
+    .n_expert_used = 10,
     .n_expert_shared = 1,
-    .n_ff_exp = 2048,
-    .n_ff_shared = 2048,
-    .n_hash_layer = 3,
-    .n_swa = 128,
-    .n_indexer_head = 64,
-    .n_indexer_head_dim = 128,
-    .n_indexer_top_k = 512,
-    .n_hc = 4,
-    .n_hc_sinkhorn_iter = 20,
-    .rms_eps = DS4_DEFAULT_RMS_EPS,
-    .hc_eps = DS4_DEFAULT_HC_EPS,
-    .expert_weight_scale = 1.5f,
-    .swiglu_clamp_exp = DS4_DEFAULT_SWIGLU_CLAMP_EXP,
-    .rope_freq_base = DS4_DEFAULT_ROPE_FREQ_BASE,
-    .rope_scale_factor = DS4_DEFAULT_ROPE_SCALE_FACTOR,
-    .rope_yarn_beta_fast = DS4_DEFAULT_ROPE_YARN_BETA_FAST,
-    .rope_yarn_beta_slow = DS4_DEFAULT_ROPE_YARN_BETA_SLOW,
+    .n_ff_exp = 1024,
+    .n_ff_shared = 1024,
+    .n_ff_dense = 12288,
+    .n_hash_layer = 0,
+    .n_swa = 512,
+    .n_indexer_head = 0,
+    .n_indexer_head_dim = 0,
+    .n_indexer_top_k = 0,
+    .n_hc = 0,
+    .n_hc_sinkhorn_iter = 0,
+    .n_leading_dense = 1,
+    .n_rot_swa = 128,
+    .rms_eps = 1.0e-6f,
+    .hc_eps = 0.0f,
+    .expert_weight_scale = 2.5f,
+    .swiglu_clamp_exp = 0.0f,
+    .rope_freq_base = 500000.0f,
+    .rope_scale_factor = 32.0f,
+    .rope_yarn_beta_fast = 32.0f,
+    .rope_yarn_beta_slow = 1.0f,
     .rope_yarn_attn_factor = 1.0f,
-    .context_length = DS4_DEFAULT_ROPE_ORIG_CTX,
-    .compress_rope_freq_base = DS4_DEFAULT_COMPRESS_ROPE_FREQ_BASE,
-    .rope_orig_ctx = DS4_DEFAULT_ROPE_ORIG_CTX,
+    .rope_freq_base_swa = 10000.0f,
+    .context_length = UINT64_C(262144),
+    .rope_orig_ctx = UINT64_C(8192),
 };
 
 static uint32_t g_ds4_compress_ratios[DS4_MAX_LAYER] = {0};
@@ -1298,9 +1291,9 @@ static void model_open(ds4_model *m, const char *path, bool metal_mapping,
     if (!metal_mapping && prefetch_cpu) model_prefetch_cpu_mapping(m);
 }
 
-static void print_size(uint64_t bytes) {
+static void print_size(FILE *out, uint64_t bytes) {
     const double gib = 1024.0 * 1024.0 * 1024.0;
-    printf("%.2f GiB", (double)bytes / gib);
+    fprintf(out, "%.2f GiB", (double)bytes / gib);
 }
 
 typedef enum {
@@ -1308,7 +1301,9 @@ typedef enum {
     DS4_SUPPORT_DFLASH,
 } ds4_support_kind;
 
-static void model_summary(const ds4_model *m) {
+static void model_summary_to(const ds4_model *m, FILE *out) {
+    if (!m || !out) return;
+
     ds4_str name = {0};
     ds4_str arch = {0};
     uint32_t layers = 0;
@@ -1317,54 +1312,36 @@ static void model_summary(const ds4_model *m) {
     uint32_t n_head_kv = 0;
     uint32_t head_dim = 0;
     uint32_t n_swa = 0;
-    uint32_t indexer_heads = 0;
-    uint32_t indexer_head_dim = 0;
-    uint32_t indexer_top_k = 0;
     uint32_t n_expert = 0;
     uint32_t n_expert_used = 0;
-    uint32_t n_expert_groups = 0;
-    uint32_t n_group_used = 0;
     uint64_t tensor_bytes = 0;
     uint64_t params = 0;
 
     model_get_string(m, "general.name", &name);
     model_get_string(m, "general.architecture", &arch);
-    if (!model_get_u32(m, "deepseek4.block_count", &layers)) {
-        model_get_u32(m, "glm-dsa.block_count", &layers);
-    }
-    if (!model_get_u64_compat(m, "deepseek4.context_length", &ctx_train)) {
-        model_get_u64_compat(m, "glm-dsa.context_length", &ctx_train);
-    }
-    if (!model_get_u32(m, "deepseek4.attention.head_count", &n_head)) {
-        model_get_u32(m, "glm-dsa.attention.head_count", &n_head);
-    }
-    if (!model_get_u32(m, "deepseek4.attention.head_count_kv", &n_head_kv)) {
-        model_get_u32(m, "glm-dsa.attention.head_count_kv", &n_head_kv);
-    }
-    if (!model_get_u32(m, "deepseek4.attention.key_length", &head_dim)) {
-        model_get_u32(m, "glm-dsa.attention.key_length", &head_dim);
-    }
-    model_get_u32(m, "deepseek4.attention.sliding_window", &n_swa);
-    if (!model_get_u32(m, "deepseek4.attention.indexer.head_count", &indexer_heads)) {
-        model_get_u32(m, "glm-dsa.attention.indexer.head_count", &indexer_heads);
-    }
-    if (!model_get_u32(m, "deepseek4.attention.indexer.key_length", &indexer_head_dim)) {
-        model_get_u32(m, "glm-dsa.attention.indexer.key_length", &indexer_head_dim);
-    }
-    if (!model_get_u32(m, "deepseek4.attention.indexer.top_k", &indexer_top_k)) {
-        model_get_u32(m, "glm-dsa.attention.indexer.top_k", &indexer_top_k);
-    }
-    if (!model_get_u32(m, "deepseek4.expert_count", &n_expert)) {
-        model_get_u32(m, "glm-dsa.expert_count", &n_expert);
-    }
-    if (!model_get_u32(m, "deepseek4.expert_used_count", &n_expert_used)) {
-        model_get_u32(m, "glm-dsa.expert_used_count", &n_expert_used);
-    }
-    if (!model_get_u32(m, "deepseek4.expert_group_count", &n_expert_groups)) {
-        model_get_u32(m, "glm-dsa.expert_group_count", &n_expert_groups);
-    }
-    if (!model_get_u32(m, "deepseek4.expert_group_used_count", &n_group_used)) {
-        model_get_u32(m, "glm-dsa.expert_group_used_count", &n_group_used);
+    lgn_model_summary_fields laguna = {0};
+    if (lgn_model_is_laguna(m, NULL)) {
+        /* The production target has already passed config validation before
+         * its summary is printed.  DFlash support models take the metadata
+         * branch below and must not borrow the target profile. */
+        lgn_model_get_validated_summary(&laguna);
+        layers = laguna.n_layer;
+        ctx_train = laguna.context_length;
+        n_head = laguna.n_head;
+        n_head_kv = laguna.n_head_kv;
+        head_dim = laguna.n_head_dim;
+        n_swa = laguna.n_swa;
+        n_expert = laguna.n_expert;
+        n_expert_used = laguna.n_expert_used;
+    } else if (ds4_streq(arch, "dflash")) {
+        /* DFlash support models are summarized from their stable metadata;
+         * they are not target Laguna profiles and must not borrow its shape. */
+        model_get_u32(m, "dflash.block_count", &layers);
+        model_get_u64_compat(m, "dflash.context_length", &ctx_train);
+        model_get_u32(m, "dflash.attention.head_count", &n_head);
+        model_get_u32(m, "dflash.attention.head_count_kv", &n_head_kv);
+        model_get_u32(m, "dflash.attention.key_length", &head_dim);
+        model_get_u32(m, "dflash.attention.sliding_window", &n_swa);
     }
 
     for (uint64_t i = 0; i < m->n_tensors; i++) {
@@ -1372,33 +1349,28 @@ static void model_summary(const ds4_model *m) {
         params += m->tensors[i].elements;
     }
 
-    printf("model: %.*s\n", (int)name.len, name.ptr);
-    printf("arch:  %.*s\n", (int)arch.len, arch.ptr);
-    printf("gguf:  v%u, %" PRIu64 " metadata keys, %" PRIu64 " tensors\n",
+    fprintf(out, "model: %.*s\n", (int)name.len, name.ptr);
+    fprintf(out, "arch:  %.*s\n", (int)arch.len, arch.ptr);
+    fprintf(out, "gguf:  v%u, %" PRIu64 " metadata keys, %" PRIu64 " tensors\n",
         m->version, m->n_kv, m->n_tensors);
-    if (layers) printf("layers: %u\n", layers);
-    if (ctx_train) printf("train context: %" PRIu64 "\n", ctx_train);
+    if (layers) fprintf(out, "layers: %u\n", layers);
+    if (ctx_train) fprintf(out, "train context: %" PRIu64 "\n", ctx_train);
     if (n_head || n_head_kv || head_dim || n_swa) {
-        printf("attention: heads=%u kv_heads=%u head_dim=%u swa=%u\n",
+        fprintf(out, "attention: heads=%u kv_heads=%u head_dim=%u swa=%u\n",
                n_head, n_head_kv, head_dim, n_swa);
     }
-    if (indexer_heads || indexer_head_dim || indexer_top_k) {
-        printf("indexer: heads=%u head_dim=%u top_k=%u\n",
-               indexer_heads, indexer_head_dim, indexer_top_k);
+    if (n_expert || n_expert_used) {
+        fprintf(out, "experts: count=%u used=%u\n", n_expert, n_expert_used);
     }
-    if (n_expert || n_expert_used || n_expert_groups || n_group_used) {
-        printf("experts: count=%u used=%u groups=%u groups_used=%u\n",
-               n_expert, n_expert_used, n_expert_groups, n_group_used);
-    }
-    printf("file size: ");
-    print_size(m->size);
-    printf("\n");
-    printf("tensor bytes described by GGUF: ");
-    print_size(tensor_bytes);
-    printf("\n");
-    printf("logical parameters: %.2f B\n", (double)params / 1000000000.0);
+    fprintf(out, "file size: ");
+    print_size(out, m->size);
+    fprintf(out, "\n");
+    fprintf(out, "tensor bytes described by GGUF: ");
+    print_size(out, tensor_bytes);
+    fprintf(out, "\n");
+    fprintf(out, "logical parameters: %.2f B\n", (double)params / 1000000000.0);
 
-    printf("tensor types:\n");
+    fprintf(out, "tensor types:\n");
     for (uint32_t type = 0; type < sizeof(gguf_types)/sizeof(gguf_types[0]); type++) {
         uint64_t count = 0;
         uint64_t bytes = 0;
@@ -1409,13 +1381,25 @@ static void model_summary(const ds4_model *m) {
             }
         }
         if (count != 0) {
-            printf("  %-8s %5" PRIu64 " tensors, ", tensor_type_name(type), count);
-            print_size(bytes);
-            printf("\n");
+            fprintf(out, "  %-8s %5" PRIu64 " tensors, ", tensor_type_name(type), count);
+            print_size(out, bytes);
+            fprintf(out, "\n");
         }
     }
 
 }
+
+static void model_summary(const ds4_model *m) {
+    model_summary_to(m, stdout);
+}
+
+#ifdef DS4_TEST_HOOKS
+bool ds4_test_model_summary(const struct ds4_model *model, FILE *out) {
+    if (!model || !out) return false;
+    model_summary_to(model, out);
+    return ferror(out) == 0;
+}
+#endif
 
 
 static const char *support_kind_name(ds4_support_kind kind) {
