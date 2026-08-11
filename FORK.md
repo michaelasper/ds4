@@ -47,6 +47,11 @@ The refactor branch already:
   feature/draft/KV allocation lifecycle in the private `lgn_dflash_graph.c` /
   `lgn_dflash_graph.h` module while command scheduling and target capture stay
   in `ds4.c`;
+- makes DFlash speculative command ownership explicit: the scheduler owns the
+  snapshot, draft, verifier, rollback, and terminal command boundaries;
+  submitted snapshots and accepted-prefix restores must complete successfully
+  before checkpoint or DFlash state can be certified, and failures quarantine
+  the session instead of restoring from untrusted backup data;
 - enforces engine-outlives-session ownership and tears down command buffers,
   shared Metal tensors, backend caches, host aliases, and model mappings in
   lifetime-safe order, including partial initialization and GPU-error paths;
